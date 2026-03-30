@@ -1,0 +1,8 @@
+[package]
+name = "ngos-platform-host-runtime"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kernel-core = { package = "ngos-kernel-core", path = "../kernel-core" }
+platform-hal = { package = "ngos-platform-hal", path = "../platform-hal" }

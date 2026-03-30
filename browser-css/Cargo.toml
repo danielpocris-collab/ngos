@@ -1,0 +1,11 @@
+[package]
+name = "browser-css"
+version.workspace = true
+edition.workspace = true
+license = "Proprietary"
+description = "NGOS Browser - CSS parser (100% proprietary, no external deps)"
+
+[dependencies]
+browser-core = { path = "../browser-core" }
+browser-dom = { path = "../browser-dom" }
+# Zero external dependencies - pure proprietary code

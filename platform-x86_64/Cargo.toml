@@ -1,0 +1,9 @@
+[package]
+name = "ngos-platform-x86_64"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+limine = "0.5.0"
+ngos-user-abi = { path = "../user-abi" }
+platform-hal = { package = "ngos-platform-hal", path = "../platform-hal" }

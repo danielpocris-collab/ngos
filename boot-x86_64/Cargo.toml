@@ -1,0 +1,20 @@
+[package]
+name = "ngos-boot-x86_64"
+version.workspace = true
+edition.workspace = true
+build = "build.rs"
+
+[dependencies]
+limine = "0.5.0"
+ngos-user-abi = { path = "../user-abi" }
+platform-hal = { package = "ngos-platform-hal", path = "../platform-hal" }
+platform-x86_64 = { package = "ngos-platform-x86_64", path = "../platform-x86_64" }
+
+[target.'cfg(not(target_os = "none"))'.dependencies]
+kernel-core = { package = "ngos-kernel-core", path = "../kernel-core" }
+
+[[bin]]
+name = "ngos-boot-x86_64"
+path = "src/main.rs"
+test = false
+bench = false

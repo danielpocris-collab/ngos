@@ -1,0 +1,12 @@
+[package]
+name = "browser-paint"
+version.workspace = true
+edition.workspace = true
+license = "Proprietary"
+description = "NGOS Browser - Rendering (proprietary)"
+
+[dependencies]
+browser-core = { path = "../browser-core" }
+browser-dom = { path = "../browser-dom" }
+browser-layout = { path = "../browser-layout" }
+# Fără webrender (MPL-2.0) - folosim FrameScript NGOS

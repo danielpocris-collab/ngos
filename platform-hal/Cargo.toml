@@ -1,0 +1,6 @@
+[package]
+name = "ngos-platform-hal"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

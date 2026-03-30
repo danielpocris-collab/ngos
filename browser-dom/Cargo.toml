@@ -1,0 +1,11 @@
+[package]
+name = "browser-dom"
+version.workspace = true
+edition.workspace = true
+license = "Proprietary"
+description = "NGOS Browser - DOM implementation (proprietary)"
+
+[dependencies]
+browser-core = { path = "../browser-core" }
+# Fără string_cache (MIT) dacă vrem 100% proprietar
+# Folosim std::collections pentru atomi

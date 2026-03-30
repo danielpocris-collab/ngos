@@ -1,0 +1,13 @@
+[package]
+name = "ngos-host-runtime"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ngos-boot-x86_64 = { path = "../boot-x86_64" }
+kernel-core = { package = "ngos-kernel-core", path = "../kernel-core" }
+ngos-platform-hal = { path = "../platform-hal" }
+ngos-platform-x86_64 = { path = "../platform-x86_64" }
+user-abi = { package = "ngos-user-abi", path = "../user-abi" }
+user-runtime = { package = "ngos-user-runtime", path = "../user-runtime" }
+userland-native = { package = "ngos-userland-native", path = "../userland-native" }

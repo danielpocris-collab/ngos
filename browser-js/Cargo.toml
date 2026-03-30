@@ -1,0 +1,11 @@
+[package]
+name = "browser-js"
+version.workspace = true
+edition.workspace = true
+license = "Proprietary"
+description = "NGOS Browser - JavaScript engine (simple AST interpreter)"
+
+[dependencies]
+browser-core = { path = "../browser-core" }
+browser-dom = { path = "../browser-dom" }
+# Zero external dependencies - simple JS interpreter

@@ -1,0 +1,13 @@
+[package]
+name = "ngos-user-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ngos-user-abi = { path = "../user-abi" }
+ngos-semantic-runtime = { path = "../semantic-runtime" }
+
+[lib]
+path = "src/lib.rs"
+doctest = false

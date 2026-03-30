@@ -1,0 +1,13 @@
+[package]
+name = "browser-layout"
+version.workspace = true
+edition.workspace = true
+license = "Proprietary"
+description = "NGOS Browser - Layout engine (proprietary)"
+
+[dependencies]
+browser-core = { path = "../browser-core" }
+browser-dom = { path = "../browser-dom" }
+browser-css = { path = "../browser-css" }
+# Fără euclid - scriem propriile tipuri (mai simplu)
+# Fără servo-layout (MPL-2.0) - scriem noi original

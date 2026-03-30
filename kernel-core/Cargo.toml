@@ -1,0 +1,17 @@
+[package]
+name = "ngos-kernel-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ngos-core-util = { path = "../ngos-core-util" }
+ngos-user-abi = { path = "../user-abi" }
+platform-hal = { package = "ngos-platform-hal", path = "../platform-hal" }
+
+[dev-dependencies]
+criterion = "0.5"
+platform-x86_64 = { package = "ngos-platform-x86_64", path = "../platform-x86_64" }
+
+[[bench]]
+name = "decision_tracing"
+harness = false

@@ -1,0 +1,36 @@
+[package]
+name = "ngos-userland-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[dependencies]
+ngos-audio-translate = { path = "../audio-translate" }
+ngos-game-compat-runtime = { path = "../game-compat-runtime" }
+ngos-gfx-translate = { path = "../gfx-translate" }
+ngos-input-translate = { path = "../input-translate" }
+ngos-user-abi = { path = "../user-abi" }
+ngos-semantic-runtime = { path = "../semantic-runtime" }
+ngos-user-runtime = { path = "../user-runtime" }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "ngos-userland-native"
+path = "src/main.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "game-demo"
+path = "src/game_demo.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "aura-browser"
+path = "src/aura_browser.rs"
+test = false
+bench = false

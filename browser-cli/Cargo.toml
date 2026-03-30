@@ -1,0 +1,22 @@
+[package]
+name = "browser-cli"
+version.workspace = true
+edition.workspace = true
+license = "Proprietary"
+description = "NGOS Browser - CLI binary"
+
+[[bin]]
+name = "ngos-browser"
+path = "src/main.rs"
+
+[dependencies]
+browser-core = { path = "../browser-core" }
+browser-http = { path = "../browser-http" }
+browser-tls = { path = "../browser-tls" }
+browser-html = { path = "../browser-html" }
+browser-css = { path = "../browser-css" }
+browser-dom = { path = "../browser-dom" }
+browser-layout = { path = "../browser-layout" }
+browser-paint = { path = "../browser-paint" }
+browser-ui = { path = "../browser-ui" }
+browser-js = { path = "../browser-js" }

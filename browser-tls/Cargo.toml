@@ -1,0 +1,13 @@
+[package]
+name = "browser-tls"
+version.workspace = true
+edition.workspace = true
+license = "Proprietary"
+description = "NGOS Browser - HTTPS/TLS support (uses rustls)"
+
+[dependencies]
+browser-core = { path = "../browser-core" }
+browser-http = { path = "../browser-http" }
+# rustls - Apache-2.0 / MIT (compatible with proprietary)
+rustls = "0.23"
+webpki-roots = "0.26"

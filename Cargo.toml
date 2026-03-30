@@ -1,0 +1,43 @@
+[workspace]
+members = [
+    "audio-translate",
+    "boot-x86_64",
+    "game-compat-runtime",
+    "gfx-translate",
+    "host-runtime",
+    "input-translate",
+    "kernel-core",
+    "ngos-core-util",
+    "user-abi",
+    "user-runtime",
+    "userland-native",
+    "platform-hal",
+    "semantic-runtime",
+    "platform-x86_64",
+    "platform-host-runtime",
+    "tooling/command-runner",
+    # NGOS Browser - Proprietary Web Browser
+    "browser-core",
+    "browser-http",
+    "browser-tls",
+    "browser-html",
+    "browser-dom",
+    "browser-css",
+    "browser-layout",
+    "browser-paint",
+    "browser-js",
+    "browser-webapi",
+    "browser-ui",
+    "browser-cli",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "Proprietary"
+version = "0.1.0"
+
+[workspace.metadata.ngos]
+product_name = "Next Gen OS"
+codename = "ngos"
+workspace_name = "next-gen-os"

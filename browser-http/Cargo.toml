@@ -1,0 +1,10 @@
+[package]
+name = "browser-http"
+version.workspace = true
+edition.workspace = true
+license = "Proprietary"
+description = "NGOS Browser - HTTP client (100% proprietary, no external deps)"
+
+[dependencies]
+browser-core = { path = "../browser-core" }
+# Zero external dependencies - pure proprietary code

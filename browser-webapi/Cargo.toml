@@ -1,0 +1,11 @@
+[package]
+name = "browser-webapi"
+version.workspace = true
+edition.workspace = true
+license = "Proprietary"
+description = "NGOS Browser - Web APIs (fetch, DOM events, etc.)"
+
+[dependencies]
+browser-core = { path = "../browser-core" }
+browser-dom = { path = "../browser-dom" }
+browser-js = { path = "../browser-js" }

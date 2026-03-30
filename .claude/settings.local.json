@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh auth:*)",
+      "Bash(grep -v \"^C:/Users/pocri/OneDrive/Desktop/experiment/.git$\")",
+      "Bash(for dir:*)",
+      "Bash(do echo:*)",
+      "Bash(do)",
+      "Bash(rm -rf \"$dir/.git\")",
+      "Bash(echo \"Removed: $dir.git\")",
+      "Bash(done)"
+    ]
+  }
+}
