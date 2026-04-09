@@ -28,8 +28,47 @@ use platform_x86_64::highest_bootstrap_physical_address;
 use platform_x86_64::{PAGE_SIZE_4K, align_up};
 
 #[cfg(target_os = "none")]
+const RUNTIME_HEAP_FRAME_COUNT: usize = 12288;
+
+#[cfg(all(target_os = "none", target_arch = "x86_64"))]
+fn enable_sse() {
+    unsafe {
+        let mut cr0: u64;
+        asm!("mov {}, cr0", out(reg) cr0, options(nostack, preserves_flags));
+        cr0 &= !(1 << 2);
+        cr0 |= 1 << 1;
+        asm!("mov cr0, {}", in(reg) cr0, options(nostack, preserves_flags));
+
+        let mut cr4: u64;
+        asm!("mov {}, cr4", out(reg) cr4, options(nostack, preserves_flags));
+        cr4 |= (1 << 9) | (1 << 10);
+        asm!("mov cr4, {}", in(reg) cr4, options(nostack, preserves_flags));
+    }
+}
+
+#[cfg(target_os = "none")]
+mod boot_audio_runtime;
+#[cfg(target_os = "none")]
 mod boot_facts;
+#[cfg(any(target_os = "none", test))]
+mod boot_handoff_proof;
+#[cfg(target_os = "none")]
+mod boot_gpu_runtime;
+#[cfg(target_os = "none")]
+mod boot_input_runtime;
 mod boot_locator;
+#[cfg(target_os = "none")]
+mod boot_network_runtime;
+mod cpu_apic;
+#[cfg(target_os = "none")]
+mod cpu_extended_state_buffer;
+#[cfg(target_os = "none")]
+mod cpu_features;
+mod cpu_handoff;
+mod cpu_hardware_provider;
+mod cpu_runtime_status;
+#[cfg(any(target_os = "none", test))]
+mod cpu_tlb;
 mod diagnostics;
 #[cfg(target_os = "none")]
 mod fault_diag;
@@ -55,6 +94,8 @@ mod pic;
 mod pit;
 #[cfg(target_os = "none")]
 mod reboot_trace;
+#[cfg(target_os = "none")]
+mod runtime_kernel_stack;
 mod serial;
 mod smp;
 #[cfg(target_os = "none")]
@@ -102,6 +143,43 @@ pub enum BootFailure {
     UserMode(platform_x86_64::user_mode::UserModeError),
 }
 
+#[cfg(any(target_os = "none", test))]
+fn boot_failure_summary(failure: BootFailure) -> (&'static str, &'static str) {
+    match failure {
+        BootFailure::Gdt(_) => ("gdt", "bringup-failed"),
+        BootFailure::Heap(_) => ("heap", "init-failed"),
+        BootFailure::Limine(error) => (error.summary_family(), error.summary_detail()),
+        BootFailure::Paging(_) => ("paging", "bringup-failed"),
+        BootFailure::PhysicalAllocator(_) => ("phys-alloc", "bringup-failed"),
+        BootFailure::Traps(_) => ("traps", "bringup-failed"),
+        BootFailure::UserProcess(_) => ("user-process", "prepare-failed"),
+        BootFailure::UserMode(_) => ("user-mode", "launch-failed"),
+    }
+}
+
+#[cfg(any(target_os = "none", test))]
+fn boot_locator_failure_summary(
+    locator: crate::boot_locator::BootLocatorRecord,
+) -> (
+    crate::boot_locator::BootLocatorStage,
+    u64,
+    &'static str,
+    crate::boot_locator::BootPayloadLabel,
+    u64,
+    crate::boot_locator::BootPayloadLabel,
+    u64,
+) {
+    (
+        locator.stage,
+        locator.checkpoint,
+        crate::boot_locator::checkpoint_name(locator.stage, locator.checkpoint),
+        locator.payload0_label,
+        locator.payload0,
+        locator.payload1_label,
+        locator.payload1,
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EarlyBootState<'a> {
     pub boot_info: BootInfo<'a>,
@@ -113,6 +191,18 @@ pub struct EarlyBootState<'a> {
 
 #[cfg(target_os = "none")]
 static mut EARLY_BOOT_STATE: MaybeUninit<EarlyBootState<'static>> = MaybeUninit::uninit();
+
+#[cfg(target_os = "none")]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn early_boot_info() -> Option<&'static BootInfo<'static>> {
+    Some(unsafe { &(*ptr::addr_of!(EARLY_BOOT_STATE).cast::<EarlyBootState<'static>>()).boot_info })
+}
+
+#[cfg(not(target_os = "none"))]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn early_boot_info() -> Option<&'static BootInfo<'static>> {
+    None
+}
 
 #[cfg(target_os = "none")]
 fn framebuffer_boot_trace_header() {
@@ -597,7 +687,7 @@ fn early_kernel_main(state: &EarlyBootState<'static>) -> ! {
     let heap_frames = crate::heap::init_from_allocator(
         frame_allocator,
         state.boot_info.physical_memory_offset,
-        64,
+        RUNTIME_HEAP_FRAME_COUNT,
     )
     .unwrap_or_else(|error| fail(BootFailure::Heap(error)));
     boot_logln!(
@@ -616,21 +706,74 @@ fn early_kernel_main(state: &EarlyBootState<'static>) -> ! {
     framebuffer_boot_trace_header();
     framebuffer_boot_trace_snapshot();
     crate::phys_alloc::log_state("post-paging", frame_allocator);
-    boot_logln!("ngos/x86_64: sse bring-up start");
-    enable_sse();
+    let runtime_kernel_stack = crate::runtime_kernel_stack::allocate(
+        frame_allocator,
+        state.boot_info.physical_memory_offset,
+    )
+    .unwrap_or_else(|error| {
+        fail(BootFailure::Heap(
+            crate::heap::HeapInitError::AllocateFrames(error),
+        ))
+    });
     boot_logln!(
-        "ngos/x86_64: sse ready cr0={:#x} cr4={:#x}",
-        read_cr0_local(),
-        read_cr4_local()
+        "ngos/x86_64: runtime kernel stack base={:#x} top={:#x} bytes={:#x}",
+        runtime_kernel_stack.base,
+        runtime_kernel_stack.top,
+        runtime_kernel_stack.bytes
+    );
+    boot_logln!("ngos/x86_64: cpu extended-state bring-up start");
+    let extended_state = crate::cpu_features::enable_cpu_extended_state();
+    crate::cpu_runtime_status::record(
+        extended_state.sse_ready,
+        extended_state.xsave_enabled,
+        extended_state.save_area_bytes,
+        extended_state.fsgsbase_enabled,
+        extended_state.pcid_enabled,
+        extended_state.invpcid_available,
+        extended_state.pku_enabled,
+        extended_state.smep_enabled,
+        extended_state.smap_enabled,
+        extended_state.umip_enabled,
+        extended_state.xcr0,
+    );
+    let extended_state_probe =
+        crate::cpu_features::probe_boot_extended_state_roundtrip(&extended_state);
+    crate::cpu_runtime_status::record_probe(
+        extended_state_probe.attempted,
+        extended_state_probe.saved,
+        extended_state_probe.restored,
+        extended_state_probe.required_bytes,
+        extended_state_probe.refusal as u32,
+        extended_state_probe.seed_marker,
+    );
+    boot_logln!(
+        "ngos/x86_64: cpu extended-state sse={} xsave={} save_area={} fsgsbase={} pcid={} invpcid={} pku={} smep={} smap={} umip={} xcr0={:#x} probe_attempted={} probe_saved={} probe_restored={} probe_refusal={} cr0={:#x} cr4={:#x}",
+        extended_state.sse_ready,
+        extended_state.xsave_enabled,
+        extended_state.save_area_bytes,
+        extended_state.fsgsbase_enabled,
+        extended_state.pcid_enabled,
+        extended_state.invpcid_available,
+        extended_state.pku_enabled,
+        extended_state.smep_enabled,
+        extended_state.smap_enabled,
+        extended_state.umip_enabled,
+        extended_state.xcr0,
+        extended_state_probe.attempted,
+        extended_state_probe.saved,
+        extended_state_probe.restored,
+        extended_state_probe.refusal as u32,
+        crate::cpu_features::read_cr0_local(),
+        crate::cpu_features::read_cr4_local()
     );
     boot_checkpoint(state, crate::boot_locator::BootLocatorStage::Traps, 0x420);
     boot_logln!("ngos/x86_64: gdt bring-up start");
-    crate::gdt::bring_up(ptr::addr_of!(__ngos_boot_stack_top) as u64).unwrap_or_else(|error| {
+    crate::gdt::bring_up(runtime_kernel_stack.top).unwrap_or_else(|error| {
         fail(BootFailure::Gdt(error));
     });
     boot_checkpoint(state, crate::boot_locator::BootLocatorStage::Traps, 0x430);
     boot_logln!("ngos/x86_64: idt bring-up start");
-    crate::traps::bring_up(ptr::addr_of!(__ngos_boot_stack_top) as u64).unwrap_or_else(|error| {
+    crate::traps::bring_up(runtime_kernel_stack.top).unwrap_or_else(|error| {
         fail(BootFailure::Traps(error));
     });
     boot_checkpoint(state, crate::boot_locator::BootLocatorStage::Traps, 0x440);
@@ -638,7 +781,7 @@ fn early_kernel_main(state: &EarlyBootState<'static>) -> ! {
     crate::diagnostics::record_boot_stage(
         crate::diagnostics::BootTraceStage::TrapsReady,
         None,
-        ptr::addr_of!(__ngos_boot_stack_top) as u64,
+        runtime_kernel_stack.top,
     );
     boot_logln!("ngos/x86_64: traps stage recorded");
     if boot_flag_enabled(
@@ -806,11 +949,12 @@ fn early_kernel_main(state: &EarlyBootState<'static>) -> ! {
         prepared.plan.image_mappings.len() as u64,
     );
     boot_logln!(
-        "ngos/x86_64: prepare_user_launch entry={:#x} image_mappings={} stack={:#x} bytes={}",
+        "ngos/x86_64: prepare_user_launch entry={:#x} image_mappings={} stack={:#x} bytes={} reserve={}",
         prepared.entry_point,
         prepared.plan.image_mappings.len(),
         prepared.plan.stack_mapping.vaddr,
-        prepared.plan.stack_bytes.len()
+        prepared.plan.stack_bytes.len(),
+        crate::user_process::USER_STACK_RESERVE_BYTES
     );
     crate::user_runtime_status::set_boot_outcome_policy(prepared.boot_outcome_policy);
     let mut mapper = crate::user_process::mapper_for(&paging_state, frame_allocator, &prepared)
@@ -840,6 +984,9 @@ fn early_kernel_main(state: &EarlyBootState<'static>) -> ! {
         "ngos/x86_64: entering user mode module=\"{}\"",
         prepared.module_name
     );
+    crate::user_syscall::install_boot_process_exec_runtime(paging_state, unsafe {
+        ptr::read(frame_allocator)
+    });
     unsafe {
         crate::diagnostics::record_boot_stage(
             crate::diagnostics::BootTraceStage::EnterUserMode,
@@ -876,19 +1023,55 @@ fn zero_bss() {
 fn fail(failure: BootFailure) -> ! {
     serial::debug_marker(b'F');
     serial::init();
-    crate::reboot_trace::record_locator(crate::boot_locator::snapshot());
+    let locator = crate::boot_locator::snapshot();
+    crate::reboot_trace::record_locator(locator);
     crate::framebuffer::alert_banner("BOOT FAILURE");
     framebuffer_boot_trace_snapshot();
+    let (family, detail) = boot_failure_summary(failure);
+    let (
+        locator_stage,
+        locator_checkpoint,
+        locator_name,
+        payload0_label,
+        payload0,
+        payload1_label,
+        payload1,
+    ) = boot_locator_failure_summary(locator);
+    crate::framebuffer::print(format_args!(
+        "summary: family={} detail={}\n",
+        family, detail
+    ));
+    crate::framebuffer::print(format_args!(
+        "locator: stage={:?} checkpoint={:#x} name={}\n",
+        locator_stage, locator_checkpoint, locator_name
+    ));
     crate::framebuffer::print(format_args!("cause: {:?}\n", failure));
     if let Some(uptime_us) = crate::timer::boot_uptime_micros() {
         boot_logln!(
-            "ngos/x86_64: boot failure after {} us: {:?}",
+            "ngos/x86_64: boot failure after {} us family={} detail={} cause={:?}",
             uptime_us,
+            family,
+            detail,
             failure
         );
     } else {
-        boot_logln!("ngos/x86_64: boot failure: {:?}", failure);
+        boot_logln!(
+            "ngos/x86_64: boot failure family={} detail={} cause={:?}",
+            family,
+            detail,
+            failure
+        );
     }
+    boot_logln!(
+        "ngos/x86_64: boot locator stage={:?} checkpoint={:#x} name={} payload0={:?}:{:#x} payload1={:?}:{:#x}",
+        locator_stage,
+        locator_checkpoint,
+        locator_name,
+        payload0_label,
+        payload0,
+        payload1_label,
+        payload1
+    );
     halt_loop()
 }
 
@@ -899,52 +1082,6 @@ fn halt_loop() -> ! {
             asm!("hlt", options(nomem, nostack, preserves_flags));
         }
         spin_loop();
-    }
-}
-
-#[cfg(target_os = "none")]
-fn enable_sse() {
-    let mut cr0 = read_cr0_local();
-    cr0 &= !(1 << 2);
-    cr0 |= 1 << 1;
-    let mut cr4 = read_cr4_local();
-    cr4 |= (1 << 9) | (1 << 10);
-    unsafe {
-        write_cr0_local(cr0);
-        write_cr4_local(cr4);
-        asm!("fninit", options(nomem, nostack, preserves_flags));
-    }
-}
-
-#[cfg(target_os = "none")]
-fn read_cr0_local() -> u64 {
-    let value: u64;
-    unsafe {
-        asm!("mov {}, cr0", out(reg) value, options(nomem, nostack, preserves_flags));
-    }
-    value
-}
-
-#[cfg(target_os = "none")]
-fn read_cr4_local() -> u64 {
-    let value: u64;
-    unsafe {
-        asm!("mov {}, cr4", out(reg) value, options(nomem, nostack, preserves_flags));
-    }
-    value
-}
-
-#[cfg(target_os = "none")]
-unsafe fn write_cr0_local(value: u64) {
-    unsafe {
-        asm!("mov cr0, {}", in(reg) value, options(nostack, preserves_flags));
-    }
-}
-
-#[cfg(target_os = "none")]
-unsafe fn write_cr4_local(value: u64) {
-    unsafe {
-        asm!("mov cr4, {}", in(reg) value, options(nostack, preserves_flags));
     }
 }
 
@@ -980,16 +1117,20 @@ fn alloc_error(layout: core::alloc::Layout) -> ! {
     ));
     if let Some(uptime_us) = crate::timer::boot_uptime_micros() {
         boot_logln!(
-            "ngos/x86_64: alloc error after {} us size={} align={}",
+            "ngos/x86_64: alloc error after {} us size={} align={} used_bytes={} capacity_bytes={}",
             uptime_us,
             layout.size(),
-            layout.align()
+            layout.align(),
+            crate::heap::allocated_bytes(),
+            crate::heap::capacity_bytes()
         );
     } else {
         boot_logln!(
-            "ngos/x86_64: alloc error size={} align={}",
+            "ngos/x86_64: alloc error size={} align={} used_bytes={} capacity_bytes={}",
             layout.size(),
-            layout.align()
+            layout.align(),
+            crate::heap::allocated_bytes(),
+            crate::heap::capacity_bytes()
         );
     }
     halt_loop()
@@ -1079,6 +1220,7 @@ unsafe extern "C" fn strlen(ptr: *const u8) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use platform_x86_64::BootInfoValidationError;
 
     #[test]
     fn boot_halt_selector_matches_hex_checkpoint() {
@@ -1126,5 +1268,125 @@ mod tests {
             "ngos.boot.skip_int3_probe"
         ));
         assert!(!boot_flag_enabled(None, "ngos.boot.skip_int3_probe"));
+    }
+
+    #[test]
+    fn boot_failure_summary_uses_stable_tokens_for_limine_contract_refusals() {
+        let summary = boot_failure_summary(BootFailure::Limine(
+            crate::limine::LimineBootError::InvalidBootInfo(
+                BootInfoValidationError::MemoryRegionsOverlap,
+            ),
+        ));
+        assert_eq!(summary, ("limine", "overlapping-memory-regions"));
+
+        let summary = boot_failure_summary(BootFailure::Limine(
+            crate::limine::LimineBootError::MissingResponse("memory map"),
+        ));
+        assert_eq!(summary, ("limine", "missing-memory-map"));
+    }
+
+    #[test]
+    fn boot_failure_summary_covers_remaining_limine_refusal_families() {
+        assert_eq!(
+            boot_failure_summary(BootFailure::Limine(
+                crate::limine::LimineBootError::MissingBaseRevision,
+            )),
+            ("limine", "missing-base-revision")
+        );
+        assert_eq!(
+            boot_failure_summary(BootFailure::Limine(
+                crate::limine::LimineBootError::UnsupportedBaseRevision { loaded: Some(3) },
+            )),
+            ("limine", "unsupported-base-revision")
+        );
+        assert_eq!(
+            boot_failure_summary(BootFailure::Limine(
+                crate::limine::LimineBootError::MissingResponse("higher-half direct map"),
+            )),
+            ("limine", "missing-hhdm")
+        );
+        assert_eq!(
+            boot_failure_summary(BootFailure::Limine(
+                crate::limine::LimineBootError::MissingResponse("executable address"),
+            )),
+            ("limine", "missing-executable-address")
+        );
+        assert_eq!(
+            boot_failure_summary(BootFailure::Limine(
+                crate::limine::LimineBootError::TooManyMemoryRegions {
+                    count: 257,
+                    capacity: 256,
+                },
+            )),
+            ("limine", "too-many-memory-regions")
+        );
+        assert_eq!(
+            boot_failure_summary(BootFailure::Limine(
+                crate::limine::LimineBootError::InvalidModulePathUtf8 { index: 0 },
+            )),
+            ("limine", "invalid-module-path-utf8")
+        );
+        assert_eq!(
+            boot_failure_summary(BootFailure::Limine(
+                crate::limine::LimineBootError::InvalidBootInfo(
+                    BootInfoValidationError::KernelRangeMustBeKernelImage,
+                ),
+            )),
+            ("limine", "invalid-kernel-range-kind")
+        );
+        assert_eq!(
+            boot_failure_summary(BootFailure::Limine(
+                crate::limine::LimineBootError::InvalidBootInfo(
+                    BootInfoValidationError::KernelRangeMustBePageAligned,
+                ),
+            )),
+            ("limine", "invalid-kernel-range-alignment")
+        );
+        assert_eq!(
+            boot_failure_summary(BootFailure::Limine(
+                crate::limine::LimineBootError::InvalidBootInfo(
+                    BootInfoValidationError::KernelRangeMustBeNonEmpty,
+                ),
+            )),
+            ("limine", "empty-kernel-range")
+        );
+        assert_eq!(
+            boot_failure_summary(BootFailure::Limine(
+                crate::limine::LimineBootError::InvalidBootInfo(
+                    BootInfoValidationError::MemoryRegionMustBePageAligned,
+                ),
+            )),
+            ("limine", "invalid-memory-region-alignment")
+        );
+        assert_eq!(
+            boot_failure_summary(BootFailure::Limine(
+                crate::limine::LimineBootError::InvalidBootInfo(
+                    BootInfoValidationError::MemoryRegionMustBeNonEmpty,
+                ),
+            )),
+            ("limine", "empty-memory-region")
+        );
+    }
+
+    #[test]
+    fn boot_locator_failure_summary_preserves_refusal_checkpoint_and_payloads() {
+        let locator = crate::boot_locator::BootLocatorRecord {
+            sequence: 7,
+            stage: crate::boot_locator::BootLocatorStage::Limine,
+            kind: crate::boot_locator::BootLocatorKind::Fault,
+            severity: crate::boot_locator::BootLocatorSeverity::Error,
+            checkpoint: 0x2ff,
+            payload0_label: crate::boot_locator::BootPayloadLabel::Status,
+            payload0: 0x21,
+            payload1_label: crate::boot_locator::BootPayloadLabel::Value,
+            payload1: 0,
+        };
+
+        let summary = boot_locator_failure_summary(locator);
+        assert_eq!(summary.0, crate::boot_locator::BootLocatorStage::Limine);
+        assert_eq!(summary.1, 0x2ff);
+        assert_eq!(summary.2, "limine/contract-refusal");
+        assert_eq!(summary.3, crate::boot_locator::BootPayloadLabel::Status);
+        assert_eq!(summary.4, 0x21);
     }
 }
