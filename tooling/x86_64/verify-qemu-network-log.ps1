@@ -23,6 +23,12 @@ $required = @(
     "network.smoke.rebind socket=/run/net1.sock local=10.2.0.2:4110 attached-sockets=1 outcome=ok",
     "network.smoke.recovery local=10.1.0.2:4000",
     "network.smoke.recovery local=10.2.0.2:4100",
+    "tcp.listen-ok port=8080",
+    "tcp.connect-ok remote=10.0.0.1:80",
+    "tcp.handshake-ok state=ESTABLISHED",
+    "tcp.send-recv-ok bytes-sent=14 bytes-recv=14",
+    "tcp.close-ok state=CLOSED",
+    "icmp.ping-ok target=10.0.0.1 packets=4",
     "network-smoke-ok"
 )
 

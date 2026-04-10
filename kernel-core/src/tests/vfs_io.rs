@@ -5317,3 +5317,156 @@ fn tcp_close_transitions_to_fin_wait() {
     assert_eq!(info.tcp_state, Some(TcpState::Closed));
 }
 
+#[test]
+fn tcp_accept_returns_connection_from_queue() {
+    use crate::device_model::{TcpFlags, TcpSegment, TcpState};
+
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let server = runtime
+        .spawn_process("tcp-server", None, SchedulerClass::LatencyCritical)
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            server,
+            ObjectHandle::new(Handle::new(31_800), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE,
+            "root",
+        )
+        .unwrap();
+    for (path, kind) in [
+        ("/", ObjectKind::Directory),
+        ("/dev", ObjectKind::Directory),
+        ("/drv", ObjectKind::Directory),
+        ("/run", ObjectKind::Directory),
+        ("/dev/net9", ObjectKind::Device),
+        ("/drv/net9", ObjectKind::Driver),
+        ("/run/tcp-server.sock", ObjectKind::Socket),
+    ] {
+        runtime.create_vfs_node(path, kind, root).unwrap();
+    }
+    runtime
+        .bind_device_to_driver("/dev/net9", "/drv/net9")
+        .unwrap();
+    runtime
+        .configure_network_interface_ipv4(
+            "/dev/net9",
+            [10, 9, 0, 2],
+            [255, 255, 255, 0],
+            [10, 9, 0, 1],
+        )
+        .unwrap();
+    runtime
+        .tcp_listen("/run/tcp-server.sock", server, "/dev/net9", 8080, 16)
+        .unwrap();
+
+    let info = runtime.network_socket_info("/run/tcp-server.sock").unwrap();
+    assert_eq!(info.tcp_state, Some(TcpState::Listen));
+
+    let syn_segment = TcpSegment {
+        seq: 5000,
+        ack: 0,
+        window: 65535,
+        flags: TcpFlags {
+            syn: true,
+            ack: false,
+            fin: false,
+            rst: false,
+            psh: false,
+            urg: false,
+        },
+        payload: Vec::new(),
+        local_port: 12345,
+        remote_port: 8080,
+    };
+
+    runtime
+        .tcp_process_incoming_segment(
+            "/run/tcp-server.sock",
+            server,
+            syn_segment,
+            runtime.current_tick,
+        )
+        .unwrap();
+
+    let info = runtime.network_socket_info("/run/tcp-server.sock").unwrap();
+    assert_eq!(info.tcp_state, Some(TcpState::SynReceived));
+}
+
+#[test]
+fn tcp_send_recv_transfers_data_bidirectionally() {
+    use crate::device_model::{TcpFlags, TcpSegment, TcpState};
+
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process("tcp-data", None, SchedulerClass::LatencyCritical)
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(31_900), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE,
+            "root",
+        )
+        .unwrap();
+    for (path, kind) in [
+        ("/", ObjectKind::Directory),
+        ("/dev", ObjectKind::Directory),
+        ("/drv", ObjectKind::Directory),
+        ("/run", ObjectKind::Directory),
+        ("/dev/net10", ObjectKind::Device),
+        ("/drv/net10", ObjectKind::Driver),
+        ("/run/tcp-data.sock", ObjectKind::Socket),
+    ] {
+        runtime.create_vfs_node(path, kind, root).unwrap();
+    }
+    runtime
+        .bind_device_to_driver("/dev/net10", "/drv/net10")
+        .unwrap();
+    runtime
+        .configure_network_interface_ipv4(
+            "/dev/net10",
+            [10, 10, 0, 2],
+            [255, 255, 255, 0],
+            [10, 10, 0, 1],
+        )
+        .unwrap();
+
+    let local_port = 12345u16;
+    runtime
+        .tcp_listen("/run/tcp-data.sock", owner, "/dev/net10", local_port, 16)
+        .unwrap();
+
+    runtime
+        .tcp_connect("/run/tcp-data.sock", owner, [10, 10, 0, 1], 80, runtime.current_tick)
+        .unwrap();
+
+    let syn_ack_segment = TcpSegment {
+        seq: 9000,
+        ack: 1,
+        window: 65535,
+        flags: TcpFlags {
+            syn: true,
+            ack: true,
+            fin: false,
+            rst: false,
+            psh: false,
+            urg: false,
+        },
+        payload: Vec::new(),
+        local_port: 80,
+        remote_port: 0,
+    };
+
+    runtime
+        .tcp_process_incoming_segment(
+            "/run/tcp-data.sock",
+            owner,
+            syn_ack_segment,
+            runtime.current_tick.wrapping_add(5),
+        )
+        .unwrap();
+
+    let info = runtime.network_socket_info("/run/tcp-data.sock").unwrap();
+    assert_eq!(info.tcp_state, Some(TcpState::Established));
+}
+

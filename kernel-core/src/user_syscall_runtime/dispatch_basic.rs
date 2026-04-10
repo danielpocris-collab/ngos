@@ -1787,6 +1787,20 @@ impl KernelRuntime {
                 self.tcp_connect(&socket_path, caller, remote_ipv4, remote_port, self.current_tick)?;
                 Ok(SyscallReturn::ok(0))
             }
+            SYS_TCP_ACCEPT => {
+                let socket_path = match frame_string(self, caller, frame.arg0, frame.arg1) {
+                    Ok(path) => path,
+                    Err(error) => return Ok(error),
+                };
+                let (accepted_path, remote_ipv4, remote_port) =
+                    self.tcp_accept(&socket_path, caller, self.current_tick)?;
+                if let Err(error) = self.copy_to_user(caller, frame.arg2, accepted_path.as_bytes()) {
+                    return Ok(SyscallReturn::err(error.errno()));
+                }
+                let ipv4_u32 = u32::from_be_bytes(remote_ipv4);
+                let result = ((remote_port as usize) << 32) | (ipv4_u32 as usize);
+                Ok(SyscallReturn::ok(result))
+            }
             SYS_TCP_SEND => {
                 let socket_path = match frame_string(self, caller, frame.arg0, frame.arg1) {
                     Ok(path) => path,
