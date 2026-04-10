@@ -1,46 +1,82 @@
+//! Canonical subsystem role:
+//! - subsystem: syscall transport and ABI dispatch
+//! - owner layer: Layer 1
+//! - semantic owner: `kernel-core`
+//! - truth path role: canonical syscall-number dispatch and ABI record
+//!   materialization over kernel truth
+//!
+//! Canonical contract families handled here:
+//! - syscall dispatch contracts
+//! - ABI snapshot/inspection transport contracts
+//! - kernel-to-user serialization contracts
+//!
+//! This module may serialize and dispatch canonical kernel truth into ABI
+//! records, but it must not define a shadow semantic model independent of
+//! `kernel-core`.
+
 use super::*;
-use crate::eventing_model::{GraphicsEventInterest, GraphicsEventKind};
+use crate::eventing_model::{
+    BusEventInterest, BusEventKind, GraphicsEventInterest, GraphicsEventKind,
+};
 use ngos_user_abi::{
-    BootSessionReport, NativeDeviceRecord, NativeDeviceRequestRecord, NativeDriverRecord,
-    NativeEventQueueMode, NativeEventRecord, NativeEventSourceKind, NativeFileStatusRecord,
-    NativeFileSystemStatusRecord, NativeGpuBindingRecord, NativeGpuBufferRecord,
-    NativeGpuDisplayRecord, NativeGpuGspRecord, NativeGpuInterruptRecord, NativeGpuMediaRecord,
-    NativeGpuNeuralRecord, NativeGpuPowerRecord, NativeGpuScanoutRecord, NativeGpuTensorRecord,
-    NativeGpuVbiosRecord, NativeGraphicsEventKind, NativeGraphicsEventWatchConfig,
-    NativeNetworkAdminConfig, NativeNetworkEventKind, NativeNetworkEventWatchConfig,
-    NativeNetworkInterfaceConfig, NativeNetworkInterfaceRecord, NativeNetworkLinkStateConfig,
-    NativeNetworkSocketRecord, NativeProcessEventWatchConfig, NativeProcessRecord,
-    NativeReadinessRecord, NativeResourceEventWatchConfig, NativeSchedulerClass,
-    NativeSpawnProcessConfig, NativeSystemSnapshotRecord, NativeUdpBindConfig,
-    NativeUdpConnectConfig, NativeUdpRecvMeta, NativeUdpSendToConfig, SYS_ADVISE_MEMORY_RANGE,
-    SYS_BIND_DEVICE_DRIVER, SYS_BIND_UDP_SOCKET, SYS_BLOCKED_PENDING_SIGNALS, SYS_BOOT_REPORT,
-    SYS_CHDIR_PATH, SYS_COLLECT_READINESS, SYS_COMMIT_GPU_NEURAL_FRAME, SYS_COMPLETE_NET_TX,
-    SYS_CONFIGURE_DEVICE_QUEUE, SYS_CONFIGURE_NETIF_ADMIN, SYS_CONFIGURE_NETIF_IPV4,
-    SYS_CONNECT_UDP_SOCKET, SYS_CONTROL_DESCRIPTOR, SYS_CREATE_EVENT_QUEUE, SYS_CREATE_GPU_BUFFER,
+    BootSessionReport, NativeBusEventWatchConfig, NativeDeviceRecord, NativeDeviceRequestRecord,
+    NativeDriverRecord, NativeEventQueueMode, NativeEventRecord, NativeEventSourceKind,
+    NativeFileStatusRecord, NativeFileSystemStatusRecord, NativeGpuBindingRecord,
+    NativeGpuBufferRecord, NativeGpuDisplayRecord, NativeGpuGspRecord, NativeGpuInterruptRecord,
+    NativeGpuMediaRecord, NativeGpuNeuralRecord, NativeGpuPowerRecord, NativeGpuScanoutRecord,
+    NativeGpuTensorRecord, NativeGpuVbiosRecord, NativeGraphicsEventKind,
+    NativeGraphicsEventWatchConfig, NativeNetworkAdminConfig, NativeNetworkEventKind,
+    NativeNetworkEventWatchConfig, NativeNetworkInterfaceConfig, NativeNetworkInterfaceRecord,
+    NativeNetworkLinkStateConfig, NativeNetworkSocketRecord, NativeProcessCompatRecord,
+    NativeProcessEventWatchConfig, NativeProcessRecord, NativeReadinessRecord,
+    NativeResourceEventWatchConfig, NativeSchedulerClass, NativeSpawnProcessConfig,
+    NativeSystemSnapshotRecord, NativeUdpBindConfig, NativeUdpConnectConfig, NativeUdpRecvMeta,
+    NativeUdpSendToConfig, SYS_ADVISE_MEMORY_RANGE, SYS_BIND_DEVICE_DRIVER, SYS_BIND_UDP_SOCKET,
+    SYS_BLOCKED_PENDING_SIGNALS, SYS_BOOT_REPORT, SYS_CHDIR_PATH, SYS_COLLECT_READINESS,
+    SYS_COMMIT_GPU_NEURAL_FRAME, SYS_COMPLETE_NET_TX, SYS_CONFIGURE_DEVICE_QUEUE,
+    SYS_CONFIGURE_NETIF_ADMIN, SYS_CONFIGURE_NETIF_IPV4, SYS_CONNECT_UDP_SOCKET,
+    SYS_CONTROL_DESCRIPTOR, SYS_CREATE_EVENT_QUEUE, SYS_CREATE_GPU_BUFFER,
     SYS_DISPATCH_GPU_TENSOR_KERNEL, SYS_GET_PROCESS_CWD, SYS_GET_PROCESS_IMAGE_PATH,
-    SYS_GET_PROCESS_NAME, SYS_INJECT_GPU_NEURAL_SEMANTIC, SYS_INSPECT_DEVICE,
+    SYS_GET_PROCESS_NAME, SYS_GET_PROCESS_ROOT, SYS_INJECT_GPU_NEURAL_SEMANTIC, SYS_INSPECT_DEVICE,
     SYS_INSPECT_DEVICE_REQUEST, SYS_INSPECT_DRIVER, SYS_INSPECT_GPU_BINDING,
     SYS_INSPECT_GPU_BUFFER, SYS_INSPECT_GPU_DISPLAY, SYS_INSPECT_GPU_GSP,
     SYS_INSPECT_GPU_INTERRUPT, SYS_INSPECT_GPU_MEDIA, SYS_INSPECT_GPU_NEURAL,
     SYS_INSPECT_GPU_POWER, SYS_INSPECT_GPU_SCANOUT, SYS_INSPECT_GPU_TENSOR, SYS_INSPECT_GPU_VBIOS,
-    SYS_INSPECT_NETIF, SYS_INSPECT_NETSOCK, SYS_INSPECT_PROCESS, SYS_INSPECT_SYSTEM_SNAPSHOT,
-    SYS_LIST_PATH, SYS_LIST_PROCESSES, SYS_LOAD_MEMORY_WORD, SYS_LSTAT_PATH,
-    SYS_MAP_ANONYMOUS_MEMORY, SYS_MAP_FILE_MEMORY, SYS_MKCHAN_PATH, SYS_MKDIR_PATH,
+    SYS_INSPECT_NETIF, SYS_INSPECT_NETSOCK, SYS_INSPECT_PROCESS, SYS_INSPECT_PROCESS_COMPAT,
+    SYS_INSPECT_SYSTEM_SNAPSHOT, SYS_LIST_PATH, SYS_LIST_PROCESSES, SYS_LOAD_MEMORY_WORD,
+    SYS_LSTAT_PATH, SYS_MAP_ANONYMOUS_MEMORY, SYS_MAP_FILE_MEMORY, SYS_MKCHAN_PATH, SYS_MKDIR_PATH,
     SYS_MKFILE_PATH, SYS_MKSOCK_PATH, SYS_OPEN_PATH, SYS_PAUSE_PROCESS, SYS_PENDING_SIGNALS,
     SYS_PRESENT_GPU_FRAME, SYS_PROTECT_MEMORY_RANGE, SYS_QUARANTINE_VM_OBJECT,
     SYS_READ_GPU_SCANOUT_FRAME, SYS_READ_PROCFS, SYS_READLINK_PATH, SYS_READV, SYS_REAP_PROCESS,
     SYS_RECLAIM_MEMORY_PRESSURE, SYS_RECLAIM_MEMORY_PRESSURE_GLOBAL, SYS_RECVFROM_UDP_SOCKET,
-    SYS_REGISTER_READINESS, SYS_RELEASE_VM_OBJECT, SYS_REMOVE_GRAPHICS_EVENTS,
-    SYS_REMOVE_NET_EVENTS, SYS_REMOVE_PROCESS_EVENTS, SYS_REMOVE_RESOURCE_EVENTS, SYS_RENAME_PATH,
-    SYS_RENICE_PROCESS, SYS_RESUME_PROCESS, SYS_SEND_SIGNAL, SYS_SENDTO_UDP_SOCKET,
-    SYS_SET_GPU_POWER_STATE, SYS_SET_NETIF_LINK_STATE, SYS_SET_PROCESS_ARGS, SYS_SET_PROCESS_BREAK,
-    SYS_SET_PROCESS_CWD, SYS_SET_PROCESS_ENV, SYS_SPAWN_CONFIGURED_PROCESS, SYS_SPAWN_PATH_PROCESS,
-    SYS_SPAWN_PROCESS_COPY_VM, SYS_START_GPU_MEDIA_SESSION, SYS_STAT_PATH, SYS_STATFS_PATH,
-    SYS_STORE_MEMORY_WORD, SYS_SUBMIT_GPU_BUFFER, SYS_SYMLINK_PATH, SYS_SYNC_MEMORY_RANGE,
-    SYS_UNBIND_DEVICE_DRIVER, SYS_UNLINK_PATH, SYS_UNMAP_MEMORY_RANGE, SYS_WAIT_EVENT_QUEUE,
-    SYS_WATCH_GRAPHICS_EVENTS, SYS_WATCH_NET_EVENTS, SYS_WATCH_PROCESS_EVENTS,
-    SYS_WATCH_RESOURCE_EVENTS, SYS_WRITE_GPU_BUFFER, SYS_WRITEV,
+    SYS_REGISTER_READINESS, SYS_RELEASE_VM_OBJECT, SYS_REMOVE_BUS_EVENTS,
+    SYS_REMOVE_GRAPHICS_EVENTS, SYS_REMOVE_NET_EVENTS, SYS_REMOVE_PROCESS_EVENTS,
+    SYS_REMOVE_RESOURCE_EVENTS, SYS_RENAME_PATH, SYS_RENICE_PROCESS, SYS_RESUME_PROCESS,
+    SYS_SEND_SIGNAL, SYS_SENDTO_UDP_SOCKET, SYS_SET_GPU_POWER_STATE, SYS_SET_NETIF_LINK_STATE,
+    SYS_SET_PROCESS_AFFINITY, SYS_SET_PROCESS_ARGS, SYS_SET_PROCESS_BREAK, SYS_SET_PROCESS_CWD,
+    SYS_SET_PROCESS_ENV, SYS_SET_PROCESS_ROOT, SYS_SPAWN_CONFIGURED_PROCESS,
+    SYS_SPAWN_PATH_PROCESS, SYS_SPAWN_PROCESS_COPY_VM, SYS_START_GPU_MEDIA_SESSION, SYS_STAT_PATH,
+    SYS_STATFS_PATH, SYS_STORE_MEMORY_WORD, SYS_SUBMIT_GPU_BUFFER, SYS_SYMLINK_PATH,
+    SYS_SYNC_MEMORY_RANGE, SYS_TCP_ACCEPT, SYS_TCP_CLOSE, SYS_TCP_CONNECT, SYS_TCP_LISTEN,
+    SYS_TCP_RECV, SYS_TCP_RESET, SYS_TCP_SEND, SYS_UNBIND_DEVICE_DRIVER, SYS_UNLINK_PATH,
+    SYS_UNMAP_MEMORY_RANGE, SYS_WAIT_EVENT_QUEUE, SYS_WATCH_BUS_EVENTS, SYS_WATCH_GRAPHICS_EVENTS,
+    SYS_WATCH_NET_EVENTS, SYS_WATCH_PROCESS_EVENTS, SYS_WATCH_RESOURCE_EVENTS, SYS_WRITE_GPU_BUFFER,
+    SYS_WRITEV,
 };
+
+// Canonical subsystem role:
+// - subsystem: syscall surface transport
+// - owner layer: Layer 1 + Layer 2
+// - semantic owner: `kernel-core` for behavior, `user-abi` for record transport
+// - truth path role: moves canonical kernel truth into stable ABI records
+//
+// Canonical contract families handled here:
+// - syscall contracts
+// - runtime snapshot contracts
+// - process/device/network inspection contracts
+//
+// This module may transport and serialize truth. It must not drift from the
+// canonical records defined in `user-abi`.
 
 fn copy_text_field(dst: &mut [u8], text: &str) {
     dst.fill(0);
@@ -287,6 +323,54 @@ impl KernelRuntime {
                 }
                 Ok(SyscallReturn::ok(0))
             }
+            SYS_INSPECT_PROCESS_COMPAT => {
+                let pid = frame_pid(frame.arg0)?;
+                let info = self.process_info(pid)?;
+                let abi = info.abi_profile;
+                let mut record = NativeProcessCompatRecord {
+                    pid: info.pid.raw(),
+                    target: [0; 16],
+                    route_class: [0; 32],
+                    handle_profile: [0; 32],
+                    path_profile: [0; 32],
+                    scheduler_profile: [0; 32],
+                    sync_profile: [0; 32],
+                    timer_profile: [0; 32],
+                    module_profile: [0; 32],
+                    event_profile: [0; 32],
+                    requires_kernel_abi_shims: if abi.requires_kernel_abi_shims { 1 } else { 0 },
+                    prefix: [0; 64],
+                    executable_path: [0; 64],
+                    working_dir: [0; 64],
+                    loader_route_class: [0; 32],
+                    loader_launch_mode: [0; 32],
+                    loader_entry_profile: [0; 32],
+                    loader_requires_compat_shims: if abi.loader_requires_compat_shims {
+                        1
+                    } else {
+                        0
+                    },
+                };
+                copy_text_field(&mut record.target, &abi.target);
+                copy_text_field(&mut record.route_class, &abi.route_class);
+                copy_text_field(&mut record.handle_profile, &abi.handle_profile);
+                copy_text_field(&mut record.path_profile, &abi.path_profile);
+                copy_text_field(&mut record.scheduler_profile, &abi.scheduler_profile);
+                copy_text_field(&mut record.sync_profile, &abi.sync_profile);
+                copy_text_field(&mut record.timer_profile, &abi.timer_profile);
+                copy_text_field(&mut record.module_profile, &abi.module_profile);
+                copy_text_field(&mut record.event_profile, &abi.event_profile);
+                copy_text_field(&mut record.prefix, &abi.prefix);
+                copy_text_field(&mut record.executable_path, &abi.executable_path);
+                copy_text_field(&mut record.working_dir, &abi.working_dir);
+                copy_text_field(&mut record.loader_route_class, &abi.loader_route_class);
+                copy_text_field(&mut record.loader_launch_mode, &abi.loader_launch_mode);
+                copy_text_field(&mut record.loader_entry_profile, &abi.loader_entry_profile);
+                if let Err(error) = copy_struct_to_user(self, caller, frame.arg1, &record) {
+                    return Ok(error);
+                }
+                Ok(SyscallReturn::ok(0))
+            }
             SYS_LOAD_MEMORY_WORD => {
                 let pid = frame_pid(frame.arg0)?;
                 if pid != caller {
@@ -441,6 +525,32 @@ impl KernelRuntime {
                     queued_interactive: snapshot.queued_interactive as u64,
                     queued_normal: snapshot.queued_normal as u64,
                     queued_background: snapshot.queued_background as u64,
+                    queued_urgent_latency_critical: snapshot.queued_urgent_latency_critical as u64,
+                    queued_urgent_interactive: snapshot.queued_urgent_interactive as u64,
+                    queued_urgent_normal: snapshot.queued_urgent_normal as u64,
+                    queued_urgent_background: snapshot.queued_urgent_background as u64,
+                    lag_debt_latency_critical: snapshot.lag_debt_latency_critical as i64,
+                    lag_debt_interactive: snapshot.lag_debt_interactive as i64,
+                    lag_debt_normal: snapshot.lag_debt_normal as i64,
+                    lag_debt_background: snapshot.lag_debt_background as i64,
+                    dispatch_count_latency_critical: snapshot.dispatch_count_latency_critical,
+                    dispatch_count_interactive: snapshot.dispatch_count_interactive,
+                    dispatch_count_normal: snapshot.dispatch_count_normal,
+                    dispatch_count_background: snapshot.dispatch_count_background,
+                    runtime_ticks_latency_critical: snapshot.runtime_ticks_latency_critical,
+                    runtime_ticks_interactive: snapshot.runtime_ticks_interactive,
+                    runtime_ticks_normal: snapshot.runtime_ticks_normal,
+                    runtime_ticks_background: snapshot.runtime_ticks_background,
+                    scheduler_cpu_count: snapshot.scheduler_cpu_count as u64,
+                    scheduler_running_cpu: snapshot
+                        .scheduler_running_cpu
+                        .map(|cpu| cpu as u64)
+                        .unwrap_or(u64::MAX),
+                    scheduler_cpu_load_imbalance: snapshot.scheduler_cpu_load_imbalance as u64,
+                    starved_latency_critical: u64::from(snapshot.starved_latency_critical),
+                    starved_interactive: u64::from(snapshot.starved_interactive),
+                    starved_normal: u64::from(snapshot.starved_normal),
+                    starved_background: u64::from(snapshot.starved_background),
                     deferred_task_count: snapshot.deferred_task_count as u64,
                     sleeping_processes: snapshot.sleeping_processes as u64,
                     total_event_queue_count: snapshot.total_event_queue_count as u64,
@@ -454,8 +564,12 @@ impl KernelRuntime {
                     total_network_tx_dropped: snapshot.total_network_tx_dropped,
                     total_network_rx_dropped: snapshot.total_network_rx_dropped,
                     running_pid: snapshot.running.map(|pid| pid.raw()).unwrap_or(0),
-                    reserved0: 0,
-                    reserved1: 0,
+                    reserved0: if snapshot.verified_core_ok {
+                        NativeSystemSnapshotRecord::VERIFIED_CORE_OK_TRUE
+                    } else {
+                        NativeSystemSnapshotRecord::VERIFIED_CORE_OK_FALSE
+                    },
+                    reserved1: snapshot.verified_core_violation_count as u64,
                 };
                 if let Err(error) = copy_struct_to_user(self, caller, frame.arg0, &record) {
                     return Ok(error);
@@ -495,7 +609,42 @@ impl KernelRuntime {
                     block_size: info.block_size,
                     reserved2: 0,
                     capacity_bytes: info.capacity_bytes,
+                    last_completed_request_id: info.last_completed_request_id,
+                    last_completed_frame_tag: [0; 64],
+                    last_completed_source_api_name: [0; 24],
+                    last_completed_translation_label: [0; 32],
+                    last_terminal_request_id: info.last_terminal_request_id,
+                    last_terminal_state: info.last_terminal_state as u32,
+                    reserved3: 0,
+                    last_terminal_frame_tag: [0; 64],
+                    last_terminal_source_api_name: [0; 24],
+                    last_terminal_translation_label: [0; 32],
                 };
+                let mut record = record;
+                copy_text_field(
+                    &mut record.last_completed_frame_tag,
+                    &info.last_completed_frame_tag,
+                );
+                copy_text_field(
+                    &mut record.last_completed_source_api_name,
+                    &info.last_completed_source_api_name,
+                );
+                copy_text_field(
+                    &mut record.last_completed_translation_label,
+                    &info.last_completed_translation_label,
+                );
+                copy_text_field(
+                    &mut record.last_terminal_frame_tag,
+                    &info.last_terminal_frame_tag,
+                );
+                copy_text_field(
+                    &mut record.last_terminal_source_api_name,
+                    &info.last_terminal_source_api_name,
+                );
+                copy_text_field(
+                    &mut record.last_terminal_translation_label,
+                    &info.last_terminal_translation_label,
+                );
                 if let Err(error) = copy_struct_to_user(self, caller, frame.arg2, &record) {
                     return Ok(error);
                 }
@@ -514,7 +663,14 @@ impl KernelRuntime {
                     submitted_tick: info.submitted_tick,
                     started_tick: info.started_tick.unwrap_or(0),
                     completed_tick: info.completed_tick.unwrap_or(0),
+                    frame_tag: [0; 64],
+                    source_api_name: [0; 24],
+                    translation_label: [0; 32],
                 };
+                let mut record = record;
+                copy_text_field(&mut record.frame_tag, &info.frame_tag);
+                copy_text_field(&mut record.source_api_name, &info.source_api_name);
+                copy_text_field(&mut record.translation_label, &info.translation_label);
                 if let Err(error) = copy_struct_to_user(self, caller, frame.arg1, &record) {
                     return Ok(error);
                 }
@@ -573,11 +729,18 @@ impl KernelRuntime {
                     Err(error) => return Ok(error),
                 };
                 let info = self.graphics_scanout_info(&device_path)?;
+                let mut last_frame_tag = [0u8; 64];
+                copy_text_field(&mut last_frame_tag, &info.last_frame_tag);
+                let mut last_source_api_name = [0u8; 24];
+                copy_text_field(&mut last_source_api_name, &info.last_source_api_name);
+                let mut last_translation_label = [0u8; 32];
+                copy_text_field(&mut last_translation_label, &info.last_translation_label);
                 let record = NativeGpuScanoutRecord {
                     presented_frames: info.presented_frames,
                     last_frame_len: info.last_frame_len as u64,
-                    reserved0: 0,
-                    reserved1: 0,
+                    last_frame_tag,
+                    last_source_api_name,
+                    last_translation_label,
                 };
                 if let Err(error) = copy_struct_to_user(self, caller, frame.arg2, &record) {
                     return Ok(error);
@@ -945,7 +1108,42 @@ impl KernelRuntime {
                     queued_requests: info.queued_requests as u64,
                     in_flight_requests: info.in_flight_requests as u64,
                     completed_requests: info.completed_requests,
+                    last_completed_request_id: info.last_completed_request_id,
+                    last_completed_frame_tag: [0; 64],
+                    last_completed_source_api_name: [0; 24],
+                    last_completed_translation_label: [0; 32],
+                    last_terminal_request_id: info.last_terminal_request_id,
+                    last_terminal_state: info.last_terminal_state as u32,
+                    reserved1: 0,
+                    last_terminal_frame_tag: [0; 64],
+                    last_terminal_source_api_name: [0; 24],
+                    last_terminal_translation_label: [0; 32],
                 };
+                let mut record = record;
+                copy_text_field(
+                    &mut record.last_completed_frame_tag,
+                    &info.last_completed_frame_tag,
+                );
+                copy_text_field(
+                    &mut record.last_completed_source_api_name,
+                    &info.last_completed_source_api_name,
+                );
+                copy_text_field(
+                    &mut record.last_completed_translation_label,
+                    &info.last_completed_translation_label,
+                );
+                copy_text_field(
+                    &mut record.last_terminal_frame_tag,
+                    &info.last_terminal_frame_tag,
+                );
+                copy_text_field(
+                    &mut record.last_terminal_source_api_name,
+                    &info.last_terminal_source_api_name,
+                );
+                copy_text_field(
+                    &mut record.last_terminal_translation_label,
+                    &info.last_terminal_translation_label,
+                );
                 if let Err(error) = copy_struct_to_user(self, caller, frame.arg2, &record) {
                     return Ok(error);
                 }
@@ -968,6 +1166,12 @@ impl KernelRuntime {
                 let pid = frame_pid(frame.arg0)?;
                 let info = self.process_info(pid)?;
                 let copied = copy_string_to_user(self, caller, frame.arg1, frame.arg2, &info.cwd)?;
+                Ok(SyscallReturn::ok(copied))
+            }
+            SYS_GET_PROCESS_ROOT => {
+                let pid = frame_pid(frame.arg0)?;
+                let info = self.process_info(pid)?;
+                let copied = copy_string_to_user(self, caller, frame.arg1, frame.arg2, &info.root)?;
                 Ok(SyscallReturn::ok(copied))
             }
             SYS_CHDIR_PATH => {
@@ -1129,6 +1333,15 @@ impl KernelRuntime {
                 self.set_process_cwd(pid, cwd)?;
                 Ok(SyscallReturn::ok(0))
             }
+            SYS_SET_PROCESS_ROOT => {
+                let pid = frame_pid(frame.arg0)?;
+                let root = match frame_string(self, caller, frame.arg1, frame.arg2) {
+                    Ok(root) => root,
+                    Err(error) => return Ok(error),
+                };
+                self.set_process_root(pid, root)?;
+                Ok(SyscallReturn::ok(0))
+            }
             SYS_REAP_PROCESS => {
                 let pid = frame_pid(frame.arg0)?;
                 let process = self.reap_process(pid)?;
@@ -1154,12 +1367,17 @@ impl KernelRuntime {
                 let status = self.stat_path(&path)?;
                 let record = NativeFileStatusRecord {
                     inode: status.inode,
+                    link_count: 1,
                     size: status.size,
                     kind: encode_native_object_kind(status.kind) as u32,
                     cloexec: status.cloexec as u32,
                     nonblock: status.nonblock as u32,
                     readable: status.readable as u32,
                     writable: status.writable as u32,
+                    executable: 0,
+                    owner_uid: 0,
+                    group_gid: 0,
+                    mode: ((status.readable as u32) * 0o444) | ((status.writable as u32) * 0o222),
                 };
                 if let Err(error) = copy_struct_to_user(self, caller, frame.arg2, &record) {
                     return Ok(error);
@@ -1174,12 +1392,17 @@ impl KernelRuntime {
                 let status = self.lstat_path(&path)?;
                 let record = NativeFileStatusRecord {
                     inode: status.inode,
+                    link_count: 1,
                     size: status.size,
                     kind: encode_native_object_kind(status.kind) as u32,
                     cloexec: status.cloexec as u32,
                     nonblock: status.nonblock as u32,
                     readable: status.readable as u32,
                     writable: status.writable as u32,
+                    executable: 0,
+                    owner_uid: 0,
+                    group_gid: 0,
+                    mode: ((status.readable as u32) * 0o444) | ((status.writable as u32) * 0o222),
                 };
                 if let Err(error) = copy_struct_to_user(self, caller, frame.arg2, &record) {
                     return Ok(error);
@@ -1534,6 +1757,74 @@ impl KernelRuntime {
                 let count = self.complete_network_tx(&driver_path, frame.arg2)?;
                 Ok(SyscallReturn::ok(count))
             }
+            SYS_TCP_LISTEN => {
+                let socket_path = match frame_string(self, caller, frame.arg0, frame.arg1) {
+                    Ok(path) => path,
+                    Err(error) => return Ok(error),
+                };
+                let device_path = match frame_string(self, caller, frame.arg2, frame.arg3) {
+                    Ok(path) => path,
+                    Err(error) => return Ok(error),
+                };
+                let local_port = frame.arg4 as u16;
+                let backlog = frame.arg5;
+                self.tcp_listen(&socket_path, caller, &device_path, local_port, backlog)?;
+                Ok(SyscallReturn::ok(0))
+            }
+            SYS_TCP_CONNECT => {
+                let socket_path = match frame_string(self, caller, frame.arg0, frame.arg1) {
+                    Ok(path) => path,
+                    Err(error) => return Ok(error),
+                };
+                let remote_ipv4 = [
+                    ((frame.arg2 >> 24) & 0xff) as u8,
+                    ((frame.arg2 >> 16) & 0xff) as u8,
+                    ((frame.arg2 >> 8) & 0xff) as u8,
+                    (frame.arg2 & 0xff) as u8,
+                ];
+                let remote_port = frame.arg3 as u16;
+                self.tcp_connect(&socket_path, caller, remote_ipv4, remote_port, self.current_tick)?;
+                Ok(SyscallReturn::ok(0))
+            }
+            SYS_TCP_SEND => {
+                let socket_path = match frame_string(self, caller, frame.arg0, frame.arg1) {
+                    Ok(path) => path,
+                    Err(error) => return Ok(error),
+                };
+                let buffer = match self.copy_from_user(caller, frame.arg2, frame.arg3) {
+                    Ok(bytes) => bytes,
+                    Err(error) => return Ok(SyscallReturn::err(error.errno())),
+                };
+                let count = self.tcp_send(&socket_path, caller, &buffer, self.current_tick)?;
+                Ok(SyscallReturn::ok(count))
+            }
+            SYS_TCP_RECV => {
+                let socket_path = match frame_string(self, caller, frame.arg0, frame.arg1) {
+                    Ok(path) => path,
+                    Err(error) => return Ok(error),
+                };
+                let data = self.tcp_recv(&socket_path, caller, frame.arg3, self.current_tick)?;
+                if let Err(error) = self.copy_to_user(caller, frame.arg2, &data) {
+                    return Ok(SyscallReturn::err(error.errno()));
+                }
+                Ok(SyscallReturn::ok(data.len()))
+            }
+            SYS_TCP_CLOSE => {
+                let socket_path = match frame_string(self, caller, frame.arg0, frame.arg1) {
+                    Ok(path) => path,
+                    Err(error) => return Ok(error),
+                };
+                self.tcp_close(&socket_path, caller, self.current_tick)?;
+                Ok(SyscallReturn::ok(0))
+            }
+            SYS_TCP_RESET => {
+                let socket_path = match frame_string(self, caller, frame.arg0, frame.arg1) {
+                    Ok(path) => path,
+                    Err(error) => return Ok(error),
+                };
+                self.tcp_send_reset(&socket_path, caller, self.current_tick)?;
+                Ok(SyscallReturn::ok(0))
+            }
             SYS_CREATE_EVENT_QUEUE => {
                 let mode = match NativeEventQueueMode::from_raw(frame.arg0 as u32) {
                     Some(NativeEventQueueMode::Kqueue) => EventQueueMode::Kqueue,
@@ -1630,6 +1921,29 @@ impl KernelRuntime {
                     queue_fd,
                     resource,
                     frame.arg2 as u64,
+                )?;
+                Ok(SyscallReturn::ok(0))
+            }
+            SYS_WATCH_BUS_EVENTS => {
+                let queue_fd = frame_fd(frame.arg0)?;
+                let endpoint = self.find_bus_endpoint_id_by_raw(frame.arg1 as u64)?;
+                let config: NativeBusEventWatchConfig =
+                    match copy_struct_from_user(self, caller, frame.arg2) {
+                        Ok(config) => config,
+                        Err(error) => return Ok(error),
+                    };
+                self.watch_bus_events_descriptor(
+                    caller,
+                    queue_fd,
+                    endpoint,
+                    config.token,
+                    BusEventInterest {
+                        attached: config.attached != 0,
+                        detached: config.detached != 0,
+                        published: config.published != 0,
+                        received: config.received != 0,
+                    },
+                    decode_iopoll_events(config.poll_events),
                 )?;
                 Ok(SyscallReturn::ok(0))
             }
@@ -1733,6 +2047,12 @@ impl KernelRuntime {
                 )?;
                 Ok(SyscallReturn::ok(0))
             }
+            SYS_REMOVE_BUS_EVENTS => {
+                let queue_fd = frame_fd(frame.arg0)?;
+                let endpoint = self.find_bus_endpoint_id_by_raw(frame.arg1 as u64)?;
+                self.remove_bus_events_descriptor(caller, queue_fd, endpoint, frame.arg2 as u64)?;
+                Ok(SyscallReturn::ok(0))
+            }
             SYS_REMOVE_GRAPHICS_EVENTS => {
                 let queue_fd = frame_fd(frame.arg0)?;
                 let device_path = match frame_string(self, caller, frame.arg1, frame.arg2) {
@@ -1765,6 +2085,11 @@ impl KernelRuntime {
                     None => return Ok(SyscallReturn::err(Errno::Inval)),
                 };
                 self.renice_process(pid, class, frame.arg2 as u32)?;
+                Ok(SyscallReturn::ok(0))
+            }
+            SYS_SET_PROCESS_AFFINITY => {
+                let pid = frame_pid(frame.arg0)?;
+                self.set_process_affinity(pid, frame.arg1 as u64)?;
                 Ok(SyscallReturn::ok(0))
             }
             _ => Ok(SyscallReturn::err(Errno::Inval)),
@@ -1934,6 +2259,25 @@ fn encode_native_event_record(event: EventRecord) -> NativeEventRecord {
                 GraphicsEventKind::LeaseReleased => NativeGraphicsEventKind::LeaseReleased as u32,
                 GraphicsEventKind::LeaseAcquired => NativeGraphicsEventKind::LeaseAcquired as u32,
             },
+        },
+        EventSource::Bus {
+            peer,
+            endpoint,
+            kind,
+        } => NativeEventRecord {
+            token: event.token,
+            events: event.events.0,
+            source_kind: NativeEventSourceKind::Bus as u32,
+            source_arg0: peer.raw(),
+            source_arg1: endpoint.raw(),
+            source_arg2: 0,
+            detail0: match kind {
+                BusEventKind::Attached => 0,
+                BusEventKind::Detached => 1,
+                BusEventKind::Published => 2,
+                BusEventKind::Received => 3,
+            },
+            detail1: 0,
         },
     }
 }
