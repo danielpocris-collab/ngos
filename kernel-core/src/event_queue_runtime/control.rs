@@ -1,5 +1,7 @@
 use super::*;
-use crate::eventing_model::{GraphicsEventInterest, GraphicsEventRegistration};
+use crate::eventing_model::{
+    BusEventInterest, BusEventRegistration, GraphicsEventInterest, GraphicsEventRegistration,
+};
 
 pub(crate) fn create_event_queue(
     runtime: &mut KernelRuntime,
@@ -313,6 +315,49 @@ pub(crate) fn remove_network_events_descriptor(
     });
     if queue.network_watchers.len() == original_len {
         return Err(EventQueueError::NetworkWatchNotFound.into());
+    }
+    Ok(())
+}
+
+pub(crate) fn watch_bus_events_descriptor(
+    runtime: &mut KernelRuntime,
+    owner: ProcessId,
+    queue_fd: Descriptor,
+    endpoint: BusEndpointId,
+    token: u64,
+    interest: BusEventInterest,
+    events: IoPollEvents,
+) -> Result<(), RuntimeError> {
+    let binding = runtime.event_queue_binding_for_fd(owner, queue_fd)?;
+    runtime.bus_endpoint_info(endpoint)?;
+    let queue = event_queue_mut_by_binding(runtime, binding)?;
+    queue
+        .bus_watchers
+        .retain(|watch| !(watch.endpoint == endpoint && watch.token == token));
+    queue.bus_watchers.push(BusEventRegistration {
+        endpoint,
+        token,
+        interest,
+        events,
+    });
+    Ok(())
+}
+
+pub(crate) fn remove_bus_events_descriptor(
+    runtime: &mut KernelRuntime,
+    owner: ProcessId,
+    queue_fd: Descriptor,
+    endpoint: BusEndpointId,
+    token: u64,
+) -> Result<(), RuntimeError> {
+    let binding = runtime.event_queue_binding_for_fd(owner, queue_fd)?;
+    let queue = event_queue_mut_by_binding(runtime, binding)?;
+    let original_len = queue.bus_watchers.len();
+    queue
+        .bus_watchers
+        .retain(|watch| !(watch.endpoint == endpoint && watch.token == token));
+    if queue.bus_watchers.len() == original_len {
+        return Err(EventQueueError::BusWatchNotFound.into());
     }
     Ok(())
 }

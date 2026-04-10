@@ -58,7 +58,8 @@ use ngos_user_abi::{
     SYS_SPAWN_PATH_PROCESS, SYS_SPAWN_PROCESS_COPY_VM, SYS_START_GPU_MEDIA_SESSION, SYS_STAT_PATH,
     SYS_STATFS_PATH, SYS_STORE_MEMORY_WORD, SYS_SUBMIT_GPU_BUFFER, SYS_SYMLINK_PATH,
     SYS_SYNC_MEMORY_RANGE, SYS_TCP_ACCEPT, SYS_TCP_CLOSE, SYS_TCP_CONNECT, SYS_TCP_LISTEN,
-    SYS_TCP_RECV, SYS_TCP_RESET, SYS_TCP_SEND, SYS_UNBIND_DEVICE_DRIVER, SYS_UNLINK_PATH,
+    SYS_TCP_RECV, SYS_TCP_RESET, SYS_TCP_SEND, SYS_ICMP_ECHO_REQUEST, SYS_UNBIND_DEVICE_DRIVER,
+    SYS_UNLINK_PATH,
     SYS_UNMAP_MEMORY_RANGE, SYS_WAIT_EVENT_QUEUE, SYS_WATCH_BUS_EVENTS, SYS_WATCH_GRAPHICS_EVENTS,
     SYS_WATCH_NET_EVENTS, SYS_WATCH_PROCESS_EVENTS, SYS_WATCH_RESOURCE_EVENTS, SYS_WRITE_GPU_BUFFER,
     SYS_WRITEV,
@@ -1824,6 +1825,32 @@ impl KernelRuntime {
                 };
                 self.tcp_send_reset(&socket_path, caller, self.current_tick)?;
                 Ok(SyscallReturn::ok(0))
+            }
+            SYS_ICMP_ECHO_REQUEST => {
+                let socket_path = match frame_string(self, caller, frame.arg0, frame.arg1) {
+                    Ok(path) => path,
+                    Err(error) => return Ok(error),
+                };
+                let target_ipv4 = [
+                    ((frame.arg2 >> 24) & 0xff) as u8,
+                    ((frame.arg2 >> 16) & 0xff) as u8,
+                    ((frame.arg2 >> 8) & 0xff) as u8,
+                    (frame.arg2 & 0xff) as u8,
+                ];
+                let identifier = (frame.arg3 >> 16) as u16;
+                let sequence = (frame.arg3 & 0xffff) as u16;
+                let count = frame.arg4;
+                let payload = b"ngos icmp echo request payload data 0123456789ABCDEF";
+                self.icmp_echo_request(
+                    &socket_path,
+                    caller,
+                    target_ipv4,
+                    identifier,
+                    sequence,
+                    payload,
+                    self.current_tick,
+                )?;
+                Ok(SyscallReturn::ok(count))
             }
             SYS_CREATE_EVENT_QUEUE => {
                 let mode = match NativeEventQueueMode::from_raw(frame.arg0 as u32) {

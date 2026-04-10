@@ -19,8 +19,12 @@ fn vm_object_id_for_path<B: SyscallBackend>(
     Err(273)
 }
 
-fn boot_bind_vm_memory_contract<B: SyscallBackend>(runtime: &Runtime<B>) -> Result<usize, ExitCode> {
-    let domain = runtime.create_domain(None, "boot-vm-memory").map_err(|_| 308)?;
+fn boot_bind_vm_memory_contract<B: SyscallBackend>(
+    runtime: &Runtime<B>,
+) -> Result<usize, ExitCode> {
+    let domain = runtime
+        .create_domain(None, "boot-vm-memory")
+        .map_err(|_| 308)?;
     let resource = runtime
         .create_resource(domain, NativeResourceKind::Memory, "boot-vm-memory")
         .map_err(|_| 308)?;
@@ -28,7 +32,12 @@ fn boot_bind_vm_memory_contract<B: SyscallBackend>(runtime: &Runtime<B>) -> Resu
         .set_resource_contract_policy(resource, NativeResourceContractPolicy::Memory)
         .map_err(|_| 308)?;
     let contract = runtime
-        .create_contract(domain, resource, NativeContractKind::Memory, "boot-vm-memory")
+        .create_contract(
+            domain,
+            resource,
+            NativeContractKind::Memory,
+            "boot-vm-memory",
+        )
         .map_err(|_| 308)?;
     runtime.bind_process_contract(contract).map_err(|_| 308)?;
     Ok(contract)
@@ -375,8 +384,11 @@ pub(crate) fn run_vm_quarantine_hardening<B: SyscallBackend>(
     runtime
         .protect_memory_range(pid, mapped, 0x2000, true, true, false)
         .map_err(|_| 289)?;
-    runtime.store_memory_word(pid, mapped, 81).map_err(|_| 290)?;
-    let vm_object_id = vm_object_id_for_path(runtime, "/proc/1/vmobjects", "/lib/libvm-quarantine.so")?;
+    runtime
+        .store_memory_word(pid, mapped, 81)
+        .map_err(|_| 290)?;
+    let vm_object_id =
+        vm_object_id_for_path(runtime, "/proc/1/vmobjects", "/lib/libvm-quarantine.so")?;
     runtime
         .quarantine_vm_object(pid, vm_object_id, 77)
         .map_err(|_| 291)?;
@@ -387,7 +399,9 @@ pub(crate) fn run_vm_quarantine_hardening<B: SyscallBackend>(
     runtime
         .release_vm_object(pid, vm_object_id)
         .map_err(|_| 293)?;
-    runtime.store_memory_word(pid, mapped, 83).map_err(|_| 294)?;
+    runtime
+        .store_memory_word(pid, mapped, 83)
+        .map_err(|_| 294)?;
 
     let vmobjects = path_contains_all_markers(
         runtime,
@@ -429,7 +443,9 @@ pub(crate) fn run_vm_policy_block_hardening<B: SyscallBackend>(
     let mapped = runtime
         .map_anonymous_memory(pid, 0x1000, true, true, false, "boot-vm-policy")
         .map_err(|_| 298)?;
-    runtime.store_memory_word(pid, mapped, 91).map_err(|_| 299)?;
+    runtime
+        .store_memory_word(pid, mapped, 91)
+        .map_err(|_| 299)?;
     runtime
         .set_contract_state(contract, NativeContractState::Suspended)
         .map_err(|_| 300)?;
@@ -453,7 +469,8 @@ pub(crate) fn run_vm_policy_block_hardening<B: SyscallBackend>(
         return Err(301);
     }
 
-    let vmdecisions = path_contains_all_markers(runtime, "/proc/1/vmdecisions", &["agent=policy-block"])?;
+    let vmdecisions =
+        path_contains_all_markers(runtime, "/proc/1/vmdecisions", &["agent=policy-block"])?;
     if !vmdecisions {
         let _ = runtime.set_contract_state(contract, NativeContractState::Active);
         return Err(302);
@@ -472,14 +489,18 @@ pub(crate) fn run_vm_policy_block_hardening<B: SyscallBackend>(
         .set_contract_state(contract, NativeContractState::Active)
         .map_err(|_| 304)?;
     runtime.load_memory_word(pid, mapped).map_err(|_| 305)?;
-    runtime.store_memory_word(pid, mapped, 92).map_err(|_| 306)?;
+    runtime
+        .store_memory_word(pid, mapped, 92)
+        .map_err(|_| 306)?;
     runtime
         .unmap_memory_range(pid, mapped, 0x1000)
         .map_err(|_| 307)?;
 
     write_line(
         runtime,
-        &format!("vm.smoke.policy pid={pid} contract={contract} blocked=yes resumed=yes outcome=ok"),
+        &format!(
+            "vm.smoke.policy pid={pid} contract={contract} blocked=yes resumed=yes outcome=ok"
+        ),
     )
 }
 

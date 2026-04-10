@@ -1,0 +1,12 @@
+[package]
+name = "ngos-shell-compat-abi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "ngos_shell_compat_abi"
+
+[dependencies]
+ngos-user-abi = { path = "../user-abi" }
+ngos-user-runtime = { path = "../user-runtime" }

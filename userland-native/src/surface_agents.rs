@@ -1,3 +1,18 @@
+//! Canonical subsystem role:
+//! - subsystem: native surface and readiness control
+//! - owner layer: Layer 3
+//! - semantic owner: `userland-native`
+//! - truth path role: operator-facing orchestration over readiness, file
+//!   descriptor, and surface-related contracts
+//!
+//! Canonical contract families handled here:
+//! - surface command contracts
+//! - readiness and watch command contracts
+//! - fd/surface inspection contracts
+//!
+//! This module may orchestrate surface-level commands, but it must not
+//! redefine readiness truth, descriptor truth, or lower-layer ownership.
+
 use super::*;
 
 pub(super) enum SurfaceAgentOutcome {
@@ -13,84 +28,14 @@ pub(super) fn try_handle_surface_agent_command<B: SyscallBackend>(
     line: &str,
     last_status: &mut i32,
 ) -> Option<Result<SurfaceAgentOutcome, ExitCode>> {
-    if let Some(rest) = line.strip_prefix("fd-watch ") {
-        let mut parts = rest.split_whitespace();
-        let Some(path) = parts.next() else {
-            let _ = write_line(
-                runtime,
-                "usage: fd-watch <path> <read|write|priority|readwrite|readpriority|writepriority|all>",
-            );
-            return Some(Err(2));
-        };
-        let Some(mode) = parts.next() else {
-            let _ = write_line(
-                runtime,
-                "usage: fd-watch <path> <read|write|priority|readwrite|readpriority|writepriority|all>",
-            );
-            return Some(Err(2));
-        };
-        let Some((readable, writable, priority)) = parse_readiness_interest(mode) else {
-            let _ = write_line(
-                runtime,
-                "usage: fd-watch <path> <read|write|priority|readwrite|readpriority|writepriority|all>",
-            );
-            return Some(Err(2));
-        };
-        *last_status = match shell_watch_fd_readiness(
-            runtime,
-            &resolve_shell_path(cwd, path),
-            readable,
-            writable,
-            priority,
-        ) {
-            Ok(fd) => {
-                shell_set_variable(variables, "LAST_WATCH_FD", fd.to_string());
-                0
-            }
-            Err(code) => code,
-        };
-        return Some(Ok(SurfaceAgentOutcome::Continue));
-    }
-    if line == "fd-ready" {
-        *last_status = match shell_collect_readiness(runtime) {
-            Ok(()) => 0,
-            Err(code) => code,
-        };
-        return Some(Ok(SurfaceAgentOutcome::Continue));
-    }
-    if let Some(rest) = line.strip_prefix("blk-read ") {
-        let mut parts = rest.split_whitespace();
-        let Some(device_path) = parts.next() else {
-            let _ = write_line(runtime, "usage: blk-read <device> <sector> [sector-count]");
-            return Some(Err(2));
-        };
-        let Some(sector) = parse_u64_arg(parts.next()) else {
-            let _ = write_line(runtime, "usage: blk-read <device> <sector> [sector-count]");
-            return Some(Err(2));
-        };
-        let sector_count = parts
-            .next()
-            .and_then(|token| parse_u64_arg(Some(token)))
-            .map(|count| count as u32)
-            .unwrap_or(1);
-        *last_status = match shell_submit_block_read(
-            runtime,
-            &resolve_shell_path(cwd, device_path),
-            sector,
-            sector_count,
-        ) {
-            Ok(()) => 0,
-            Err(code) => code,
-        };
-        return Some(Ok(SurfaceAgentOutcome::Continue));
-    }
-    if let Some(path) = line.strip_prefix("driver-read ") {
-        let resolved = resolve_shell_path(cwd, path.trim());
-        return Some(
-            shell_driver_read(runtime, &resolved)
-                .map(|_| SurfaceAgentOutcome::Continue)
-                .map_err(|_| 205),
-        );
+    if let Some(result) = ngos_shell_surface::try_handle_surface_front_command(
+        runtime,
+        cwd,
+        variables,
+        line,
+        last_status,
+    ) {
+        return Some(result.map(|()| SurfaceAgentOutcome::Continue));
     }
     if let Some(rest) = line.strip_prefix("fdinfo ") {
         let pid = match shell_resolve_self_pid(runtime, context, cwd) {
@@ -110,45 +55,8 @@ pub(super) fn try_handle_surface_agent_command<B: SyscallBackend>(
                 .map_err(|_| 205),
         );
     }
-    if let Some(rest) = line.strip_prefix("echo ") {
-        return Some(
-            write_line(runtime, rest)
-                .map(|_| SurfaceAgentOutcome::Continue)
-                .map_err(|_| 197),
-        );
-    }
-    if line == "smoke" {
-        let code = run_native_surface_smoke(runtime, false);
-        if code != 0 {
-            return Some(Err(code));
-        }
-        return Some(
-            write_line(runtime, "smoke-ok")
-                .map(|_| SurfaceAgentOutcome::Continue)
-                .map_err(|_| 198),
-        );
-    }
-    if line == "vfs-smoke" {
-        let code = run_native_vfs_boot_smoke(runtime);
-        if code != 0 {
-            return Some(Err(code));
-        }
-        return Some(
-            write_line(runtime, "vfs-smoke-ok")
-                .map(|_| SurfaceAgentOutcome::Continue)
-                .map_err(|_| 198),
-        );
-    }
-    if line == "wasm-smoke" {
-        let code = run_native_wasm_boot_smoke(runtime);
-        if code != 0 {
-            return Some(Err(code));
-        }
-        return Some(
-            write_line(runtime, "wasm-smoke-ok")
-                .map(|_| SurfaceAgentOutcome::Continue)
-                .map_err(|_| 198),
-        );
+    if let Some(result) = try_handle_surface_smoke_command(runtime, context, line) {
+        return Some(result.map(|()| SurfaceAgentOutcome::Continue));
     }
     if line == "exit" {
         return Some(Ok(SurfaceAgentOutcome::Exit(*last_status)));

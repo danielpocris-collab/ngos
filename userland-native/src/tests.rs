@@ -2,23 +2,23 @@ use super::*;
 use core::cell::{Cell, RefCell};
 use ngos_semantic_runtime::{SemanticObservation, semantic_for_channel};
 use ngos_user_abi::{
-    AT_ENTRY, AT_PAGESZ, BootSessionStage, BootSessionStatus, Errno, NATIVE_STORAGE_LINEAGE_DEPTH,
-    NativeBusEndpointRecord, NativeBusEventWatchConfig, NativeBusPeerRecord, NativeContractKind,
-    NativeContractRecord, NativeContractState, NativeDeviceRecord, NativeDeviceRequestRecord,
-    NativeDomainRecord, NativeDriverRecord, NativeEventRecord, NativeEventSourceKind,
-    NativeFileStatusRecord, NativeFileSystemStatusRecord, NativeGpuDisplayRecord,
-    NativeGpuScanoutRecord, NativeMountPropagationMode, NativeNetworkEventWatchConfig,
-    NativeNetworkInterfaceRecord, NativeNetworkSocketRecord, NativeObjectKind,
-    NativeProcessIdentityRecord, NativeProcessRecord, NativeResourceArbitrationPolicy,
-    NativeResourceCancelRecord, NativeResourceClaimRecord, NativeResourceContractPolicy,
-    NativeResourceEventWatchConfig, NativeResourceGovernanceMode, NativeResourceIssuerPolicy,
-    NativeResourceKind, NativeResourceRecord, NativeResourceReleaseRecord, NativeResourceState,
-    NativeSchedulerClass, NativeStorageLineageEntry, NativeStorageLineageRecord,
-    NativeStorageVolumeRecord, NativeSystemSnapshotRecord, SYS_ACQUIRE_RESOURCE,
-    SYS_ADVISE_MEMORY_RANGE, SYS_ATTACH_BUS_PEER, SYS_BIND_UDP_SOCKET,
-    SYS_BLOCKED_PENDING_SIGNALS, SYS_BOOT_REPORT, SYS_CANCEL_RESOURCE_CLAIM, SYS_CHDIR_PATH,
-    SYS_CHMOD_PATH, SYS_CHOWN_PATH, SYS_CLAIM_RESOURCE,
-    SYS_CLOSE, SYS_COMPLETE_NET_TX, SYS_CONFIGURE_NETIF_ADMIN, SYS_CONFIGURE_NETIF_IPV4,
+    AT_ENTRY, AT_PAGESZ, BlockRightsMask, BootSessionStage, BootSessionStatus, Errno,
+    NATIVE_STORAGE_LINEAGE_DEPTH, NativeBusEndpointRecord, NativeBusEventWatchConfig,
+    NativeBusPeerRecord, NativeContractKind, NativeContractRecord, NativeContractState,
+    NativeDeviceRecord, NativeDeviceRequestRecord, NativeDomainRecord, NativeDriverRecord,
+    NativeEventRecord, NativeEventSourceKind, NativeFileStatusRecord, NativeFileSystemStatusRecord,
+    NativeGpuDisplayRecord, NativeGpuScanoutRecord, NativeMountPropagationMode,
+    NativeNetworkEventWatchConfig, NativeNetworkInterfaceRecord, NativeNetworkSocketRecord,
+    NativeObjectKind, NativeProcessIdentityRecord, NativeProcessRecord,
+    NativeResourceArbitrationPolicy, NativeResourceCancelRecord, NativeResourceClaimRecord,
+    NativeResourceContractPolicy, NativeResourceEventWatchConfig, NativeResourceGovernanceMode,
+    NativeResourceIssuerPolicy, NativeResourceKind, NativeResourceRecord,
+    NativeResourceReleaseRecord, NativeResourceState, NativeSchedulerClass,
+    NativeStorageLineageEntry, NativeStorageLineageRecord, NativeStorageVolumeRecord,
+    NativeSystemSnapshotRecord, SYS_ACQUIRE_RESOURCE, SYS_ADVISE_MEMORY_RANGE, SYS_ATTACH_BUS_PEER,
+    SYS_BIND_UDP_SOCKET, SYS_BLOCKED_PENDING_SIGNALS, SYS_BOOT_REPORT, SYS_CANCEL_RESOURCE_CLAIM,
+    SYS_CHDIR_PATH, SYS_CHMOD_PATH, SYS_CHOWN_PATH, SYS_CLAIM_RESOURCE, SYS_CLOSE,
+    SYS_COMPLETE_NET_TX, SYS_CONFIGURE_NETIF_ADMIN, SYS_CONFIGURE_NETIF_IPV4,
     SYS_CONNECT_UDP_SOCKET, SYS_CREATE_BUS_ENDPOINT, SYS_CREATE_BUS_PEER, SYS_CREATE_CONTRACT,
     SYS_CREATE_DOMAIN, SYS_CREATE_EVENT_QUEUE, SYS_CREATE_RESOURCE, SYS_DETACH_BUS_PEER, SYS_DUP,
     SYS_FCNTL, SYS_GET_CONTRACT_LABEL, SYS_GET_DOMAIN_NAME, SYS_GET_PROCESS_CWD,
@@ -37,11 +37,10 @@ use ngos_user_abi::{
     SYS_PROTECT_MEMORY_RANGE, SYS_PUBLISH_BUS_MESSAGE, SYS_QUARANTINE_VM_OBJECT, SYS_READ,
     SYS_READ_GPU_SCANOUT_FRAME, SYS_READ_PROCFS, SYS_READLINK_PATH, SYS_REAP_PROCESS,
     SYS_RECEIVE_BUS_MESSAGE, SYS_RECLAIM_MEMORY_PRESSURE, SYS_RECLAIM_MEMORY_PRESSURE_GLOBAL,
-    SYS_RECOVER_STORAGE_VOLUME, SYS_RELEASE_VM_OBJECT,
-    SYS_RECVFROM_UDP_SOCKET, SYS_RELEASE_CLAIMED_RESOURCE, SYS_RELEASE_RESOURCE,
-    SYS_REMOVE_BUS_EVENTS, SYS_REMOVE_GRAPHICS_EVENTS, SYS_REMOVE_NET_EVENTS,
-    SYS_REMOVE_PROCESS_EVENTS, SYS_REMOVE_RESOURCE_EVENTS, SYS_RENAME_PATH, SYS_RENICE_PROCESS,
-    SYS_REPAIR_STORAGE_SNAPSHOT, SYS_RESUME_PROCESS, SYS_SEEK, SYS_SEND_SIGNAL,
+    SYS_RECOVER_STORAGE_VOLUME, SYS_RECVFROM_UDP_SOCKET, SYS_RELEASE_CLAIMED_RESOURCE,
+    SYS_RELEASE_RESOURCE, SYS_RELEASE_VM_OBJECT, SYS_REMOVE_BUS_EVENTS, SYS_REMOVE_GRAPHICS_EVENTS,
+    SYS_REMOVE_NET_EVENTS, SYS_REMOVE_PROCESS_EVENTS, SYS_REMOVE_RESOURCE_EVENTS, SYS_RENAME_PATH,
+    SYS_RENICE_PROCESS, SYS_REPAIR_STORAGE_SNAPSHOT, SYS_RESUME_PROCESS, SYS_SEEK, SYS_SEND_SIGNAL,
     SYS_SENDTO_UDP_SOCKET, SYS_SET_CONTRACT_STATE, SYS_SET_MOUNT_PROPAGATION,
     SYS_SET_NETIF_LINK_STATE, SYS_SET_PROCESS_AFFINITY, SYS_SET_PROCESS_ARGS,
     SYS_SET_PROCESS_BREAK, SYS_SET_PROCESS_CWD, SYS_SET_PROCESS_ENV,
@@ -62,6 +61,7 @@ mod bus_agent_tests;
 mod compat_primitives_tests;
 mod compat_runtime_tests;
 mod compat_smoke_tests;
+mod domain_resource_contract_tests;
 mod event_queue_tests;
 mod fd_agent_tests;
 mod game_audio_input_tests;
@@ -71,6 +71,7 @@ mod game_graphics_tests;
 mod game_session_watch_tests;
 mod network_agent_tests;
 mod nextmind_runtime_tests;
+mod process_model_tests;
 mod repair_ai_tests;
 mod resource_agent_tests;
 mod semantic_runtime_tests;
@@ -170,9 +171,16 @@ struct RecordedBusPeerState {
 }
 
 #[derive(Clone, Debug)]
+struct RecordedBusAttachmentState {
+    peer: u64,
+    rights: u64,
+}
+
+#[derive(Clone, Debug)]
 struct RecordedBusEndpointState {
     record: NativeBusEndpointRecord,
     path: String,
+    attachments: Vec<RecordedBusAttachmentState>,
     messages: Vec<Vec<u8>>,
 }
 
@@ -2833,6 +2841,141 @@ impl RecordingBackend {
         (lines.join("\n") + "\n").into_bytes()
     }
 
+    fn render_scheduler_procfs(&self) -> Vec<u8> {
+        let frames = self.frames.borrow();
+        let snapshot = replayed_system_snapshot(&frames);
+        let (placements, rebalance) = replayed_scheduler_placements(&frames, self.next_pid.get());
+        let worker_present = replayed_process_present(&frames, 77);
+        let worker_class = replayed_process_scheduler(&frames, 77).0;
+        let worker_cpu = placements
+            .iter()
+            .find(|placement| placement.pid == 77)
+            .map(|placement| placement.assigned_cpu)
+            .unwrap_or(0);
+        let worker_is_interactive =
+            worker_present && worker_class == NativeSchedulerClass::Interactive as u32;
+        let worker_is_background =
+            worker_present && worker_class == NativeSchedulerClass::Background as u32;
+        let mut cpu_queue_tids =
+            vec![[String::new(), String::new(), String::new(), String::new()]; 2];
+        let mut cpu_queue_counts = vec![[0usize; 4]; 2];
+        for placement in placements.iter().filter(|placement| placement.state != 3) {
+            let class_index = match placement.class {
+                value if value == NativeSchedulerClass::LatencyCritical as u32 => 0,
+                value if value == NativeSchedulerClass::Interactive as u32 => 1,
+                value if value == NativeSchedulerClass::BestEffort as u32 => 2,
+                _ => 3,
+            };
+            cpu_queue_counts[placement.assigned_cpu][class_index] += 1;
+            if !cpu_queue_tids[placement.assigned_cpu][class_index].is_empty() {
+                cpu_queue_tids[placement.assigned_cpu][class_index].push(',');
+            }
+            cpu_queue_tids[placement.assigned_cpu][class_index]
+                .push_str(&placement.pid.to_string());
+        }
+        let worker_background_tids = cpu_queue_tids[worker_cpu][3].clone();
+        let worker_background_count = cpu_queue_counts[worker_cpu][3];
+        let worker_interactive_tids = cpu_queue_tids[1][1].clone();
+        let worker_interactive_count = cpu_queue_counts[1][1];
+        let total_cpu1_load = cpu_queue_counts[1].iter().sum::<usize>();
+        let rebalance_migrations =
+            rebalance.migrations + u64::from(worker_is_background && worker_cpu == 1);
+        let last_rebalance =
+            u64::from(rebalance.last_pid != 0 || (worker_is_background && worker_cpu == 1));
+        let mut lines = vec![
+            format!(
+                "current-tick:\t{}\nbusy-ticks:\t{}\ndefault-budget:\t2\ndecision-tracing:\ttrue\nqueued-total:\t{}\nqueued-latency-critical:\t{}\nqueued-interactive:\t{}\nqueued-best-effort:\t{}\nqueued-background:\t{}\nfairness-dispatch-total:\t4\nfairness-runtime-total:\t4\nfairness-runtime-imbalance:\t1\nrunning:\tpid=1 tid=1 class=Interactive budget=2 cpu=0",
+                snapshot.current_tick,
+                snapshot.busy_ticks,
+                snapshot.queued_processes,
+                snapshot.queued_latency_critical,
+                snapshot.queued_interactive,
+                snapshot.queued_normal,
+                snapshot.queued_background,
+            ),
+            format!(
+                "cpu-summary:\tcount=2\trunning=0\tload-imbalance={}\trebalance-ops=4\trebalance-migrations={}\tlast-rebalance={}",
+                snapshot.scheduler_cpu_load_imbalance, rebalance_migrations, last_rebalance,
+            ),
+            String::from(
+                "cpu\tindex=0\tapic-id=0\tpackage=0\tcore-group=0\tsibling-group=0\tinferred-topology=true\tqueued-load=1\tdispatches=4\truntime-ticks=8\trunning=true",
+            ),
+            format!(
+                "cpu\tindex=1\tapic-id=1\tpackage=0\tcore-group=0\tsibling-group=1\tinferred-topology=true\tqueued-load={}\tdispatches=2\truntime-ticks=3\trunning=false",
+                total_cpu1_load
+            ),
+            String::from("cpu-queue\tindex=0\tclass=interactive\tcount=1\ttids=[1]"),
+            format!(
+                "cpu-queue\tindex=1\tclass=interactive\tcount={worker_interactive_count}\ttids=[{worker_interactive_tids}]"
+            ),
+            format!(
+                "cpu-queue\tindex=1\tclass=background\tcount={worker_background_count}\ttids=[{worker_background_tids}]"
+            ),
+            format!(
+                "queue\tclass=background\tcount={worker_background_count}\ttokens=1\twait-ticks=1\tlag-debt=1\tdispatches=1\truntime-ticks=1\ttids=[{worker_background_tids}]"
+            ),
+            String::from("policy\tclass=background\turgent=0\tstarved=false\tstarvation-guard=8"),
+            String::from("decisions:\t2"),
+            String::from(
+                "decision\ttick=100\tagent=TickAgent\tpid=1\ttid=1\tclass=1\tdetail0=3\tdetail1=2\tmeaning=tick dispatch-selected budget=2",
+            ),
+        ];
+        if rebalance.last_pid != 0 {
+            lines.push(format!(
+                "decision\ttick=100\tagent=RebalanceAgent\tpid={}\ttid={}\tclass=1\tdetail0={}\tdetail1={}\tmeaning=rebalance queued-moved from-cpu={} to-cpu={}",
+                rebalance.last_pid,
+                rebalance.last_pid,
+                rebalance.last_from_cpu,
+                rebalance.last_to_cpu,
+                rebalance.last_from_cpu,
+                rebalance.last_to_cpu,
+            ));
+        }
+        if frames
+            .iter()
+            .any(|entry| entry.number == SYS_SET_PROCESS_AFFINITY && entry.arg0 == 77)
+        {
+            let affinity_mask = replayed_process_affinity(&frames, 77);
+            lines.push(format!(
+                "decision\ttick=101\tagent=AffinityAgent\tpid=0\ttid=77\tclass=3\tdetail0={affinity_mask}\tdetail1={worker_cpu}\tmeaning=affinity cpu-mask=0x{affinity_mask:x} assigned-cpu={worker_cpu}"
+            ));
+        }
+        (lines.join("\n") + "\n").into_bytes()
+    }
+
+    fn render_scheduler_episodes_procfs(&self) -> Vec<u8> {
+        let frames = self.frames.borrow();
+        let (placements, rebalance) = replayed_scheduler_placements(&frames, self.next_pid.get());
+        let worker_cpu = placements
+            .iter()
+            .find(|placement| placement.pid == 77)
+            .map(|placement| placement.assigned_cpu)
+            .unwrap_or(0);
+        let mut lines = vec![String::from(
+            "episode\tkind=dispatch\ttick=100\tpid=1\ttid=1\tclass=1\tbudget=2\tcausal=selected-next-runnable",
+        )];
+        if rebalance.last_pid != 0 {
+            lines.push(format!(
+                "episode\tkind=rebalance\ttick=100\tpid={}\ttid={}\tclass=1\tbudget=2\tcausal=queued-moved from-cpu={} to-cpu={}",
+                rebalance.last_pid,
+                rebalance.last_pid,
+                rebalance.last_from_cpu,
+                rebalance.last_to_cpu,
+            ));
+        }
+        if frames
+            .iter()
+            .any(|entry| entry.number == SYS_SET_PROCESS_AFFINITY && entry.arg0 == 77)
+        {
+            let affinity_mask = replayed_process_affinity(&frames, 77);
+            lines.push(format!(
+                "episode\tkind=affinity\ttick=101\tpid=0\ttid=77\tclass=3\tbudget={affinity_mask}\tcausal=cpu-mask-updated assigned-cpu={worker_cpu}"
+            ));
+        }
+        lines.insert(0, format!("episodes:\t{}", lines.len()));
+        (lines.join("\n") + "\n").into_bytes()
+    }
+
     fn procfs_queue_listing(&self, pid: u64) -> String {
         if pid != 1 {
             return String::new();
@@ -2892,7 +3035,10 @@ impl RecordingBackend {
 
     fn emit_vm_policy_block(&self, pid: u64) {
         self.push_vm_decision(pid, format!("agent=policy-block pid={pid}"));
-        self.push_vm_episode(pid, format!("kind=policy pid={pid} blocked=yes last=policy-block"));
+        self.push_vm_episode(
+            pid,
+            format!("kind=policy pid={pid} blocked=yes last=policy-block"),
+        );
     }
 
     fn ensure_heap_mapping(&self, pid: u64) {
@@ -3311,12 +3457,7 @@ impl RecordingBackend {
         reclaimed.min(target_pages)
     }
 
-    fn quarantine_vm_object(
-        &self,
-        pid: u64,
-        vm_object_id: u64,
-        reason: u64,
-    ) -> Result<(), Errno> {
+    fn quarantine_vm_object(&self, pid: u64, vm_object_id: u64, reason: u64) -> Result<(), Errno> {
         let mut mappings = self.vm_mappings.borrow_mut();
         let Some(mapping) = mappings.iter_mut().find(|mapping| {
             mapping.pid == pid
@@ -3933,7 +4074,7 @@ fn replayed_process_scheduler(frames: &[SyscallFrame], pid: u64) -> (u32, u32) {
         .find(|entry| entry.number == SYS_RENICE_PROCESS && entry.arg0 as u64 == pid)
         .map(|entry| (entry.arg1 as u32, entry.arg2 as u32))
         .unwrap_or_else(|| {
-            if pid == 1 {
+            if pid == 1 || pid >= 77 {
                 (NativeSchedulerClass::Interactive as u32, 2)
             } else {
                 (NativeSchedulerClass::LatencyCritical as u32, 4)
@@ -3942,7 +4083,7 @@ fn replayed_process_scheduler(frames: &[SyscallFrame], pid: u64) -> (u32, u32) {
 }
 
 fn replayed_process_state(frames: &[SyscallFrame], pid: u64) -> u32 {
-    if pid >= 77 {
+    if !replayed_process_present(frames, pid) {
         return 4;
     }
     frames
@@ -3959,6 +4100,124 @@ fn replayed_process_state(frames: &[SyscallFrame], pid: u64) -> u32 {
             }
         })
         .unwrap_or(2)
+}
+
+fn replayed_process_affinity(frames: &[SyscallFrame], pid: u64) -> u64 {
+    frames
+        .iter()
+        .rev()
+        .find(|entry| entry.number == SYS_SET_PROCESS_AFFINITY && entry.arg0 as u64 == pid)
+        .map(|entry| entry.arg1 as u64)
+        .unwrap_or(0b11)
+}
+
+fn replayed_process_present(frames: &[SyscallFrame], pid: u64) -> bool {
+    !frames.iter().rev().any(|entry| {
+        (entry.number == SYS_REAP_PROCESS || entry.number == SYS_SEND_SIGNAL)
+            && entry.arg0 as u64 == pid
+    })
+}
+
+#[derive(Clone, Copy)]
+struct ReplayedSchedulerPlacement {
+    pid: u64,
+    class: u32,
+    budget: u32,
+    state: u32,
+    affinity_mask: u64,
+    assigned_cpu: usize,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ReplayedSchedulerBalanceSummary {
+    migrations: u64,
+    last_rebalance: u64,
+    last_pid: u64,
+    last_from_cpu: usize,
+    last_to_cpu: usize,
+}
+
+fn replayed_pick_cpu(affinity_mask: u64, current_cpu: usize) -> usize {
+    if current_cpu < 64 && (affinity_mask & (1u64 << current_cpu)) != 0 {
+        return current_cpu;
+    }
+    if (affinity_mask & 0b10) != 0 { 1 } else { 0 }
+}
+
+fn replayed_scheduler_placements(
+    frames: &[SyscallFrame],
+    next_pid: u64,
+) -> (
+    Vec<ReplayedSchedulerPlacement>,
+    ReplayedSchedulerBalanceSummary,
+) {
+    let mut placements = (77..next_pid)
+        .filter(|pid| replayed_process_present(frames, *pid))
+        .map(|pid| {
+            let (class, budget) = replayed_process_scheduler(frames, pid);
+            let affinity_mask = replayed_process_affinity(frames, pid);
+            let assigned_cpu = if affinity_mask == 0b10 { 1 } else { 0 };
+            ReplayedSchedulerPlacement {
+                pid,
+                class,
+                budget,
+                state: replayed_process_state(frames, pid),
+                affinity_mask,
+                assigned_cpu,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut cpu_loads = [0usize; 2];
+    for placement in placements.iter().filter(|placement| placement.state != 3) {
+        cpu_loads[placement.assigned_cpu] = cpu_loads[placement.assigned_cpu].saturating_add(1);
+    }
+
+    let mut summary = ReplayedSchedulerBalanceSummary::default();
+    for placement in placements
+        .iter_mut()
+        .filter(|placement| placement.state != 3)
+    {
+        let mut best_cpu = placement.assigned_cpu;
+        let mut best_load = cpu_loads[placement.assigned_cpu];
+        for candidate_cpu in 0..2 {
+            if (placement.affinity_mask & (1u64 << candidate_cpu)) == 0 {
+                continue;
+            }
+            let candidate_load = cpu_loads[candidate_cpu];
+            if candidate_load < best_load {
+                best_cpu = candidate_cpu;
+                best_load = candidate_load;
+            }
+        }
+        if best_cpu == placement.assigned_cpu {
+            continue;
+        }
+        let current_load = cpu_loads[placement.assigned_cpu];
+        let best_load = cpu_loads[best_cpu];
+        if current_load <= best_load.saturating_add(1) {
+            continue;
+        }
+        let from_cpu = placement.assigned_cpu;
+        placement.assigned_cpu = best_cpu;
+        cpu_loads[from_cpu] = cpu_loads[from_cpu].saturating_sub(1);
+        cpu_loads[best_cpu] = cpu_loads[best_cpu].saturating_add(1);
+        summary.migrations = summary.migrations.saturating_add(1);
+        summary.last_rebalance = 1;
+        summary.last_pid = placement.pid;
+        summary.last_from_cpu = from_cpu;
+        summary.last_to_cpu = best_cpu;
+    }
+
+    if summary.last_pid == 0 && placements.len() >= 2 {
+        summary.migrations = 1;
+        summary.last_rebalance = 1;
+        summary.last_pid = placements[0].pid;
+        summary.last_from_cpu = 0;
+        summary.last_to_cpu = 1;
+    }
+
+    (placements, summary)
 }
 
 fn replayed_system_snapshot(frames: &[SyscallFrame]) -> NativeSystemSnapshotRecord {
@@ -4431,6 +4690,8 @@ impl ngos_user_abi::SyscallBackend for RecordingBackend {
                         owner: 1,
                         domain: frame.arg0 as u64,
                         attached_endpoint_count: 0,
+                        readable_endpoint_count: 0,
+                        writable_endpoint_count: 0,
                         publish_count: 0,
                         receive_count: 0,
                         last_endpoint: 0,
@@ -4461,6 +4722,8 @@ impl ngos_user_abi::SyscallBackend for RecordingBackend {
                             kind: 0,
                             reserved: 0,
                             attached_peer_count: 0,
+                            readable_peer_count: 0,
+                            writable_peer_count: 0,
                             publish_count: 0,
                             receive_count: 0,
                             byte_count: 0,
@@ -4471,6 +4734,7 @@ impl ngos_user_abi::SyscallBackend for RecordingBackend {
                             last_peer: 0,
                         },
                         path: path.to_string(),
+                        attachments: Vec::new(),
                         messages: Vec::new(),
                     });
                 SyscallReturn::ok(id as usize)
@@ -4478,6 +4742,15 @@ impl ngos_user_abi::SyscallBackend for RecordingBackend {
             SYS_ATTACH_BUS_PEER => {
                 let peer = frame.arg0 as u64;
                 let endpoint = frame.arg1 as u64;
+                let rights = if frame.arg2 == 0 {
+                    BlockRightsMask::READ.union(BlockRightsMask::WRITE).0
+                } else {
+                    frame.arg2 as u64
+                };
+                let allowed_rights = BlockRightsMask::READ.union(BlockRightsMask::WRITE).0;
+                if rights == 0 || (rights & !allowed_rights) != 0 {
+                    return SyscallReturn::err(Errno::Inval);
+                }
                 let mut peers = self.bus_peers.borrow_mut();
                 let Some(peer_entry) = peers.iter_mut().find(|entry| entry.record.id == peer)
                 else {
@@ -4490,11 +4763,79 @@ impl ngos_user_abi::SyscallBackend for RecordingBackend {
                 else {
                     return SyscallReturn::err(Errno::NoEnt);
                 };
-                peer_entry.record.attached_endpoint_count =
-                    peer_entry.record.attached_endpoint_count.saturating_add(1);
+                let previous = endpoint_entry
+                    .attachments
+                    .iter()
+                    .find(|attachment| attachment.peer == peer)
+                    .cloned();
+                if let Some(attachment) = endpoint_entry
+                    .attachments
+                    .iter_mut()
+                    .find(|attachment| attachment.peer == peer)
+                {
+                    attachment.rights = rights;
+                } else {
+                    endpoint_entry
+                        .attachments
+                        .push(RecordedBusAttachmentState { peer, rights });
+                }
+                if previous.is_none() {
+                    peer_entry.record.attached_endpoint_count =
+                        peer_entry.record.attached_endpoint_count.saturating_add(1);
+                    endpoint_entry.record.attached_peer_count =
+                        endpoint_entry.record.attached_peer_count.saturating_add(1);
+                }
+                if previous
+                    .as_ref()
+                    .map(|attachment| {
+                        BlockRightsMask(attachment.rights).contains(BlockRightsMask::READ)
+                    })
+                    .unwrap_or(false)
+                    && !BlockRightsMask(rights).contains(BlockRightsMask::READ)
+                {
+                    peer_entry.record.readable_endpoint_count =
+                        peer_entry.record.readable_endpoint_count.saturating_sub(1);
+                    endpoint_entry.record.readable_peer_count =
+                        endpoint_entry.record.readable_peer_count.saturating_sub(1);
+                } else if !previous
+                    .as_ref()
+                    .map(|attachment| {
+                        BlockRightsMask(attachment.rights).contains(BlockRightsMask::READ)
+                    })
+                    .unwrap_or(false)
+                    && BlockRightsMask(rights).contains(BlockRightsMask::READ)
+                {
+                    peer_entry.record.readable_endpoint_count =
+                        peer_entry.record.readable_endpoint_count.saturating_add(1);
+                    endpoint_entry.record.readable_peer_count =
+                        endpoint_entry.record.readable_peer_count.saturating_add(1);
+                }
+                if previous
+                    .as_ref()
+                    .map(|attachment| {
+                        BlockRightsMask(attachment.rights).contains(BlockRightsMask::WRITE)
+                    })
+                    .unwrap_or(false)
+                    && !BlockRightsMask(rights).contains(BlockRightsMask::WRITE)
+                {
+                    peer_entry.record.writable_endpoint_count =
+                        peer_entry.record.writable_endpoint_count.saturating_sub(1);
+                    endpoint_entry.record.writable_peer_count =
+                        endpoint_entry.record.writable_peer_count.saturating_sub(1);
+                } else if !previous
+                    .as_ref()
+                    .map(|attachment| {
+                        BlockRightsMask(attachment.rights).contains(BlockRightsMask::WRITE)
+                    })
+                    .unwrap_or(false)
+                    && BlockRightsMask(rights).contains(BlockRightsMask::WRITE)
+                {
+                    peer_entry.record.writable_endpoint_count =
+                        peer_entry.record.writable_endpoint_count.saturating_add(1);
+                    endpoint_entry.record.writable_peer_count =
+                        endpoint_entry.record.writable_peer_count.saturating_add(1);
+                }
                 peer_entry.record.last_endpoint = endpoint;
-                endpoint_entry.record.attached_peer_count =
-                    endpoint_entry.record.attached_peer_count.saturating_add(1);
                 endpoint_entry.record.last_peer = peer;
                 drop(endpoints);
                 drop(peers);
@@ -4516,8 +4857,28 @@ impl ngos_user_abi::SyscallBackend for RecordingBackend {
                 else {
                     return SyscallReturn::err(Errno::NoEnt);
                 };
+                let Some(index) = endpoint_entry
+                    .attachments
+                    .iter()
+                    .position(|attachment| attachment.peer == peer)
+                else {
+                    return SyscallReturn::err(Errno::Inval);
+                };
+                let attachment = endpoint_entry.attachments.remove(index);
                 peer_entry.record.attached_endpoint_count =
                     peer_entry.record.attached_endpoint_count.saturating_sub(1);
+                if BlockRightsMask(attachment.rights).contains(BlockRightsMask::READ) {
+                    peer_entry.record.readable_endpoint_count =
+                        peer_entry.record.readable_endpoint_count.saturating_sub(1);
+                    endpoint_entry.record.readable_peer_count =
+                        endpoint_entry.record.readable_peer_count.saturating_sub(1);
+                }
+                if BlockRightsMask(attachment.rights).contains(BlockRightsMask::WRITE) {
+                    peer_entry.record.writable_endpoint_count =
+                        peer_entry.record.writable_endpoint_count.saturating_sub(1);
+                    endpoint_entry.record.writable_peer_count =
+                        endpoint_entry.record.writable_peer_count.saturating_sub(1);
+                }
                 endpoint_entry.record.attached_peer_count =
                     endpoint_entry.record.attached_peer_count.saturating_sub(1);
                 drop(endpoints);
@@ -4609,11 +4970,16 @@ impl ngos_user_abi::SyscallBackend for RecordingBackend {
                 else {
                     return SyscallReturn::err(Errno::NoEnt);
                 };
-                if peer_entry.record.attached_endpoint_count == 0
-                    || peer_entry.record.last_endpoint != endpoint
-                    || endpoint_entry.record.attached_peer_count == 0
-                {
+                let Some(attachment) = endpoint_entry
+                    .attachments
+                    .iter()
+                    .find(|attachment| attachment.peer == peer)
+                    .cloned()
+                else {
                     return SyscallReturn::err(Errno::Inval);
+                };
+                if !BlockRightsMask(attachment.rights).contains(BlockRightsMask::WRITE) {
+                    return SyscallReturn::err(Errno::Access);
                 }
                 if endpoint_entry.messages.len() >= endpoint_entry.record.queue_capacity as usize {
                     endpoint_entry.record.overflow_count =
@@ -4657,11 +5023,16 @@ impl ngos_user_abi::SyscallBackend for RecordingBackend {
                 else {
                     return SyscallReturn::err(Errno::NoEnt);
                 };
-                if peer_entry.record.attached_endpoint_count == 0
-                    || peer_entry.record.last_endpoint != endpoint
-                    || endpoint_entry.record.attached_peer_count == 0
-                {
+                let Some(attachment) = endpoint_entry
+                    .attachments
+                    .iter()
+                    .find(|attachment| attachment.peer == peer)
+                    .cloned()
+                else {
                     return SyscallReturn::err(Errno::Inval);
+                };
+                if !BlockRightsMask(attachment.rights).contains(BlockRightsMask::READ) {
+                    return SyscallReturn::err(Errno::Access);
                 }
                 let Some(message) = endpoint_entry.messages.first().cloned() else {
                     return SyscallReturn::err(Errno::Again);
@@ -5295,10 +5666,16 @@ impl ngos_user_abi::SyscallBackend for RecordingBackend {
             | SYS_PAUSE_PROCESS
             | SYS_RESUME_PROCESS
             | SYS_RENICE_PROCESS
-            | SYS_SET_PROCESS_AFFINITY
             | SYS_WATCH_GRAPHICS_EVENTS
             | SYS_REMOVE_PROCESS_EVENTS
             | SYS_REMOVE_GRAPHICS_EVENTS => SyscallReturn::ok(0),
+            SYS_SET_PROCESS_AFFINITY => {
+                if frame.arg1 == 0 {
+                    SyscallReturn::err(Errno::Inval)
+                } else {
+                    SyscallReturn::ok(0)
+                }
+            }
             SYS_WATCH_PROCESS_EVENTS => {
                 let config = unsafe {
                     (frame.arg2 as *const ngos_user_abi::NativeProcessEventWatchConfig)
@@ -5516,8 +5893,11 @@ impl ngos_user_abi::SyscallBackend for RecordingBackend {
                 }
             }
             SYS_QUARANTINE_VM_OBJECT => {
-                match self.quarantine_vm_object(frame.arg0 as u64, frame.arg1 as u64, frame.arg2 as u64)
-                {
+                match self.quarantine_vm_object(
+                    frame.arg0 as u64,
+                    frame.arg1 as u64,
+                    frame.arg2 as u64,
+                ) {
                     Ok(()) => SyscallReturn::ok(0),
                     Err(errno) => SyscallReturn::err(errno),
                 }
@@ -6006,7 +6386,7 @@ impl ngos_user_abi::SyscallBackend for RecordingBackend {
                     Ok(path) => path,
                     Err(_) => return SyscallReturn::err(Errno::Inval),
                 };
-                if path == "/proc/system/bus"
+                if (path == "/proc/system/bus" || path == "/proc/system/scheduler")
                     && !self
                         .frames
                         .borrow()
@@ -6020,6 +6400,8 @@ impl ngos_user_abi::SyscallBackend for RecordingBackend {
                 } else {
                     match path {
                         "/proc/system/bus" => self.render_bus_procfs(),
+                        "/proc/system/scheduler" => self.render_scheduler_procfs(),
+                        "/proc/system/schedulerepisodes" => self.render_scheduler_episodes_procfs(),
                         "/proc/1/status" => {
                             b"Name:\tngos-userland-native\nState:\tRunning\nPid:\t1\nCwd:\t/\n"
                                 .to_vec()
@@ -7986,7 +8368,7 @@ fn native_program_runs_kernel_launch_shell_script_from_stdin() {
     assert!(stdout.contains("path=/proc/1/status kind=file inode=99 size=4096"));
     assert!(stdout.contains("path=/proc/1/status mounts=1 nodes=3 read_only=0"));
     assert!(stdout.contains("opened path=/proc/1/status fd=7"));
-    assert!(stdout.contains("link /shell-tmp/current-note -> /shell-tmp/note"));
+    assert!(stdout.contains("link /shell-tmp/current-note -> note"));
     assert!(stdout.contains("ngos host motd"));
     assert!(stdout.contains("directory-created path=/shell-tmp"));
     assert!(stdout.contains("cwd-updated path=/shell-tmp"));
@@ -8013,10 +8395,10 @@ fn native_program_runs_kernel_launch_shell_script_from_stdin() {
     assert!(!stdout.contains("skipped\n"));
     assert!(!stdout.contains("skipped-2\n"));
     assert!(stdout.contains("last-status=0"));
-    assert!(stdout.contains("symlink-created path=/shell-tmp/current-note target=/shell-tmp/note"));
+    assert!(stdout.contains("symlink-created path=/shell-tmp/current-note target=note"));
     assert!(stdout.contains("path-renamed from=/shell-tmp/note to=/shell-tmp/note-2"));
     assert!(stdout.contains("note-2\tFile"));
-    assert!(stdout.contains("link /shell-tmp/current-note -> /shell-tmp/note"));
+    assert!(stdout.contains("link /shell-tmp/current-note -> note"));
     assert!(stdout.contains("history 1 help"));
     assert!(stdout.contains("history 2 pwd"));
     assert!(stdout.contains("history "));
@@ -8202,7 +8584,7 @@ fn native_shell_readlink_preserves_symlink_target_after_rename() {
     let stdout = String::from_utf8(runtime.backend().stdout.borrow().clone()).unwrap();
     assert_eq!(code, 0, "{stdout}");
     assert!(
-        stdout.contains("link /shell-tmp/current-note -> /shell-tmp/note"),
+        stdout.contains("link /shell-tmp/current-note -> note"),
         "{stdout}"
     );
 }
@@ -9513,6 +9895,57 @@ fn native_shell_reports_ux_discovery_and_unknown_command_feedback() {
     assert!(stdout.contains("unknown-command"));
     assert!(stdout.contains("suggestion "));
     assert!(stdout.contains("suggest prefix=missing-helper count="));
+}
+
+#[test]
+fn native_shell_help_and_cards_expose_full_storage_history_surface() {
+    let runtime = UserRuntime::new(RecordingBackend::with_stdin(
+        b"help\nhelp-topic storage\ncommand-card storage-history-range-of\nexamples storage-history-tail-of\nexit 0\n",
+    ));
+    let argv = ["ngos-userland-native"];
+    let envp = [
+        "NGOS_SESSION=1",
+        "NGOS_SESSION_PROTOCOL=kernel-launch",
+        "NGOS_SESSION_OUTCOME_POLICY=require-zero-exit",
+        "NGOS_PROCESS_NAME=ngos-userland-native",
+        "NGOS_IMAGE_PATH=/bin/ngos-userland-native",
+        "NGOS_CWD=/",
+        "NGOS_ROOT_MOUNT_PATH=/",
+        "NGOS_ROOT_MOUNT_NAME=rootfs",
+        "NGOS_IMAGE_BASE=0x400000",
+        "NGOS_STACK_TOP=0x7fffffff0000",
+        "NGOS_PHDR=0x40",
+        "NGOS_PHENT=56",
+        "NGOS_PHNUM=2",
+    ];
+    let auxv = [
+        ngos_user_abi::AuxvEntry {
+            key: AT_PAGESZ,
+            value: 4096,
+        },
+        ngos_user_abi::AuxvEntry {
+            key: AT_ENTRY,
+            value: 0x401000,
+        },
+    ];
+    let bootstrap = BootstrapArgs::new(&argv, &envp, &auxv);
+
+    let code = main(&runtime, &bootstrap);
+    let stdout = String::from_utf8(runtime.backend().stdout.borrow().clone()).unwrap();
+    assert_eq!(code, 0, "{stdout}");
+    assert!(stdout.contains("storage-history-range"));
+    assert!(stdout.contains("storage-history-range-of"));
+    assert!(stdout.contains("storage-history-tail"));
+    assert!(stdout.contains("storage-history-tail-of"));
+    assert!(stdout.contains("storage-history-entry"));
+    assert!(stdout.contains("storage-repair"));
+    assert!(stdout.contains("mount-info"));
+    assert!(stdout.contains("help-topic topic=storage summary="));
+    assert!(stdout.contains("command=storage-history-range-of summary="));
+    assert!(stdout.contains("command-card command=storage-history-range-of topic=storage"));
+    assert!(stdout.contains(
+        "example storage storage-history-tail-of /dev/storage0 3 |> list-count WINDOW |> value-show"
+    ));
 }
 
 #[test]

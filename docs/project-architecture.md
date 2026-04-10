@@ -15,6 +15,18 @@ Acoperă:
 
 Documentul este intenționat ca referință de arhitectură pentru dezvoltare internă.
 
+Pentru blueprint-ul canonic al OS-ului ca ansamblu:
+
+- [ngos-os-blueprint.md](/C:/Users/pocri/OneDrive/Desktop/experiment/docs/ngos-os-blueprint.md)
+- [ngos-subsystem-closure-matrix.md](/C:/Users/pocri/OneDrive/Desktop/experiment/docs/ngos-subsystem-closure-matrix.md)
+- [ngos-execution-evidence-matrix.md](/C:/Users/pocri/OneDrive/Desktop/experiment/docs/ngos-execution-evidence-matrix.md)
+- [ngos-canonical-state-machines.md](/C:/Users/pocri/OneDrive/Desktop/experiment/docs/ngos-canonical-state-machines.md)
+- [ngos-subsystem-ownership-dependency-map.md](/C:/Users/pocri/OneDrive/Desktop/experiment/docs/ngos-subsystem-ownership-dependency-map.md)
+- [ngos-hardware-platform-matrix.md](/C:/Users/pocri/OneDrive/Desktop/experiment/docs/ngos-hardware-platform-matrix.md)
+- [ngos-subsystem-maturity-matrix.md](/C:/Users/pocri/OneDrive/Desktop/experiment/docs/ngos-subsystem-maturity-matrix.md)
+- [ngos-interface-contract-catalog.md](/C:/Users/pocri/OneDrive/Desktop/experiment/docs/ngos-interface-contract-catalog.md)
+- [ngos-blueprint-gap-report.md](/C:/Users/pocri/OneDrive/Desktop/experiment/docs/ngos-blueprint-gap-report.md)
+
 ## Active Development Direction
 
 Direcția activă de dezvoltare pentru `ngos` este transformarea incrementală spre `nano-kernel`.
@@ -78,6 +90,13 @@ Conține:
 
 Acesta este locul unde identitatea internă `ngos` este definită cel mai clar.
 
+Pentru closure-uri separate deja formalizate în acest owner:
+
+- [capability-closure-status.md](C:/Users/pocri/OneDrive/Desktop/experiment/docs/capability-closure-status.md)
+- [eventing-waits-closure-status.md](C:/Users/pocri/OneDrive/Desktop/experiment/docs/eventing-waits-closure-status.md)
+- [signal-runtime-closure-status.md](C:/Users/pocri/OneDrive/Desktop/experiment/docs/signal-runtime-closure-status.md)
+- [syscall-surface-closure-status.md](C:/Users/pocri/OneDrive/Desktop/experiment/docs/syscall-surface-closure-status.md)
+
 ### `platform-hal`
 
 `platform-hal` definește contractele de platformă:
@@ -105,6 +124,10 @@ Backend de platformă pentru x86_64.
 Componenta de boot și diagnostics pentru x86_64.
 Aici trăiesc și suprafețele Chronoscope folosite pentru diagnostic cauzal și postmortem.
 
+Pentru closure-ul separat al subsistemului:
+
+- [boot-diagnostics-closure-status.md](C:/Users/pocri/OneDrive/Desktop/experiment/docs/boot-diagnostics-closure-status.md)
+
 ### `host-runtime`
 
 Punctul principal de rulare în workspace-ul activ.
@@ -114,12 +137,20 @@ Rulează kernelul și userland-ul prin backend-ul host runtime și produce rapoa
 
 Definește ABI-ul user/kernel și structurile transportate peste syscall surface.
 
+Pentru closure-ul separat al subsistemului:
+
+- [user-abi-closure-status.md](C:/Users/pocri/OneDrive/Desktop/experiment/docs/user-abi-closure-status.md)
+
 ### `user-runtime`
 
 Runtime-ul comun pentru codul din user mode.
 
 Acesta este și locul aprobat pentru execuție WebAssembly în `ngos`, împreună
 cu suprafețele de extensie și aplicație aflate deasupra lui.
+
+Pentru closure-ul separat al subsistemului:
+
+- [user-runtime-closure-status.md](C:/Users/pocri/OneDrive/Desktop/experiment/docs/user-runtime-closure-status.md)
 
 Politica normativă este definită în
 [wasm-execution-policy.md](C:/Users/pocri/OneDrive/Desktop/experiment/docs/wasm-execution-policy.md).
@@ -128,6 +159,15 @@ Politica normativă este definită în
 
 Userland-ul principal din workspace.
 Include shell, comenzi, control plane, procfs-style introspection și fluxuri reale de interacțiune cu kernelul.
+
+Pentru shell ca subsistem separat:
+
+- [ngos-shell-model.md](C:/Users/pocri/OneDrive/Desktop/experiment/docs/ngos-shell-model.md)
+- [shell-closure-status.md](C:/Users/pocri/OneDrive/Desktop/experiment/docs/shell-closure-status.md)
+- [ngos-shell-best-in-class-roadmap.md](C:/Users/pocri/OneDrive/Desktop/experiment/docs/ngos-shell-best-in-class-roadmap.md)
+- [ngos-shell-implementation-plan.md](C:/Users/pocri/OneDrive/Desktop/experiment/docs/ngos-shell-implementation-plan.md)
+- [ngos-shell-language-spec.md](C:/Users/pocri/OneDrive/Desktop/experiment/docs/ngos-shell-language-spec.md)
+- [ngos-shell-for-coding-spec.md](C:/Users/pocri/OneDrive/Desktop/experiment/docs/ngos-shell-for-coding-spec.md)
 
 `userland-native` poate include, în timp, aplicații sau componente Wasm
 orchestrate prin `user-runtime`, dar nu mută Wasm sub granița kernelului.
@@ -224,6 +264,14 @@ Responsabilități:
 - cloexec / nonblock
 - descriptor-bound queues
 
+Modelul arhitectural specific pentru `VFS` este definit în:
+
+- [ngos-vfs-model.md](C:/Users/pocri/OneDrive/Desktop/experiment/docs/ngos-vfs-model.md)
+
+Statusul de closure pentru `VFS` este urmărit separat în:
+
+- [vfs-closure-status.md](C:/Users/pocri/OneDrive/Desktop/experiment/docs/vfs-closure-status.md)
+
 ### 5. IO runtime
 
 Responsabilități:
@@ -302,15 +350,13 @@ Responsabilități:
 
 ## Host runtime
 
-`host-runtime` rulează fluxul real:
+`host-runtime` rulează un flux auxiliar de validare, nu path-ul real de produs:
 
-- construiește runtime-ul
-- montează VFS-ul de bază
-- creează device și driver nodes
-- pornește `userland-native`
-- execută shell-ul
-- colectează stdout
-- produce raport de sesiune
+- construiește un runtime auxiliar
+- poate porni `userland-native`
+- poate executa shell-ul
+- poate colecta stdout
+- poate produce raport de sesiune
 
 Raportul de sesiune curent include:
 
@@ -318,6 +364,15 @@ Raportul de sesiune curent include:
 - sumar Chronoscope
 - sumar `resource-agents`
 - stdout-ul sesiunii
+
+Path-ul real de produs rămâne:
+
+- `boot-x86_64`
+- `platform-x86_64`
+- `kernel-core`
+- `user-runtime`
+- `userland-native`
+- `QEMU`
 
 ## Chronoscope și diagnostics
 
@@ -330,6 +385,7 @@ Chronoscope trăiește în `boot-x86_64` și este folosit de `host-runtime` pent
 - propagation path
 
 Chronoscope este mecanismul principal de adevăr pentru debugging cauzal.
+`host-runtime` poate consuma acest adevăr, dar nu îl poate înlocui ca truth surface de closure.
 
 ## Direcție arhitecturală
 
@@ -362,7 +418,7 @@ Sunt expuse și prin:
 
 - jurnal intern de decizie
 - `SystemIntrospection`
-- raport operator în `host-runtime`
+- raport operator pe suprafețe auxiliare, fără a schimba truth surface-ul real
 
 ### Wait/wake și memory wait
 

@@ -1,4 +1,5 @@
 use super::*;
+use crate::eventing_model::BusEventInterest;
 
 #[path = "syscall_surface/signal_memory.rs"]
 mod signal_memory;
@@ -311,6 +312,45 @@ pub struct CreateContract {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateBusPeer {
+    pub owner: ProcessId,
+    pub domain: DomainId,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateBusEndpoint {
+    pub domain: DomainId,
+    pub resource: ResourceId,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachBusPeer {
+    pub peer: BusPeerId,
+    pub endpoint: BusEndpointId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetachBusPeer {
+    pub peer: BusPeerId,
+    pub endpoint: BusEndpointId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishBusMessage {
+    pub peer: BusPeerId,
+    pub endpoint: BusEndpointId,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiveBusMessage {
+    pub peer: BusPeerId,
+    pub endpoint: BusEndpointId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetContractState {
     pub id: ContractId,
     pub state: ContractState,
@@ -431,6 +471,12 @@ pub enum Syscall {
     CreateDomain(CreateDomain),
     CreateResource(CreateResource),
     CreateContract(CreateContract),
+    CreateBusPeer(CreateBusPeer),
+    CreateBusEndpoint(CreateBusEndpoint),
+    AttachBusPeer(AttachBusPeer),
+    DetachBusPeer(DetachBusPeer),
+    PublishBusMessage(PublishBusMessage),
+    ReceiveBusMessage(ReceiveBusMessage),
     OpenDescriptor {
         owner: ProcessId,
         capability: CapabilityId,
@@ -669,6 +715,14 @@ pub enum Syscall {
         interest: NetworkEventInterest,
         events: IoPollEvents,
     },
+    WatchBusEventsDescriptor {
+        owner: ProcessId,
+        queue_fd: Descriptor,
+        endpoint: BusEndpointId,
+        token: u64,
+        interest: BusEventInterest,
+        events: IoPollEvents,
+    },
     RemoveResourceEventsDescriptor {
         owner: ProcessId,
         queue_fd: Descriptor,
@@ -680,6 +734,12 @@ pub enum Syscall {
         queue_fd: Descriptor,
         interface_path: String,
         socket_path: Option<String>,
+        token: u64,
+    },
+    RemoveBusEventsDescriptor {
+        owner: ProcessId,
+        queue_fd: Descriptor,
+        endpoint: BusEndpointId,
         token: u64,
     },
     ModifyWatchedEvent {
@@ -880,6 +940,14 @@ pub enum Syscall {
         id: ContractId,
     },
     ListContracts,
+    InspectBusPeer {
+        id: BusPeerId,
+    },
+    ListBusPeers,
+    InspectBusEndpoint {
+        id: BusEndpointId,
+    },
+    ListBusEndpoints,
     SetContractState(SetContractState),
     InvokeContract(InvokeContract),
     AcquireResourceViaContract(AcquireResourceViaContract),
@@ -945,6 +1013,8 @@ pub enum SyscallResult {
     ResourceEventWatchRemoved,
     NetworkEventWatchRegistered,
     NetworkEventWatchRemoved,
+    BusEventWatchRegistered,
+    BusEventWatchRemoved,
     EventWatchModified,
     EventWatchRemoved,
     EventQueueInspected(EventQueueInfo),
@@ -978,6 +1048,30 @@ pub enum SyscallResult {
     ResourceList(Vec<ResourceInfo>),
     ContractInfo(ContractInfo),
     ContractList(Vec<ContractInfo>),
+    BusPeerCreated(BusPeerId),
+    BusEndpointCreated(BusEndpointId),
+    BusPeerInfo(BusPeerInfo),
+    BusPeerList(Vec<BusPeerInfo>),
+    BusEndpointInfo(BusEndpointInfo),
+    BusEndpointList(Vec<BusEndpointInfo>),
+    BusPeerAttached {
+        peer: BusPeerId,
+        endpoint: BusEndpointId,
+    },
+    BusPeerDetached {
+        peer: BusPeerId,
+        endpoint: BusEndpointId,
+    },
+    BusMessagePublished {
+        peer: BusPeerId,
+        endpoint: BusEndpointId,
+        bytes: usize,
+    },
+    BusMessageReceived {
+        peer: BusPeerId,
+        endpoint: BusEndpointId,
+        bytes: Vec<u8>,
+    },
     ContractStateChanged {
         id: ContractId,
         state: ContractState,
@@ -1317,11 +1411,17 @@ impl<H: AddressSpaceManager> HalBackedKernelRuntime<H> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelSyscallSurface {
     pub(crate) runtime: KernelRuntime,
+    recent_syscalls: Vec<SyscallDispatchRecord>,
+    syscall_dispatch_tick: u64,
 }
 
 impl KernelSyscallSurface {
     pub fn new(runtime: KernelRuntime) -> Self {
-        Self { runtime }
+        Self {
+            runtime,
+            recent_syscalls: Vec::with_capacity(64),
+            syscall_dispatch_tick: 0,
+        }
     }
 
     pub fn host_runtime_default() -> Self {
@@ -1330,6 +1430,34 @@ impl KernelSyscallSurface {
 
     pub fn runtime(&self) -> &KernelRuntime {
         &self.runtime
+    }
+
+    fn record_syscall_dispatch(
+        &mut self,
+        context: &SyscallContext,
+        syscall: &Syscall,
+        result: &Result<SyscallResult, SyscallError>,
+    ) {
+        if self.recent_syscalls.len() == 64 {
+            self.recent_syscalls.remove(0);
+        }
+        self.recent_syscalls.push(SyscallDispatchRecord {
+            tick: self.syscall_dispatch_tick,
+            caller: context.caller.raw(),
+            tid: context.tid.raw(),
+            syscall: format!("{syscall:?}"),
+            outcome: match result {
+                Ok(_) => String::from("ok"),
+                Err(SyscallError::AccessDenied) => String::from("access-denied"),
+                Err(SyscallError::InvalidArgument) => String::from("invalid-argument"),
+                Err(SyscallError::Runtime(_)) => String::from("runtime-error"),
+            },
+        });
+        self.syscall_dispatch_tick = self.syscall_dispatch_tick.saturating_add(1);
+    }
+
+    pub fn recent_syscalls(&self) -> &[SyscallDispatchRecord] {
+        &self.recent_syscalls
     }
 
     pub fn dispatch_user_syscall_frame(
@@ -1345,281 +1473,361 @@ impl KernelSyscallSurface {
         context: SyscallContext,
         syscall: Syscall,
     ) -> Result<SyscallResult, SyscallError> {
-        if let Some(result) = self.dispatch_eventing(&context, &syscall)? {
-            return Ok(result);
-        }
-        if let Some(result) = self.dispatch_process_vm(&context, &syscall)? {
-            return Ok(result);
-        }
-        if let Some(result) = self.dispatch_descriptor_io(&context, &syscall)? {
-            return Ok(result);
-        }
-        match syscall {
-            Syscall::Tick => {
-                context.require(CapabilityRights::EXECUTE)?;
-                Ok(SyscallResult::Scheduled(self.runtime.tick()?))
+        let result = (|| {
+            if let Some(result) = self.dispatch_eventing(&context, &syscall)? {
+                return Ok(result);
             }
-            Syscall::BlockRunning => {
-                context.require(CapabilityRights::WRITE)?;
-                Ok(SyscallResult::ProcessBlocked(
-                    self.runtime
-                        .block_running_thread(context.caller, context.tid)?,
-                ))
+            if let Some(result) = self.dispatch_process_vm(&context, &syscall)? {
+                return Ok(result);
             }
-            Syscall::WakeProcess { pid, class } => {
-                context.require(CapabilityRights::WRITE)?;
-                self.runtime.wake_process(pid, class)?;
-                Ok(SyscallResult::ProcessWoken(pid))
+            if let Some(result) = self.dispatch_descriptor_io(&context, &syscall)? {
+                return Ok(result);
             }
-            Syscall::ExitRunning { code } => {
-                context.require(CapabilityRights::WRITE)?;
-                Ok(SyscallResult::ProcessExited(
-                    self.runtime
-                        .exit_running_thread(context.caller, context.tid, code)?,
-                ))
-            }
-            Syscall::ReapProcess { pid } => {
-                context.require(CapabilityRights::WRITE)?;
-                Ok(SyscallResult::ProcessReaped(
-                    self.runtime.reap_process(pid)?,
-                ))
-            }
-            Syscall::CreateDomain(args) => {
-                context.require(CapabilityRights::WRITE)?;
-                Ok(SyscallResult::DomainCreated(self.runtime.create_domain(
-                    args.owner,
-                    args.parent,
-                    args.name,
-                )?))
-            }
-            Syscall::CreateResource(args) => {
-                context.require(CapabilityRights::WRITE)?;
-                Ok(SyscallResult::ResourceCreated(
-                    self.runtime.create_resource(
-                        args.creator,
-                        args.domain,
-                        args.kind,
-                        args.name,
-                    )?,
-                ))
-            }
-            Syscall::CreateContract(args) => {
-                context.require(CapabilityRights::WRITE)?;
-                Ok(SyscallResult::ContractCreated(
-                    self.runtime.create_contract(
-                        args.issuer,
-                        args.domain,
-                        args.resource,
-                        args.kind,
-                        args.label,
-                    )?,
-                ))
-            }
-            Syscall::InspectDomain { id } => {
-                context.require(CapabilityRights::READ)?;
-                Ok(SyscallResult::DomainInfo(self.runtime.domain_info(id)?))
-            }
-            Syscall::ListDomains => {
-                context.require(CapabilityRights::READ)?;
-                Ok(SyscallResult::DomainList(self.runtime.domain_list()))
-            }
-            Syscall::InspectResource { id } => {
-                context.require(CapabilityRights::READ)?;
-                Ok(SyscallResult::ResourceInfo(self.runtime.resource_info(id)?))
-            }
-            Syscall::ListResources => {
-                context.require(CapabilityRights::READ)?;
-                Ok(SyscallResult::ResourceList(self.runtime.resource_list()))
-            }
-            Syscall::InspectContract { id } => {
-                context.require(CapabilityRights::READ)?;
-                Ok(SyscallResult::ContractInfo(self.runtime.contract_info(id)?))
-            }
-            Syscall::ListContracts => {
-                context.require(CapabilityRights::READ)?;
-                Ok(SyscallResult::ContractList(self.runtime.contract_list()))
-            }
-            Syscall::SetContractState(args) => {
-                context.require(CapabilityRights::WRITE)?;
-                Ok(SyscallResult::ContractStateChanged {
-                    id: args.id,
-                    state: self
-                        .runtime
-                        .transition_contract_state(args.id, args.state)?,
-                })
-            }
-            Syscall::InvokeContract(args) => {
-                context.require(CapabilityRights::WRITE)?;
-                Ok(SyscallResult::ContractInvoked {
-                    id: args.id,
-                    invocation_count: self.runtime.invoke_contract(args.id)?,
-                })
-            }
-            Syscall::AcquireResourceViaContract(args) => {
-                context.require(CapabilityRights::WRITE)?;
-                let (resource, acquire_count) =
-                    self.runtime.acquire_resource_via_contract(args.contract)?;
-                Ok(SyscallResult::ResourceAcquired {
-                    resource,
-                    contract: args.contract,
-                    acquire_count,
-                })
-            }
-            Syscall::ReleaseResourceViaContract(args) => {
-                context.require(CapabilityRights::WRITE)?;
-                let resource = self.runtime.release_resource_via_contract(args.contract)?;
-                Ok(SyscallResult::ResourceReleased {
-                    resource,
-                    contract: args.contract,
-                })
-            }
-            Syscall::TransferResourceViaContract(args) => {
-                context.require(CapabilityRights::WRITE)?;
-                let (resource, acquire_count) = self
-                    .runtime
-                    .transfer_resource_via_contract(args.source, args.target)?;
-                Ok(SyscallResult::ResourceTransferred {
-                    resource,
-                    from: args.source,
-                    to: args.target,
-                    acquire_count,
-                })
-            }
-            Syscall::SetResourceArbitrationPolicy(args) => {
-                context.require(CapabilityRights::WRITE)?;
-                let policy = self
-                    .runtime
-                    .set_resource_arbitration_policy(args.resource, args.policy)?;
-                Ok(SyscallResult::ResourceArbitrationPolicyChanged {
-                    resource: args.resource,
-                    policy,
-                })
-            }
-            Syscall::SetResourceGovernanceMode(args) => {
-                context.require(CapabilityRights::WRITE)?;
-                let mode = self
-                    .runtime
-                    .set_resource_governance_mode(args.resource, args.mode)?;
-                Ok(SyscallResult::ResourceGovernanceModeChanged {
-                    resource: args.resource,
-                    mode,
-                })
-            }
-            Syscall::SetResourceContractPolicy(args) => {
-                context.require(CapabilityRights::WRITE)?;
-                let policy = self
-                    .runtime
-                    .set_resource_contract_policy(args.resource, args.policy)?;
-                Ok(SyscallResult::ResourceContractPolicyChanged {
-                    resource: args.resource,
-                    policy,
-                })
-            }
-            Syscall::SetResourceIssuerPolicy(args) => {
-                context.require(CapabilityRights::WRITE)?;
-                let policy = self
-                    .runtime
-                    .set_resource_issuer_policy(args.resource, args.policy)?;
-                Ok(SyscallResult::ResourceIssuerPolicyChanged {
-                    resource: args.resource,
-                    policy,
-                })
-            }
-            Syscall::SetResourceState(args) => {
-                context.require(CapabilityRights::WRITE)?;
-                let state = self
-                    .runtime
-                    .transition_resource_state(args.resource, args.state)?;
-                Ok(SyscallResult::ResourceStateChanged {
-                    resource: args.resource,
-                    state,
-                })
-            }
-            Syscall::ClaimResourceViaContract(args) => {
-                context.require(CapabilityRights::WRITE)?;
-                match self.runtime.claim_resource_via_contract(args.contract)? {
-                    ResourceClaimResult::Acquired {
-                        resource,
-                        acquire_count,
-                    } => Ok(SyscallResult::ResourceClaimed {
-                        resource,
-                        contract: args.contract,
-                        acquire_count,
-                    }),
-                    ResourceClaimResult::Queued {
-                        resource,
-                        holder,
-                        position,
-                    } => Ok(SyscallResult::ResourceClaimQueued {
-                        resource,
-                        contract: args.contract,
-                        holder,
-                        position,
-                    }),
+            match syscall.clone() {
+                Syscall::Tick => {
+                    context.require(CapabilityRights::EXECUTE)?;
+                    Ok(SyscallResult::Scheduled(self.runtime.tick()?))
                 }
-            }
-            Syscall::CancelResourceClaimViaContract(args) => {
-                context.require(CapabilityRights::WRITE)?;
-                let (resource, waiting_count) = self
-                    .runtime
-                    .cancel_resource_claim_via_contract(args.contract)?;
-                Ok(SyscallResult::ResourceClaimCanceled {
-                    resource,
-                    contract: args.contract,
-                    waiting_count,
-                })
-            }
-            Syscall::ReleaseClaimedResourceViaContract(args) => {
-                context.require(CapabilityRights::WRITE)?;
-                match self
-                    .runtime
-                    .release_claimed_resource_via_contract(args.contract)?
-                {
-                    ResourceReleaseResult::Released { resource } => {
-                        Ok(SyscallResult::ResourceClaimReleased {
+                Syscall::BlockRunning => {
+                    context.require(CapabilityRights::WRITE)?;
+                    Ok(SyscallResult::ProcessBlocked(
+                        self.runtime
+                            .block_running_thread(context.caller, context.tid)?,
+                    ))
+                }
+                Syscall::WakeProcess { pid, class } => {
+                    context.require(CapabilityRights::WRITE)?;
+                    self.runtime.wake_process(pid, class)?;
+                    Ok(SyscallResult::ProcessWoken(pid))
+                }
+                Syscall::ExitRunning { code } => {
+                    context.require(CapabilityRights::WRITE)?;
+                    Ok(SyscallResult::ProcessExited(
+                        self.runtime
+                            .exit_running_thread(context.caller, context.tid, code)?,
+                    ))
+                }
+                Syscall::ReapProcess { pid } => {
+                    context.require(CapabilityRights::WRITE)?;
+                    Ok(SyscallResult::ProcessReaped(
+                        self.runtime.reap_process(pid)?,
+                    ))
+                }
+                Syscall::CreateDomain(args) => {
+                    context.require(CapabilityRights::WRITE)?;
+                    Ok(SyscallResult::DomainCreated(self.runtime.create_domain(
+                        args.owner,
+                        args.parent,
+                        args.name,
+                    )?))
+                }
+                Syscall::CreateResource(args) => {
+                    context.require(CapabilityRights::WRITE)?;
+                    Ok(SyscallResult::ResourceCreated(
+                        self.runtime.create_resource(
+                            args.creator,
+                            args.domain,
+                            args.kind,
+                            args.name,
+                        )?,
+                    ))
+                }
+                Syscall::CreateContract(args) => {
+                    context.require(CapabilityRights::WRITE)?;
+                    Ok(SyscallResult::ContractCreated(
+                        self.runtime.create_contract(
+                            args.issuer,
+                            args.domain,
+                            args.resource,
+                            args.kind,
+                            args.label,
+                        )?,
+                    ))
+                }
+                Syscall::CreateBusPeer(args) => {
+                    context.require(CapabilityRights::WRITE)?;
+                    Ok(SyscallResult::BusPeerCreated(
+                        self.runtime
+                            .create_bus_peer(args.owner, args.domain, args.name)?,
+                    ))
+                }
+                Syscall::CreateBusEndpoint(args) => {
+                    context.require(CapabilityRights::WRITE)?;
+                    Ok(SyscallResult::BusEndpointCreated(
+                        self.runtime.create_bus_channel_endpoint(
+                            args.domain,
+                            args.resource,
+                            args.path,
+                        )?,
+                    ))
+                }
+                Syscall::AttachBusPeer(args) => {
+                    context.require(CapabilityRights::WRITE)?;
+                    self.runtime.attach_bus_peer(args.peer, args.endpoint)?;
+                    Ok(SyscallResult::BusPeerAttached {
+                        peer: args.peer,
+                        endpoint: args.endpoint,
+                    })
+                }
+                Syscall::DetachBusPeer(args) => {
+                    context.require(CapabilityRights::WRITE)?;
+                    self.runtime.detach_bus_peer(args.peer, args.endpoint)?;
+                    Ok(SyscallResult::BusPeerDetached {
+                        peer: args.peer,
+                        endpoint: args.endpoint,
+                    })
+                }
+                Syscall::PublishBusMessage(args) => {
+                    context.require(CapabilityRights::WRITE)?;
+                    let bytes = self
+                        .runtime
+                        .bus_publish(args.peer, args.endpoint, &args.bytes)?;
+                    Ok(SyscallResult::BusMessagePublished {
+                        peer: args.peer,
+                        endpoint: args.endpoint,
+                        bytes,
+                    })
+                }
+                Syscall::ReceiveBusMessage(args) => {
+                    context.require(CapabilityRights::WRITE)?;
+                    Ok(SyscallResult::BusMessageReceived {
+                        peer: args.peer,
+                        endpoint: args.endpoint,
+                        bytes: self.runtime.bus_receive(args.peer, args.endpoint)?,
+                    })
+                }
+                Syscall::InspectDomain { id } => {
+                    context.require(CapabilityRights::READ)?;
+                    Ok(SyscallResult::DomainInfo(self.runtime.domain_info(id)?))
+                }
+                Syscall::ListDomains => {
+                    context.require(CapabilityRights::READ)?;
+                    Ok(SyscallResult::DomainList(self.runtime.domain_list()))
+                }
+                Syscall::InspectResource { id } => {
+                    context.require(CapabilityRights::READ)?;
+                    Ok(SyscallResult::ResourceInfo(self.runtime.resource_info(id)?))
+                }
+                Syscall::ListResources => {
+                    context.require(CapabilityRights::READ)?;
+                    Ok(SyscallResult::ResourceList(self.runtime.resource_list()))
+                }
+                Syscall::InspectContract { id } => {
+                    context.require(CapabilityRights::READ)?;
+                    Ok(SyscallResult::ContractInfo(self.runtime.contract_info(id)?))
+                }
+                Syscall::ListContracts => {
+                    context.require(CapabilityRights::READ)?;
+                    Ok(SyscallResult::ContractList(self.runtime.contract_list()))
+                }
+                Syscall::InspectBusPeer { id } => {
+                    context.require(CapabilityRights::READ)?;
+                    Ok(SyscallResult::BusPeerInfo(self.runtime.bus_peer_info(id)?))
+                }
+                Syscall::ListBusPeers => {
+                    context.require(CapabilityRights::READ)?;
+                    Ok(SyscallResult::BusPeerList(self.runtime.bus_peers()))
+                }
+                Syscall::InspectBusEndpoint { id } => {
+                    context.require(CapabilityRights::READ)?;
+                    Ok(SyscallResult::BusEndpointInfo(
+                        self.runtime.bus_endpoint_info(id)?,
+                    ))
+                }
+                Syscall::ListBusEndpoints => {
+                    context.require(CapabilityRights::READ)?;
+                    Ok(SyscallResult::BusEndpointList(self.runtime.bus_endpoints()))
+                }
+                Syscall::SetContractState(args) => {
+                    context.require(CapabilityRights::WRITE)?;
+                    Ok(SyscallResult::ContractStateChanged {
+                        id: args.id,
+                        state: self
+                            .runtime
+                            .transition_contract_state(args.id, args.state)?,
+                    })
+                }
+                Syscall::InvokeContract(args) => {
+                    context.require(CapabilityRights::WRITE)?;
+                    Ok(SyscallResult::ContractInvoked {
+                        id: args.id,
+                        invocation_count: self.runtime.invoke_contract(args.id)?,
+                    })
+                }
+                Syscall::AcquireResourceViaContract(args) => {
+                    context.require(CapabilityRights::WRITE)?;
+                    let (resource, acquire_count) =
+                        self.runtime.acquire_resource_via_contract(args.contract)?;
+                    Ok(SyscallResult::ResourceAcquired {
+                        resource,
+                        contract: args.contract,
+                        acquire_count,
+                    })
+                }
+                Syscall::ReleaseResourceViaContract(args) => {
+                    context.require(CapabilityRights::WRITE)?;
+                    let resource = self.runtime.release_resource_via_contract(args.contract)?;
+                    Ok(SyscallResult::ResourceReleased {
+                        resource,
+                        contract: args.contract,
+                    })
+                }
+                Syscall::TransferResourceViaContract(args) => {
+                    context.require(CapabilityRights::WRITE)?;
+                    let (resource, acquire_count) = self
+                        .runtime
+                        .transfer_resource_via_contract(args.source, args.target)?;
+                    Ok(SyscallResult::ResourceTransferred {
+                        resource,
+                        from: args.source,
+                        to: args.target,
+                        acquire_count,
+                    })
+                }
+                Syscall::SetResourceArbitrationPolicy(args) => {
+                    context.require(CapabilityRights::WRITE)?;
+                    let policy = self
+                        .runtime
+                        .set_resource_arbitration_policy(args.resource, args.policy)?;
+                    Ok(SyscallResult::ResourceArbitrationPolicyChanged {
+                        resource: args.resource,
+                        policy,
+                    })
+                }
+                Syscall::SetResourceGovernanceMode(args) => {
+                    context.require(CapabilityRights::WRITE)?;
+                    let mode = self
+                        .runtime
+                        .set_resource_governance_mode(args.resource, args.mode)?;
+                    Ok(SyscallResult::ResourceGovernanceModeChanged {
+                        resource: args.resource,
+                        mode,
+                    })
+                }
+                Syscall::SetResourceContractPolicy(args) => {
+                    context.require(CapabilityRights::WRITE)?;
+                    let policy = self
+                        .runtime
+                        .set_resource_contract_policy(args.resource, args.policy)?;
+                    Ok(SyscallResult::ResourceContractPolicyChanged {
+                        resource: args.resource,
+                        policy,
+                    })
+                }
+                Syscall::SetResourceIssuerPolicy(args) => {
+                    context.require(CapabilityRights::WRITE)?;
+                    let policy = self
+                        .runtime
+                        .set_resource_issuer_policy(args.resource, args.policy)?;
+                    Ok(SyscallResult::ResourceIssuerPolicyChanged {
+                        resource: args.resource,
+                        policy,
+                    })
+                }
+                Syscall::SetResourceState(args) => {
+                    context.require(CapabilityRights::WRITE)?;
+                    let state = self
+                        .runtime
+                        .transition_resource_state(args.resource, args.state)?;
+                    Ok(SyscallResult::ResourceStateChanged {
+                        resource: args.resource,
+                        state,
+                    })
+                }
+                Syscall::ClaimResourceViaContract(args) => {
+                    context.require(CapabilityRights::WRITE)?;
+                    match self.runtime.claim_resource_via_contract(args.contract)? {
+                        ResourceClaimResult::Acquired {
+                            resource,
+                            acquire_count,
+                        } => Ok(SyscallResult::ResourceClaimed {
                             resource,
                             contract: args.contract,
-                        })
+                            acquire_count,
+                        }),
+                        ResourceClaimResult::Queued {
+                            resource,
+                            holder,
+                            position,
+                        } => Ok(SyscallResult::ResourceClaimQueued {
+                            resource,
+                            contract: args.contract,
+                            holder,
+                            position,
+                        }),
                     }
-                    ResourceReleaseResult::HandedOff {
+                }
+                Syscall::CancelResourceClaimViaContract(args) => {
+                    context.require(CapabilityRights::WRITE)?;
+                    let (resource, waiting_count) = self
+                        .runtime
+                        .cancel_resource_claim_via_contract(args.contract)?;
+                    Ok(SyscallResult::ResourceClaimCanceled {
                         resource,
-                        contract,
-                        acquire_count,
-                        handoff_count,
-                    } => Ok(SyscallResult::ResourceClaimHandedOff {
-                        resource,
-                        from: args.contract,
-                        to: contract,
-                        acquire_count,
-                        handoff_count,
-                    }),
+                        contract: args.contract,
+                        waiting_count,
+                    })
+                }
+                Syscall::ReleaseClaimedResourceViaContract(args) => {
+                    context.require(CapabilityRights::WRITE)?;
+                    match self
+                        .runtime
+                        .release_claimed_resource_via_contract(args.contract)?
+                    {
+                        ResourceReleaseResult::Released { resource } => {
+                            Ok(SyscallResult::ResourceClaimReleased {
+                                resource,
+                                contract: args.contract,
+                            })
+                        }
+                        ResourceReleaseResult::HandedOff {
+                            resource,
+                            contract,
+                            acquire_count,
+                            handoff_count,
+                        } => Ok(SyscallResult::ResourceClaimHandedOff {
+                            resource,
+                            from: args.contract,
+                            to: contract,
+                            acquire_count,
+                            handoff_count,
+                        }),
+                    }
+                }
+                Syscall::ListProcesses => {
+                    context.require(CapabilityRights::READ)?;
+                    Ok(SyscallResult::ProcessList(self.runtime.process_list()))
+                }
+                Syscall::ReadProcFs { path } => {
+                    context.require(CapabilityRights::READ)?;
+                    Ok(SyscallResult::ProcFsBytes(
+                        self.runtime.read_procfs_path(&path)?,
+                    ))
+                }
+                Syscall::InspectSystem => {
+                    context.require(CapabilityRights::READ)?;
+                    Ok(SyscallResult::SystemIntrospection(
+                        self.runtime.inspect_system(),
+                    ))
+                }
+                Syscall::Snapshot => {
+                    context.require(CapabilityRights::READ)?;
+                    Ok(SyscallResult::Snapshot(self.runtime.snapshot()))
+                }
+                other => {
+                    unreachable!(
+                        "eventing syscall should be dispatched in syscall_eventing.rs: {other:?}"
+                    )
                 }
             }
-            Syscall::ListProcesses => {
-                context.require(CapabilityRights::READ)?;
-                Ok(SyscallResult::ProcessList(self.runtime.process_list()))
+        })();
+        self.record_syscall_dispatch(&context, &syscall, &result);
+        match result {
+            Ok(SyscallResult::SystemIntrospection(mut system)) => {
+                system.syscall_dispatches = self.recent_syscalls.clone();
+                Ok(SyscallResult::SystemIntrospection(system))
             }
-            Syscall::ReadProcFs { path } => {
-                context.require(CapabilityRights::READ)?;
-                Ok(SyscallResult::ProcFsBytes(
-                    self.runtime.read_procfs_path(&path)?,
-                ))
-            }
-            Syscall::InspectSystem => {
-                context.require(CapabilityRights::READ)?;
-                Ok(SyscallResult::SystemIntrospection(
-                    self.runtime.inspect_system(),
-                ))
-            }
-            Syscall::Snapshot => {
-                context.require(CapabilityRights::READ)?;
-                Ok(SyscallResult::Snapshot(self.runtime.snapshot()))
-            }
-            other => {
-                unreachable!(
-                    "eventing syscall should be dispatched in syscall_eventing.rs: {other:?}"
-                )
-            }
+            other => other,
         }
     }
 }

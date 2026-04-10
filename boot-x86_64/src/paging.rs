@@ -494,6 +494,13 @@ unsafe fn write_cr3(value: u64) {
 }
 
 impl ActivePageTables {
+    pub const fn from_raw(root_phys: u64, physical_memory_offset: u64) -> Self {
+        Self {
+            root_phys,
+            physical_memory_offset,
+        }
+    }
+
     pub const fn root_phys(&self) -> u64 {
         self.root_phys
     }
@@ -505,7 +512,7 @@ impl ActivePageTables {
 
     #[allow(dead_code)]
     pub fn map_pages<const N: usize>(
-        &self,
+        self,
         allocator: &mut EarlyFrameAllocator<N>,
         mapping: PageMapping,
         init: Option<PageInit<'_>>,
@@ -518,16 +525,18 @@ impl ActivePageTables {
             });
         }
 
+        let root_phys = self.root_phys;
+        let physical_memory_offset = self.physical_memory_offset;
+
         let frame_count = ceil_div(mapping.len, PAGE_SIZE_4K) as usize;
         let frames = allocator
             .allocate_frames(frame_count)
             .map_err(PageMapError::AllocateFrames)?;
-        let bytes_virt = self
-            .physical_memory_offset
-            .checked_add(frames.start)
-            .ok_or(PageMapError::ArenaVirtualOverflow {
+        let bytes_virt = physical_memory_offset.checked_add(frames.start).ok_or(
+            PageMapError::ArenaVirtualOverflow {
                 physical_start: frames.start,
-            })?;
+            },
+        )?;
         let bytes_ptr = bytes_virt as *mut u8;
         unsafe {
             ptr::write_bytes(bytes_ptr, 0, mapping.len as usize);
@@ -548,14 +557,22 @@ impl ActivePageTables {
         for page_index in 0..frame_count {
             let vaddr = mapping.vaddr + (page_index as u64) * PAGE_SIZE_4K;
             let paddr = frames.start + (page_index as u64) * PAGE_SIZE_4K;
-            self.map_4k_page(allocator, vaddr, paddr, mapping.perms, mapping.user)?;
+            Self::map_4k_page_raw(
+                root_phys,
+                physical_memory_offset,
+                allocator,
+                vaddr,
+                paddr,
+                mapping.perms,
+                mapping.user,
+            )?;
         }
 
         Ok(InstalledMapping { frames })
     }
 
     pub fn map_existing_physical<const N: usize>(
-        &self,
+        self,
         allocator: &mut EarlyFrameAllocator<N>,
         mapping: PageMapping,
     ) -> Result<(), PageMapError> {
@@ -573,25 +590,34 @@ impl ActivePageTables {
             });
         }
 
+        let root_phys = self.root_phys;
+        let physical_memory_offset = self.physical_memory_offset;
+
         let page_count = ceil_div(mapping.len, PAGE_SIZE_4K) as usize;
         for page_index in 0..page_count {
             let vaddr = mapping.vaddr + (page_index as u64) * PAGE_SIZE_4K;
             let paddr = mapping.paddr + (page_index as u64) * PAGE_SIZE_4K;
-            self.map_4k_page(allocator, vaddr, paddr, mapping.perms, mapping.user)?;
+            Self::map_4k_page_raw(
+                root_phys,
+                physical_memory_offset,
+                allocator,
+                vaddr,
+                paddr,
+                mapping.perms,
+                mapping.user,
+            )?;
         }
         Ok(())
     }
 
-    pub fn flush_tlb(&self) {
-        unsafe {
-            write_cr3(self.root_phys);
-        }
+    pub fn flush_tlb(self) {
+        let method = crate::cpu_tlb::invalidate_address_space(self.root_phys);
+        crate::cpu_runtime_status::record_tlb_flush(method as u32);
     }
 
-    pub fn activate_root(&self, root_phys: u64) -> Result<(), PagingBringupError> {
-        unsafe {
-            write_cr3(root_phys);
-        }
+    pub fn activate_root(self, root_phys: u64) -> Result<(), PagingBringupError> {
+        let method = crate::cpu_tlb::invalidate_address_space(root_phys);
+        crate::cpu_runtime_status::record_tlb_flush(method as u32);
         let observed = read_cr3();
         if (observed & !0xfff) != (root_phys & !0xfff) {
             return Err(PagingBringupError::Cr3ReloadMismatch {
@@ -604,7 +630,7 @@ impl ActivePageTables {
 
     #[allow(dead_code)]
     fn map_existing_pages<const N: usize>(
-        &self,
+        self,
         allocator: &mut EarlyFrameAllocator<N>,
         mapping: PageMapping,
     ) -> Result<(), PageMapError> {
@@ -616,28 +642,61 @@ impl ActivePageTables {
             });
         }
 
+        let root_phys = self.root_phys;
+        let physical_memory_offset = self.physical_memory_offset;
+
         let page_count = ceil_div(mapping.len, PAGE_SIZE_4K) as usize;
         for page_index in 0..page_count {
             let vaddr = mapping.vaddr + (page_index as u64) * PAGE_SIZE_4K;
             let paddr = mapping.paddr + (page_index as u64) * PAGE_SIZE_4K;
-            self.map_4k_page(allocator, vaddr, paddr, mapping.perms, mapping.user)?;
+            Self::map_4k_page_raw(
+                root_phys,
+                physical_memory_offset,
+                allocator,
+                vaddr,
+                paddr,
+                mapping.perms,
+                mapping.user,
+            )?;
         }
         Ok(())
     }
 
-    fn map_4k_page<const N: usize>(
-        &self,
+    fn map_4k_page_raw<const N: usize>(
+        root_phys: u64,
+        physical_memory_offset: u64,
         allocator: &mut EarlyFrameAllocator<N>,
         vaddr: u64,
         paddr: u64,
         perms: MemoryPermissions,
         user: bool,
     ) -> Result<(), PageMapError> {
-        let pml4 = self.root_phys;
-        let pdpt = self.ensure_child_table(allocator, pml4, pml4_index(vaddr), user)?;
-        let pd = self.ensure_child_table(allocator, pdpt, pdpt_index(vaddr), user)?;
-        let pt = self.ensure_child_table(allocator, pd, pd_index(vaddr), user)?;
-        let pt_table = self.table_mut(pt);
+        let pml4 = root_phys;
+        let pdpt = Self::ensure_child_table_raw(
+            root_phys,
+            physical_memory_offset,
+            allocator,
+            pml4,
+            pml4_index(vaddr),
+            user,
+        )?;
+        let pd = Self::ensure_child_table_raw(
+            root_phys,
+            physical_memory_offset,
+            allocator,
+            pdpt,
+            pdpt_index(vaddr),
+            user,
+        )?;
+        let pt = Self::ensure_child_table_raw(
+            root_phys,
+            physical_memory_offset,
+            allocator,
+            pd,
+            pd_index(vaddr),
+            user,
+        )?;
+        let pt_table = Self::table_mut_raw(root_phys, physical_memory_offset, pt);
         let entry = &mut pt_table.entries[pt_index(vaddr)];
         if (*entry & ENTRY_PRESENT) != 0 {
             return Err(PageMapError::EntryConflict { vaddr });
@@ -646,14 +705,15 @@ impl ActivePageTables {
         Ok(())
     }
 
-    fn ensure_child_table<const N: usize>(
-        &self,
+    fn ensure_child_table_raw<const N: usize>(
+        root_phys: u64,
+        physical_memory_offset: u64,
         allocator: &mut EarlyFrameAllocator<N>,
         parent_phys: u64,
         entry_index: usize,
         user: bool,
     ) -> Result<u64, PageMapError> {
-        let parent = self.table_mut(parent_phys);
+        let parent = Self::table_mut_raw(root_phys, physical_memory_offset, parent_phys);
         let entry = &mut parent.entries[entry_index];
         if (*entry & ENTRY_PRESENT) != 0 {
             if (*entry & ENTRY_LARGE_PAGE) != 0 {
@@ -670,7 +730,13 @@ impl ActivePageTables {
         let child = allocator
             .allocate_frames(1)
             .map_err(PageMapError::AllocateFrames)?;
-        let child_virt = self.physical_memory_offset.checked_add(child.start).ok_or(
+        if child.start % PAGE_SIZE_4K != 0 {
+            panic!(
+                "misaligned child table frame start={:#x} frames={} root={:#x} hhdm={:#x}",
+                child.start, child.frame_count, root_phys, physical_memory_offset
+            );
+        }
+        let child_virt = physical_memory_offset.checked_add(child.start).ok_or(
             PageMapError::ArenaVirtualOverflow {
                 physical_start: child.start,
             },
@@ -682,8 +748,24 @@ impl ActivePageTables {
         Ok(child.start)
     }
 
-    fn table_mut(&self, phys: u64) -> &'static mut PageTable {
-        let virt = self.physical_memory_offset + phys;
+    fn table_mut_raw(
+        root_phys: u64,
+        physical_memory_offset: u64,
+        phys: u64,
+    ) -> &'static mut PageTable {
+        if phys % PAGE_SIZE_4K != 0 {
+            panic!(
+                "misaligned page table physical address phys={:#x} hhdm={:#x} root={:#x}",
+                phys, physical_memory_offset, root_phys
+            );
+        }
+        if physical_memory_offset % PAGE_SIZE_4K != 0 {
+            panic!(
+                "misaligned page table hhdm={:#x} phys={:#x} root={:#x}",
+                physical_memory_offset, phys, root_phys
+            );
+        }
+        let virt = physical_memory_offset + phys;
         unsafe { &mut *(virt as *mut PageTable) }
     }
 }

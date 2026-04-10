@@ -1,3 +1,19 @@
+//! Canonical subsystem role:
+//! - subsystem: process table and lifecycle orchestration
+//! - owner layer: Layer 1
+//! - semantic owner: `kernel-core`
+//! - truth path role: canonical ownership and transition manager for
+//!   process/thread records
+//!
+//! Canonical contract families handled here:
+//! - process table contracts
+//! - process/thread lifecycle contracts
+//! - CPU extended-state propagation contracts
+//! - VM touch and pressure orchestration contracts
+//!
+//! This module may orchestrate canonical process state transitions, but it must
+//! remain within `kernel-core` truth and must not be shadowed by higher layers.
+
 use super::*;
 use ngos_user_abi::BootSessionReport;
 
@@ -35,6 +51,7 @@ pub struct ProcessTable {
     pub(crate) threads: KernelObjectTable<Thread>,
     pub(crate) address_spaces: KernelObjectTable<AddressSpace>,
     pub(crate) vm: VmManager,
+    default_thread_cpu_extended_state: ThreadCpuExtendedStateProfile,
     vm_agent_decisions: Vec<VmAgentDecisionRecord>,
     priority_vm_objects: Vec<u64>,
     decision_tracing_enabled: bool,
@@ -49,6 +66,7 @@ impl ProcessTable {
             threads: KernelObjectTable::new(start, end_exclusive),
             address_spaces: KernelObjectTable::new(start, end_exclusive),
             vm: VmManager::new(),
+            default_thread_cpu_extended_state: ThreadCpuExtendedStateProfile::bootstrap_default(),
             vm_agent_decisions: Vec::with_capacity(VM_AGENT_DECISION_LIMIT),
             priority_vm_objects: Vec::with_capacity(32),
             decision_tracing_enabled: true,
@@ -63,6 +81,41 @@ impl ProcessTable {
 
     pub fn set_decision_tracing_enabled(&mut self, enabled: bool) {
         self.decision_tracing_enabled = enabled;
+    }
+
+    pub fn set_default_thread_cpu_extended_state(
+        &mut self,
+        profile: ThreadCpuExtendedStateProfile,
+    ) {
+        self.default_thread_cpu_extended_state = profile;
+    }
+
+    pub fn default_thread_cpu_extended_state(&self) -> ThreadCpuExtendedStateProfile {
+        self.default_thread_cpu_extended_state
+    }
+
+    pub fn apply_thread_cpu_extended_state_to_process(
+        &mut self,
+        pid: ProcessId,
+        profile: ThreadCpuExtendedStateProfile,
+    ) -> Result<usize, ProcessError> {
+        let tids = self.threads_for_process(pid)?;
+        let mut applied = 0usize;
+        for tid in tids {
+            self.threads
+                .get_mut(tid.handle())
+                .map_err(ProcessError::from_thread_object_error)?
+                .set_cpu_extended_state(profile);
+            applied = applied.saturating_add(1);
+        }
+        Ok(applied)
+    }
+
+    pub fn restore_default_thread_cpu_extended_state_to_process(
+        &mut self,
+        pid: ProcessId,
+    ) -> Result<usize, ProcessError> {
+        self.apply_thread_cpu_extended_state_to_process(pid, self.default_thread_cpu_extended_state)
     }
 
     pub fn set_decision_tick(&mut self, tick: u64) {
@@ -295,6 +348,71 @@ impl ProcessTable {
             .map_err(ProcessError::from_thread_object_error)
     }
 
+    pub fn mark_thread_cpu_extended_state_saved(
+        &mut self,
+        tid: ThreadId,
+        tick: u64,
+    ) -> Result<(), ProcessError> {
+        self.threads
+            .get_mut(tid.handle())
+            .map_err(ProcessError::from_thread_object_error)?
+            .mark_cpu_extended_state_saved(tick);
+        Ok(())
+    }
+
+    pub fn mark_thread_cpu_extended_state_restored(
+        &mut self,
+        tid: ThreadId,
+        tick: u64,
+    ) -> Result<(), ProcessError> {
+        self.threads
+            .get_mut(tid.handle())
+            .map_err(ProcessError::from_thread_object_error)?
+            .mark_cpu_extended_state_restored(tick);
+        Ok(())
+    }
+
+    pub fn restore_thread_cpu_extended_state_boot_seed(
+        &mut self,
+        tid: ThreadId,
+    ) -> Result<(), ProcessError> {
+        self.threads
+            .get_mut(tid.handle())
+            .map_err(ProcessError::from_thread_object_error)?
+            .restore_cpu_extended_state_boot_seed()
+    }
+
+    pub fn export_thread_cpu_extended_state_image(
+        &self,
+        tid: ThreadId,
+    ) -> Result<ThreadCpuExtendedStateImage, ProcessError> {
+        self.threads
+            .get(tid.handle())
+            .map_err(ProcessError::from_thread_object_error)?
+            .cpu_extended_state_image()
+    }
+
+    pub fn import_thread_cpu_extended_state_image(
+        &mut self,
+        tid: ThreadId,
+        image: ThreadCpuExtendedStateImage,
+    ) -> Result<(), ProcessError> {
+        self.threads
+            .get_mut(tid.handle())
+            .map_err(ProcessError::from_thread_object_error)?
+            .import_cpu_extended_state_image(image)
+    }
+
+    pub fn release_thread_cpu_extended_state_image(
+        &mut self,
+        tid: ThreadId,
+    ) -> Result<(), ProcessError> {
+        self.threads
+            .get_mut(tid.handle())
+            .map_err(ProcessError::from_thread_object_error)?
+            .release_cpu_extended_state_image()
+    }
+
     pub fn get_address_space(&self, id: AddressSpaceId) -> Result<&AddressSpace, ProcessError> {
         self.address_spaces
             .get(id.handle())
@@ -432,6 +550,15 @@ impl ProcessTable {
             .get_mut(pid.handle())
             .map_err(ProcessError::from_object_error)?;
         process.set_cwd(cwd);
+        Ok(())
+    }
+
+    pub fn set_root(&mut self, pid: ProcessId, root: String) -> Result<(), ProcessError> {
+        let process = self
+            .objects
+            .get_mut(pid.handle())
+            .map_err(ProcessError::from_object_error)?;
+        process.set_root(root);
         Ok(())
     }
 
@@ -1671,6 +1798,7 @@ impl ProcessTable {
             .get_mut(handle)
             .map_err(ProcessError::from_thread_object_error)?;
         thread.attach_tid(tid);
+        thread.set_cpu_extended_state(self.default_thread_cpu_extended_state);
         thread.sync_from_process(&process);
         self.objects
             .get_mut(pid.handle())

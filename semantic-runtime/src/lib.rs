@@ -1,5 +1,19 @@
 #![cfg_attr(not(test), no_std)]
 
+//! Canonical subsystem role:
+//! - subsystem: semantic runtime classification
+//! - owner layer: Layer 2
+//! - semantic owner: `semantic-runtime`
+//! - truth path role: semantic interpretation of canonical runtime signals
+//!
+//! Canonical contract families handled here:
+//! - pressure classification contracts
+//! - semantic channel contracts
+//! - operator-facing explanation contracts
+//!
+//! This crate may classify and explain canonical system truth, but it must not
+//! redefine kernel, ABI, or scheduler truth underneath those signals.
+
 extern crate alloc;
 
 use alloc::{
@@ -164,16 +178,45 @@ impl Default for AdaptiveState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemPressureMetrics {
     pub snapshot: NativeSystemSnapshotRecord,
+    pub verified_core_ok: bool,
+    pub verified_core_violation_count: u64,
     pub cpu_utilization_pct: u32,
     pub run_queue_total: u64,
     pub run_queue_latency_critical: u64,
     pub run_queue_interactive: u64,
     pub run_queue_normal: u64,
     pub run_queue_background: u64,
+    pub run_queue_urgent_latency_critical: u64,
+    pub run_queue_urgent_interactive: u64,
+    pub run_queue_urgent_normal: u64,
+    pub run_queue_urgent_background: u64,
+    pub scheduler_lag_debt_total: i64,
+    pub scheduler_dispatch_total: u64,
+    pub scheduler_runtime_ticks_total: u64,
+    pub scheduler_runtime_imbalance: u64,
+    pub scheduler_cpu_count: u64,
+    pub scheduler_running_cpu: Option<u64>,
+    pub scheduler_cpu_load_imbalance: u64,
+    pub scheduler_starved: bool,
+    pub bus_endpoint_count: u64,
+    pub saturated_bus_endpoint_count: u64,
+    pub bus_queue_depth_total: u64,
+    pub bus_queue_capacity_total: u64,
+    pub bus_pressure_pct: u32,
+    pub bus_overflow_total: u64,
     pub socket_pressure_pct: u32,
     pub event_queue_pressure_pct: u32,
     pub tx_drop_delta: u64,
     pub rx_drop_delta: u64,
+}
+
+impl SystemPressureMetrics {
+    pub const fn run_queue_urgent_total(&self) -> u64 {
+        self.run_queue_urgent_latency_critical
+            + self.run_queue_urgent_interactive
+            + self.run_queue_urgent_normal
+            + self.run_queue_urgent_background
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,6 +234,8 @@ pub enum SemanticEntityKind {
     Process,
     Device,
     Socket,
+    BusPeer,
+    BusEndpoint,
     Resource,
     Contract,
 }
@@ -414,7 +459,7 @@ pub struct SemanticTopologySnapshot {
 pub const fn pressure_channel_name(state: PressureState) -> &'static str {
     match state {
         PressureState::Stable => "proc::steady",
-        PressureState::HighSchedulerPressure => "proc::pressure",
+        PressureState::HighSchedulerPressure => "proc::scheduler",
         PressureState::NetworkBackpressure => "dev::network-pressure",
         PressureState::MixedPressure => "proc::network-pressure",
     }
@@ -422,6 +467,14 @@ pub const fn pressure_channel_name(state: PressureState) -> &'static str {
 
 pub fn semantic_for_channel(channel: &str) -> EventSemantic {
     match channel {
+        c if c.starts_with("kernel::") => EventSemantic {
+            class: SemanticClass::Process,
+            capabilities: vec![
+                SemanticCapability::Observe,
+                SemanticCapability::Protect,
+                SemanticCapability::Schedule,
+            ],
+        },
         c if c.starts_with("dialog::") => EventSemantic {
             class: SemanticClass::Dialog,
             capabilities: vec![SemanticCapability::Converse, SemanticCapability::Observe],
@@ -429,6 +482,10 @@ pub fn semantic_for_channel(channel: &str) -> EventSemantic {
         c if c.starts_with("proc::") => EventSemantic {
             class: SemanticClass::Process,
             capabilities: vec![SemanticCapability::Schedule, SemanticCapability::Observe],
+        },
+        c if c.starts_with("ipc::") => EventSemantic {
+            class: SemanticClass::Process,
+            capabilities: vec![SemanticCapability::Observe, SemanticCapability::Signal],
         },
         c if c.starts_with("vm::") || c.starts_with("mm::") => EventSemantic {
             class: SemanticClass::Memory,
@@ -492,6 +549,8 @@ pub const fn semantic_entity_kind_name(kind: SemanticEntityKind) -> &'static str
         SemanticEntityKind::Process => "process",
         SemanticEntityKind::Device => "device",
         SemanticEntityKind::Socket => "socket",
+        SemanticEntityKind::BusPeer => "bus-peer",
+        SemanticEntityKind::BusEndpoint => "bus-endpoint",
         SemanticEntityKind::Resource => "resource",
         SemanticEntityKind::Contract => "contract",
     }

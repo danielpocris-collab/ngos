@@ -1,5 +1,7 @@
 //! VFS mutation and inspection command dispatcher.
 
+use alloc::string::String;
+
 use ngos_shell_types::resolve_shell_path;
 use ngos_user_abi::{ExitCode, SyscallBackend};
 use ngos_user_runtime::Runtime;
@@ -249,11 +251,9 @@ impl<'a> VfsAgentCommand<'a> {
             Self::MkfilePath { path } => shell_mkfile_path(runtime, &resolve_shell_path(cwd, path)),
             Self::MksockPath { path } => shell_mksock_path(runtime, &resolve_shell_path(cwd, path)),
             Self::SymlinkPath { path, target } => {
-                shell_symlink_path(
-                    runtime,
-                    &resolve_shell_path(cwd, path),
-                    &resolve_shell_path(cwd, target),
-                )
+                let resolved_path = resolve_shell_path(cwd, path);
+                let resolved_target = resolve_symlink_target(cwd, target);
+                shell_symlink_path(runtime, &resolved_path, &resolved_target)
             }
             Self::LinkPath {
                 source,
@@ -381,6 +381,14 @@ fn parse_three_tokens(rest: &str) -> Result<(&str, &str, &str), ExitCode> {
         Err(2)
     } else {
         Ok((a, b, c))
+    }
+}
+
+fn resolve_symlink_target(cwd: &str, target: &str) -> String {
+    if target.starts_with('/') {
+        resolve_shell_path(cwd, target)
+    } else {
+        target.into()
     }
 }
 

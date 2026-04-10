@@ -1,3 +1,18 @@
+//! Canonical subsystem role:
+//! - subsystem: event queue runtime
+//! - owner layer: Layer 1
+//! - semantic owner: `kernel-core`
+//! - truth path role: canonical runtime mutation surface for event queues and
+//!   queue-backed waiting
+//!
+//! Canonical contract families handled here:
+//! - event queue control contracts
+//! - event emission contracts
+//! - queue binding/runtime mutation contracts
+//!
+//! This module may mutate canonical event queue runtime state, but it must
+//! remain subordinate to the eventing model owned by `kernel-core`.
+
 use super::*;
 
 #[path = "event_queue_runtime/control.rs"]

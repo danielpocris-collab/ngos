@@ -50,10 +50,10 @@ fn enable_sse() {
 mod boot_audio_runtime;
 #[cfg(target_os = "none")]
 mod boot_facts;
-#[cfg(any(target_os = "none", test))]
-mod boot_handoff_proof;
 #[cfg(target_os = "none")]
 mod boot_gpu_runtime;
+#[cfg(any(target_os = "none", test))]
+mod boot_handoff_proof;
 #[cfg(target_os = "none")]
 mod boot_input_runtime;
 mod boot_locator;

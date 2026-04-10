@@ -1,0 +1,15 @@
+[package]
+name = "ngos-shell-state"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "ngos_shell_state"
+
+[dependencies]
+ngos-shell-proc = { path = "../ngos-shell-proc" }
+ngos-shell-types = { path = "../ngos-shell-types" }
+ngos-shell-vfs = { path = "../ngos-shell-vfs" }
+ngos-user-abi = { path = "../user-abi" }
+ngos-user-runtime = { path = "../user-runtime" }

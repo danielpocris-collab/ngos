@@ -1,4 +1,5 @@
 use alloc::collections::BTreeMap;
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 #[cfg(target_arch = "x86_64")]
@@ -8,7 +9,7 @@ use platform_hal::{
     Architecture, BarFlags, BarId, BarInfo, BarKind, BusAddress, BusKind, ConfigAccess,
     ConfigSpaceKind, ConfigWidth, DeviceIdentity, DeviceLocator, DevicePlatform, DeviceRecord,
     DmaBufferId, DmaBufferInfo, DmaCoherency, DmaConstraints, DmaDirection, DmaOwnership,
-    GpuMemoryKind, HalError, InterruptCapability, InterruptHandle, InterruptKind,
+    GpuMemoryKind, GpuVendor, HalError, InterruptCapability, InterruptHandle, InterruptKind,
     InterruptPolarity, InterruptRoute, InterruptTrigger, MmioCachePolicy, MmioMapping,
     MmioMappingId, MmioPermissions, MmioRegionId, Platform, PlatformDescriptor,
 };
@@ -37,6 +38,7 @@ const PCI_COMMAND_STATUS_OFFSET: u16 = 0x04;
 const PCI_CLASS_REVISION_OFFSET: u16 = 0x08;
 const PCI_HEADER_TYPE_OFFSET: u16 = 0x0c;
 const PCI_BAR0_OFFSET: u16 = 0x10;
+const GPU_PRESENT_OPCODE: u32 = 0x4750_0001;
 const PCI_CAP_PTR_OFFSET: u16 = 0x34;
 const PCI_INTERRUPT_LINE_OFFSET: u16 = 0x3c;
 
@@ -1093,6 +1095,26 @@ impl<B: PciConfigBackend> platform_hal::FirmwareReadablePlatform for X86_64Devic
 }
 
 impl<B: PciConfigBackend> platform_hal::GpuPlatform for X86_64DevicePlatform<B> {
+    fn get_gpu_vendor(&self) -> GpuVendor {
+        if self.nvidia_gpu.is_some() {
+            GpuVendor::Nvidia
+        } else if self.virtio_gpu.is_some() {
+            GpuVendor::Virtio
+        } else {
+            GpuVendor::Unknown
+        }
+    }
+
+    fn get_gpu_name(&self) -> String {
+        match self.get_gpu_vendor() {
+            GpuVendor::Nvidia => String::from("NVIDIA GeForce RTX 5060 Ti (Blackwell)"),
+            GpuVendor::Virtio => String::from("VirtIO GPU"),
+            GpuVendor::Amd => String::from("AMD Radeon"),
+            GpuVendor::Intel => String::from("Intel Graphics"),
+            GpuVendor::Unknown => String::from("Unknown GPU Device"),
+        }
+    }
+
     fn setup_gpu_agent(&mut self, locator: DeviceLocator) -> Result<(), HalError> {
         let records = self.enumerate_devices()?;
         let record = records
@@ -1157,7 +1179,7 @@ impl<B: PciConfigBackend> platform_hal::GpuPlatform for X86_64DevicePlatform<B> 
         let gsp = self.nvidia_gsp.as_mut().ok_or(HalError::InvalidDevice)?;
         let gpu = self.nvidia_gpu.as_mut().ok_or(HalError::InvalidDevice)?;
         let response = unsafe { gsp.execute_semantic_op(gpu, rpc_id, payload) }?;
-        if rpc_id == 0x0100 {
+        if rpc_id == 0x0100 || rpc_id == GPU_PRESENT_OPCODE {
             let vram_len = self
                 .nvidia_vram
                 .as_ref()

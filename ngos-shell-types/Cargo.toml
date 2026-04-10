@@ -1,0 +1,8 @@
+[package]
+name = "ngos-shell-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared shell state types and pure type operations for the ngos native shell"
+
+[dependencies]

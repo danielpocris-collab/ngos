@@ -8,7 +8,13 @@
       "Bash(do)",
       "Bash(rm -rf \"$dir/.git\")",
       "Bash(echo \"Removed: $dir.git\")",
-      "Bash(done)"
+      "Bash(done)",
+      "Bash(gh repo:*)",
+      "Bash(grep -l \"gpu.*submit\\\\|gpu.*present\\\\|gpu.*buffer\" /c/Users/pocri/OneDrive/Desktop/experiment/**/*.rs)",
+      "Bash(cargo test:*)",
+      "Bash(rustup show:*)",
+      "Bash(powershell -ExecutionPolicy Bypass -File tooling/x86_64/build-limine-uefi-vm.ps1)",
+      "Bash(cargo build:*)"
     ]
   }
 }

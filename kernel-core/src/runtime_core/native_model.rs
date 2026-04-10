@@ -1,5 +1,5 @@
 use super::*;
-use crate::eventing_model::GraphicsEventKind;
+use crate::eventing_model::{BusEventKind, GraphicsEventKind};
 
 fn emit_graphics_resource_event(
     runtime: &mut KernelRuntime,
@@ -106,6 +106,331 @@ struct ResourceStateTransitionAgent;
 struct ContractStateTransitionAgent;
 
 impl KernelRuntime {
+    fn has_bus_endpoint_capability(
+        &self,
+        owner: ProcessId,
+        endpoint: BusEndpointId,
+        required: CapabilityRights,
+    ) -> bool {
+        self.capabilities.objects.iter().any(|(_, capability)| {
+            capability.owner() == owner
+                && capability.target() == endpoint.handle()
+                && capability.rights().contains(required)
+        })
+    }
+
+    fn enforce_bus_resource_policy(
+        &self,
+        owner: ProcessId,
+        endpoint: BusEndpointId,
+        required: CapabilityRights,
+    ) -> Result<(), RuntimeError> {
+        let endpoint_info = self.bus_endpoint_info(endpoint)?;
+        let resource_info = self.resource_info(endpoint_info.resource)?;
+        match resource_info.contract_policy {
+            ResourceContractPolicy::Io => {
+                let Some((contract_info, _)) =
+                    self.require_process_contract(owner, ContractKind::Io)?
+                else {
+                    return Err(RuntimeError::NativeModel(
+                        NativeModelError::ProcessContractMissing {
+                            kind: ContractKind::Io,
+                        },
+                    ));
+                };
+                if contract_info.resource != endpoint_info.resource {
+                    return Err(RuntimeError::NativeModel(
+                        NativeModelError::ResourceBindingMismatch,
+                    ));
+                }
+                Ok(())
+            }
+            ResourceContractPolicy::Any
+            | ResourceContractPolicy::Execution
+            | ResourceContractPolicy::Memory
+            | ResourceContractPolicy::Device
+            | ResourceContractPolicy::Display
+            | ResourceContractPolicy::Observe => {
+                if resource_info.creator == owner
+                    || self.has_bus_endpoint_capability(owner, endpoint, required)
+                {
+                    Ok(())
+                } else {
+                    Err(RuntimeError::NativeModel(
+                        NativeModelError::BusAccessDenied {
+                            owner,
+                            endpoint,
+                            required,
+                        },
+                    ))
+                }
+            }
+        }
+    }
+
+    pub fn create_bus_peer(
+        &mut self,
+        owner: ProcessId,
+        domain: DomainId,
+        name: impl Into<String>,
+    ) -> Result<BusPeerId, RuntimeError> {
+        self.bus_peers
+            .create(&self.processes, &self.domains, owner, domain, name)
+            .map_err(Into::into)
+    }
+
+    pub fn create_bus_channel_endpoint(
+        &mut self,
+        domain: DomainId,
+        resource: ResourceId,
+        path: impl Into<String>,
+    ) -> Result<BusEndpointId, RuntimeError> {
+        let path = path.into();
+        let resource_info = self.resource_info(resource)?;
+        if resource_info.kind != ResourceKind::Channel {
+            return Err(RuntimeError::NativeModel(
+                NativeModelError::BusEndpointKindMismatch,
+            ));
+        }
+        let status = self.stat_path(&path)?;
+        if status.kind != ObjectKind::Channel {
+            return Err(RuntimeError::NativeModel(
+                NativeModelError::BusEndpointKindMismatch,
+            ));
+        }
+        self.bus_endpoints
+            .create(
+                &self.domains,
+                &self.resources,
+                domain,
+                resource,
+                BusEndpointKind::Channel,
+                path,
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn attach_bus_peer(
+        &mut self,
+        peer: BusPeerId,
+        endpoint: BusEndpointId,
+    ) -> Result<(), RuntimeError> {
+        let endpoint_domain = self.bus_endpoints.get(endpoint)?.domain;
+        let peer_owner = self.bus_peers.get(peer)?.owner;
+        let peer_domain = self.bus_peers.get(peer)?.domain;
+        if peer_domain != endpoint_domain {
+            return Err(RuntimeError::NativeModel(NativeModelError::ParentMismatch));
+        }
+        self.enforce_bus_resource_policy(peer_owner, endpoint, CapabilityRights::ADMIN)?;
+        let peer_entry = self.bus_peers.get_mut(peer)?;
+        if !peer_entry.attached_endpoints.contains(&endpoint) {
+            peer_entry.attached_endpoints.push(endpoint);
+        }
+        let endpoint_entry = self.bus_endpoints.get_mut(endpoint)?;
+        if !endpoint_entry.attached_peers.contains(&peer) {
+            endpoint_entry.attached_peers.push(peer);
+        }
+        event_queue_runtime::emit_bus_events(self, peer, endpoint, BusEventKind::Attached)?;
+        Ok(())
+    }
+
+    pub fn detach_bus_peer(
+        &mut self,
+        peer: BusPeerId,
+        endpoint: BusEndpointId,
+    ) -> Result<(), RuntimeError> {
+        let peer_owner = self.bus_peers.get(peer)?.owner;
+        self.enforce_bus_resource_policy(peer_owner, endpoint, CapabilityRights::ADMIN)?;
+        let peer_entry = self.bus_peers.get_mut(peer)?;
+        peer_entry
+            .attached_endpoints
+            .retain(|candidate| *candidate != endpoint);
+        let endpoint_entry = self.bus_endpoints.get_mut(endpoint)?;
+        endpoint_entry
+            .attached_peers
+            .retain(|candidate| *candidate != peer);
+        event_queue_runtime::emit_bus_events(self, peer, endpoint, BusEventKind::Detached)?;
+        Ok(())
+    }
+
+    pub fn bus_publish(
+        &mut self,
+        peer: BusPeerId,
+        endpoint: BusEndpointId,
+        bytes: &[u8],
+    ) -> Result<usize, RuntimeError> {
+        let endpoint_info = self.bus_endpoint_info(endpoint)?;
+        let peer_owner = self.bus_peers.get(peer)?.owner;
+        if endpoint_info.kind != BusEndpointKind::Channel {
+            return Err(RuntimeError::NativeModel(
+                NativeModelError::BusEndpointKindMismatch,
+            ));
+        }
+        self.enforce_bus_resource_policy(peer_owner, endpoint, CapabilityRights::WRITE)?;
+        let attached = self
+            .bus_peers
+            .get(peer)?
+            .attached_endpoints
+            .contains(&endpoint);
+        if !attached {
+            return Err(RuntimeError::NativeModel(
+                NativeModelError::BusPeerNotAttached { peer, endpoint },
+            ));
+        }
+        if let Some(channel) = self
+            .runtime_channels
+            .iter_mut()
+            .find(|channel| channel.path == endpoint_info.path)
+        {
+            if channel.messages.len() >= endpoint_info.queue_capacity {
+                let endpoint_entry = self.bus_endpoints.get_mut(endpoint)?;
+                endpoint_entry.overflow_count = endpoint_entry.overflow_count.saturating_add(1);
+                return Err(RuntimeError::NativeModel(NativeModelError::BusQueueFull {
+                    endpoint,
+                    capacity: endpoint_info.queue_capacity,
+                }));
+            }
+            channel.messages.push(bytes.to_vec());
+        } else {
+            self.runtime_channels.push(RuntimeChannel {
+                path: endpoint_info.path.clone(),
+                messages: vec![bytes.to_vec()],
+            });
+        }
+        let peer_entry = self.bus_peers.get_mut(peer)?;
+        peer_entry.publish_count = peer_entry.publish_count.saturating_add(1);
+        peer_entry.last_endpoint = Some(endpoint);
+        let endpoint_entry = self.bus_endpoints.get_mut(endpoint)?;
+        endpoint_entry.publish_count = endpoint_entry.publish_count.saturating_add(1);
+        endpoint_entry.byte_count = endpoint_entry.byte_count.saturating_add(bytes.len() as u64);
+        endpoint_entry.queue_depth = endpoint_entry.queue_depth.saturating_add(1);
+        endpoint_entry.peak_queue_depth = endpoint_entry
+            .peak_queue_depth
+            .max(endpoint_entry.queue_depth);
+        endpoint_entry.last_peer = Some(peer);
+        event_queue_runtime::emit_bus_events(self, peer, endpoint, BusEventKind::Published)?;
+        Ok(bytes.len())
+    }
+
+    pub fn bus_receive(
+        &mut self,
+        peer: BusPeerId,
+        endpoint: BusEndpointId,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        let endpoint_info = self.bus_endpoint_info(endpoint)?;
+        let peer_owner = self.bus_peers.get(peer)?.owner;
+        self.enforce_bus_resource_policy(peer_owner, endpoint, CapabilityRights::READ)?;
+        let attached = self
+            .bus_peers
+            .get(peer)?
+            .attached_endpoints
+            .contains(&endpoint);
+        if !attached {
+            return Err(RuntimeError::NativeModel(
+                NativeModelError::BusPeerNotAttached { peer, endpoint },
+            ));
+        }
+        let Some(channel) = self
+            .runtime_channels
+            .iter_mut()
+            .find(|channel| channel.path == endpoint_info.path)
+        else {
+            return Ok(Vec::new());
+        };
+        let bytes = if channel.messages.is_empty() {
+            Vec::new()
+        } else {
+            channel.messages.remove(0)
+        };
+        let remaining = channel.messages.len();
+        let peer_entry = self.bus_peers.get_mut(peer)?;
+        peer_entry.receive_count = peer_entry.receive_count.saturating_add(1);
+        peer_entry.last_endpoint = Some(endpoint);
+        let endpoint_entry = self.bus_endpoints.get_mut(endpoint)?;
+        endpoint_entry.receive_count = endpoint_entry.receive_count.saturating_add(1);
+        endpoint_entry.queue_depth = remaining;
+        endpoint_entry.last_peer = Some(peer);
+        event_queue_runtime::emit_bus_events(self, peer, endpoint, BusEventKind::Received)?;
+        Ok(bytes)
+    }
+
+    pub fn bus_peer_info(&self, peer: BusPeerId) -> Result<BusPeerInfo, RuntimeError> {
+        let peer = self.bus_peers.get(peer)?;
+        Ok(BusPeerInfo {
+            id: peer.id,
+            owner: peer.owner,
+            domain: peer.domain,
+            name: peer.name.clone(),
+            attached_endpoints: peer.attached_endpoints.clone(),
+            publish_count: peer.publish_count,
+            receive_count: peer.receive_count,
+            last_endpoint: peer.last_endpoint,
+        })
+    }
+
+    pub fn bus_endpoint_info(
+        &self,
+        endpoint: BusEndpointId,
+    ) -> Result<BusEndpointInfo, RuntimeError> {
+        let endpoint = self.bus_endpoints.get(endpoint)?;
+        Ok(BusEndpointInfo {
+            id: endpoint.id,
+            domain: endpoint.domain,
+            resource: endpoint.resource,
+            kind: endpoint.kind,
+            path: endpoint.path.clone(),
+            attached_peers: endpoint.attached_peers.clone(),
+            publish_count: endpoint.publish_count,
+            receive_count: endpoint.receive_count,
+            byte_count: endpoint.byte_count,
+            queue_depth: endpoint.queue_depth,
+            queue_capacity: endpoint.queue_capacity,
+            peak_queue_depth: endpoint.peak_queue_depth,
+            overflow_count: endpoint.overflow_count,
+            last_peer: endpoint.last_peer,
+        })
+    }
+
+    pub fn bus_peers(&self) -> Vec<BusPeerInfo> {
+        self.bus_peers
+            .objects
+            .iter()
+            .map(|(_, peer)| BusPeerInfo {
+                id: peer.id,
+                owner: peer.owner,
+                domain: peer.domain,
+                name: peer.name.clone(),
+                attached_endpoints: peer.attached_endpoints.clone(),
+                publish_count: peer.publish_count,
+                receive_count: peer.receive_count,
+                last_endpoint: peer.last_endpoint,
+            })
+            .collect()
+    }
+
+    pub fn bus_endpoints(&self) -> Vec<BusEndpointInfo> {
+        self.bus_endpoints
+            .objects
+            .iter()
+            .map(|(_, endpoint)| BusEndpointInfo {
+                id: endpoint.id,
+                domain: endpoint.domain,
+                resource: endpoint.resource,
+                kind: endpoint.kind,
+                path: endpoint.path.clone(),
+                attached_peers: endpoint.attached_peers.clone(),
+                publish_count: endpoint.publish_count,
+                receive_count: endpoint.receive_count,
+                byte_count: endpoint.byte_count,
+                queue_depth: endpoint.queue_depth,
+                queue_capacity: endpoint.queue_capacity,
+                peak_queue_depth: endpoint.peak_queue_depth,
+                overflow_count: endpoint.overflow_count,
+                last_peer: endpoint.last_peer,
+            })
+            .collect()
+    }
+
     fn record_resource_agent_decision(
         &mut self,
         agent: ResourceAgentKind,

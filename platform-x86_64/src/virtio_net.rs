@@ -1,3 +1,19 @@
+//! Canonical subsystem role:
+//! - subsystem: x86_64 virtio network transport mediation
+//! - owner layer: platform mediation
+//! - semantic owner: `platform-x86_64`
+//! - truth path role: platform-specific virtio network hardware mechanics for
+//!   the real x86 path
+//!
+//! Canonical contract families handled here:
+//! - virtio network transport contracts
+//! - MMIO/config-space mediation contracts
+//! - network queue and interrupt mechanism contracts
+//!
+//! This module may mediate virtio network hardware behavior, but it must not
+//! redefine higher-level networking or device-runtime truth owned by
+//! `kernel-core`.
+
 use alloc::collections::VecDeque;
 use alloc::vec;
 use alloc::vec::Vec;

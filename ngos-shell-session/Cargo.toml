@@ -1,0 +1,15 @@
+[package]
+name = "ngos-shell-session"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "ngos_shell_session"
+
+[dependencies]
+ngos-shell-types   = { path = "../ngos-shell-types" }
+ngos-shell-vfs     = { path = "../ngos-shell-vfs" }
+ngos-shell-proc    = { path = "../ngos-shell-proc" }
+ngos-shell-ux      = { path = "../ngos-shell-ux" }
+ngos-user-abi      = { path = "../user-abi" }
+ngos-user-runtime  = { path = "../user-runtime" }

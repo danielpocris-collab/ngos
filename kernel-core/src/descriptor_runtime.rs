@@ -1,3 +1,18 @@
+//! Canonical subsystem role:
+//! - subsystem: descriptor runtime
+//! - owner layer: Layer 1
+//! - semantic owner: `kernel-core`
+//! - truth path role: canonical runtime mutation and I/O behavior for
+//!   descriptors
+//!
+//! Canonical contract families handled here:
+//! - descriptor runtime contracts
+//! - descriptor I/O decision contracts
+//! - endpoint synchronization contracts
+//!
+//! This module may mutate canonical descriptor runtime state, but it must
+//! remain subordinate to the descriptor model and kernel runtime truth.
+
 use super::*;
 use crate::device_runtime::sync_endpoint_io_state;
 

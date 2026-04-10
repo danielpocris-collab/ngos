@@ -49,7 +49,7 @@ Un front este considerat valid numai dacă include toate acestea:
 - integrare în sistemul existent
 - efect vizibil în runtime
 - observability sau introspecție
-- expunere în interfețe relevante: CLI, host-runtime, syscall surface sau API intern real
+- expunere în interfețe relevante ale path-ului real: CLI, syscall surface sau API intern real
 - test sau demonstrație reală
 
 Dacă lipsește una dintre aceste condiții, frontul nu este `done`.
@@ -336,7 +336,7 @@ Modelul standard de migrare folosit în `ngos` este:
 3. păstrează mutația în path-ul existent
 4. adaugă jurnal intern de decizie
 5. exportă jurnalul prin `inspect_system()`
-6. unde e util, proiectează jurnalul în `host-runtime`
+6. unde e util, proiectează jurnalul în suprafețe auxiliare fără a schimba truth surface-ul real
 7. extinde testele reale, nu doar teste sintetice
 
 Acesta este modelul deja validat în cod.
@@ -364,7 +364,7 @@ Suprafață observabilă:
 
 - `resource_agent_decisions`
 - `SystemIntrospection`
-- `host-runtime` report: `== resource-agents ==`
+- proiecții auxiliare de raportare, dacă există, rămân subordinate path-ului real
 
 ### 2. Wait/wake și memory wait
 
@@ -574,7 +574,7 @@ Fiecare subsistem migrat trebuie să respecte contractul minim de observabilitat
 - jurnal bounded în runtime
 - export prin `SystemIntrospection`
 - test care verifică jurnalul
-- dacă frontul e operator-relevant, proiectare în `host-runtime`
+- dacă frontul e operator-relevant, proiectare auxiliară permisă doar fără a înlocui path-ul real
 
 Acesta este pragul minim.
 Fără el nu există migrare acceptată.

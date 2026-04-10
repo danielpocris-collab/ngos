@@ -11,10 +11,44 @@ members = [
     "user-abi",
     "user-runtime",
     "userland-native",
+    "ngos-shell-types",
+    "ngos-shell-lang",
+    "ngos-shell-vfs",
+    "ngos-shell-proc",
+    "ngos-shell-ux",
+    "ngos-shell-session",
+    "ngos-shell-workflow",
+    "ngos-shell-repair",
+    "ngos-shell-game",
+    "ngos-shell-dev",
+    "ngos-shell-compat-abi",
+    "ngos-shell-rust",
+    "ngos-shell-project",
+    "ngos-shell-analysis",
+    "ngos-shell-code",
+    "ngos-shell-vm",
+    "ngos-shell-bus",
+    "ngos-shell-edit",
+    "ngos-shell-state",
+    "ngos-shell-support",
+    "ngos-shell-proof",
+    "ngos-shell-proc-view",
+    "ngos-shell-semantic",
+    "ngos-shell-nextmind",
+    "ngos-shell-gpu",
+    "ngos-shell-network",
+    "ngos-shell-resource",
+    "ngos-shell-surface",
     "platform-hal",
     "semantic-runtime",
     "platform-x86_64",
     "platform-host-runtime",
+    "compositor",
+    "effects-pipeline",
+    "scene-graph",
+    "render3d",
+    "window-manager",
+    "ui",
     "tooling/command-runner",
     # NGOS Browser - Proprietary Web Browser
     "browser-core",
@@ -29,6 +63,7 @@ members = [
     "browser-webapi",
     "browser-ui",
     "browser-cli",
+    "ui-preview",
 ]
 resolver = "2"
 
@@ -36,6 +71,12 @@ resolver = "2"
 edition = "2024"
 license = "Proprietary"
 version = "0.1.0"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
 
 [workspace.metadata.ngos]
 product_name = "Next Gen OS"

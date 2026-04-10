@@ -91,6 +91,7 @@ pub(crate) fn event_queue_info(runtime: &KernelRuntime, queue: &EventQueue) -> E
         memory_watch_count: queue.memory_watchers.len(),
         resource_watch_count: queue.resource_watchers.len(),
         network_watch_count: queue.network_watchers.len(),
+        bus_watch_count: queue.bus_watchers.len(),
         pending_count: queue.pending.len(),
         waiter_count: queue.waiters.len(),
         descriptor_ref_count: descriptor_runtime::queue_descriptor_reference_count(runtime, binding),
@@ -167,6 +168,16 @@ pub(crate) fn event_queue_info(runtime: &KernelRuntime, queue: &EventQueue) -> E
             .map(|watch| EventQueueNetworkWatchInfo {
                 interface_inode: watch.interface_inode,
                 socket_inode: watch.socket_inode,
+                token: watch.token,
+                interest: watch.interest,
+                events: watch.events,
+            })
+            .collect(),
+        bus_watches: queue
+            .bus_watchers
+            .iter()
+            .map(|watch| EventQueueBusWatchInfo {
+                endpoint: watch.endpoint,
                 token: watch.token,
                 interest: watch.interest,
                 events: watch.events,
@@ -471,6 +482,20 @@ pub(crate) fn render_procfs_event_queue(
         )
         .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
     }
+    for watch in &info.bus_watches {
+        writeln!(
+            out,
+            "buswatch\tendpoint={}\ttoken={}\tinterest=attach:{} detach:{} publish:{} receive:{}\tevents=0x{:x}",
+            watch.endpoint.raw(),
+            watch.token,
+            watch.interest.attached,
+            watch.interest.detached,
+            watch.interest.published,
+            watch.interest.received,
+            watch.events.0,
+        )
+        .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+    }
     for event in &info.pending {
         match event.source {
             EventSource::Descriptor(fd) => writeln!(
@@ -556,6 +581,20 @@ pub(crate) fn render_procfs_event_queue(
                 event.owner.raw(),
                 device_inode,
                 request_id,
+                kind,
+                event.token,
+                event.events.0,
+            ),
+            EventSource::Bus {
+                peer,
+                endpoint,
+                kind,
+            } => writeln!(
+                out,
+                "pending\towner={}\tsource=bus:{}:{}:{:?}\ttoken={}\tevents=0x{:x}",
+                event.owner.raw(),
+                peer.raw(),
+                endpoint.raw(),
                 kind,
                 event.token,
                 event.events.0,

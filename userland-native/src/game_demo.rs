@@ -123,8 +123,9 @@ pub extern "C" fn _start(
     _argc: usize,
     _argv: *const *const u8,
     _envp: *const *const u8,
-    _auxv: *const ngos_user_abi::AuxvEntry,
+    _sysret_reserved: usize,
     _stack_alignment: usize,
+    _auxv: *const ngos_user_abi::AuxvEntry,
 ) -> ! {
     let runtime = Runtime::new(Amd64SyscallBackend);
     let argv = ["game-demo"];

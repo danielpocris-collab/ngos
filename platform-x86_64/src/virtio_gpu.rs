@@ -1,3 +1,18 @@
+//! Canonical subsystem role:
+//! - subsystem: x86_64 virtio GPU transport mediation
+//! - owner layer: platform mediation
+//! - semantic owner: `platform-x86_64`
+//! - truth path role: platform-specific virtio GPU hardware mechanics for the
+//!   real x86 path
+//!
+//! Canonical contract families handled here:
+//! - virtio GPU transport contracts
+//! - MMIO/config-space mediation contracts
+//! - GPU queue and interrupt mechanism contracts
+//!
+//! This module may mediate virtio GPU hardware behavior, but it must not
+//! redefine higher-level GPU or device-runtime truth owned by `kernel-core`.
+
 use alloc::collections::VecDeque;
 use alloc::vec;
 use alloc::vec::Vec;

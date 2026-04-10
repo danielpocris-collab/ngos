@@ -1,3 +1,18 @@
+//! Canonical subsystem role:
+//! - subsystem: host runtime session assembly
+//! - owner layer: auxiliary execution layer
+//! - semantic owner: `host-runtime`
+//! - truth path role: auxiliary host-side assembly of native runtime sessions
+//!   for development and reporting
+//!
+//! Canonical contract families handled here:
+//! - host session fixture contracts
+//! - host report assembly contracts
+//! - auxiliary stdin-script execution contracts
+//!
+//! This module may assemble host-side sessions for validation, but it must not
+//! be treated as the product truth path for subsystem closure.
+
 use crate::backend::HostRuntimeKernelBackend;
 use crate::report::{
     HostRuntimeNativeSessionReport, extract_chronoscope_summary,
@@ -10,6 +25,7 @@ use kernel_core::{
     SchedulerClass,
 };
 use ngos_boot_x86_64::diagnostics::chronoscope_snapshot;
+use ngos_ui::UiPresenter;
 use user_abi::{AuxvEntry, BootstrapArgs};
 use user_runtime::Runtime as UserRuntime;
 
@@ -388,6 +404,9 @@ fn build_native_session_report_from_observability(
         pid: app.raw(),
         exit_code,
         stdout_bytes: observability.stdout.len(),
+        ui_presentation_backend: match UiPresenter::backend() {
+            ngos_ui::UiPresentationBackend::Skia => "skia",
+        },
         session_reported: observability.process.session_reported,
         session_report_count: observability.process.session_report_count,
         session_status: observability.process.session_status,
@@ -669,6 +688,28 @@ fn build_runtime_probe_script(
     append_export(&mut runtime_script, "VM_SCRATCH", scratch);
     runtime_script.extend_from_slice(script);
     runtime_script
+}
+
+fn script_requires_vm_exports(script: &[u8]) -> bool {
+    script.windows(4).any(|window| window == b"$VM_")
+}
+
+fn seed_non_vm_session_contract_baseline(runtime: &mut KernelRuntime, app: ProcessId) {
+    let domain = runtime
+        .create_domain(app, None, "host-runtime-fast-path")
+        .expect("native non-vm seed domain must succeed");
+    let resource = runtime
+        .create_resource(app, domain, ResourceKind::Device, "fast-path-seed")
+        .expect("native non-vm seed resource must succeed");
+    runtime
+        .create_contract(
+            app,
+            domain,
+            resource,
+            ContractKind::Display,
+            "fast-path-seed",
+        )
+        .expect("native non-vm seed contract must succeed");
 }
 
 fn run_vm_probe_family(
@@ -1271,25 +1312,45 @@ where
         app,
         scratch,
     } = build_native_host_test_fixture_and_configure(configure_runtime);
-    let vm_probe_family = run_vm_probe_family(&mut runtime, init, app);
-    let vm_fault_family = run_vm_fault_family(&mut runtime, init);
-    let vm_pressure_family = run_vm_pressure_contract_family(
-        &mut runtime,
-        init,
-        app,
-        vm_probe_family.vm_shared_live_b,
-        vm_probe_family.vm_shared_live_b_map,
-    );
-    let vm_addresses = resolve_vm_session_address_context(&runtime, app, &vm_probe_family);
-    let runtime_script = build_runtime_probe_script(
-        &vm_probe_family,
-        &vm_fault_family,
-        &vm_pressure_family,
-        &vm_addresses,
-        scratch,
-        script,
-    );
+    let runtime_script = if script_requires_vm_exports(script) {
+        let vm_probe_family = run_vm_probe_family(&mut runtime, init, app);
+        let vm_fault_family = run_vm_fault_family(&mut runtime, init);
+        let vm_pressure_family = run_vm_pressure_contract_family(
+            &mut runtime,
+            init,
+            app,
+            vm_probe_family.vm_shared_live_b,
+            vm_probe_family.vm_shared_live_b_map,
+        );
+        let vm_addresses = resolve_vm_session_address_context(&runtime, app, &vm_probe_family);
+        build_runtime_probe_script(
+            &vm_probe_family,
+            &vm_fault_family,
+            &vm_pressure_family,
+            &vm_addresses,
+            scratch,
+            script,
+        )
+    } else {
+        seed_non_vm_session_contract_baseline(&mut runtime, app);
+        script.to_vec()
+    };
     let launch = prepare_native_session_launch(runtime, app, scratch, &runtime_script);
     let (exit_code, observability) = execute_native_session(launch);
     build_native_session_report_from_observability(app, exit_code, observability)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::script_requires_vm_exports;
+
+    #[test]
+    fn script_requires_vm_exports_only_when_vm_placeholders_are_present() {
+        assert!(script_requires_vm_exports(
+            b"vm-load-word 2 $VM_FILE_ADDR\nexit 0\n"
+        ));
+        assert!(!script_requires_vm_exports(
+            b"gpu-submit /dev/gpu0 draw:a\ngpu-read /dev/gpu0\nexit 0\n"
+        ));
+    }
 }

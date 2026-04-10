@@ -9,8 +9,8 @@ use limine::{
     },
 };
 use platform_x86_64::{
-    BootInfo, BootInfoValidationError, LoaderDefinedHandoffError,
-    LimineBootBuffers, LimineBootSnapshot,
+    BootInfo, BootInfoValidationError, LimineBootBuffers, LimineBootSnapshot,
+    LoaderDefinedHandoffError,
 };
 
 use crate::boot_locator::{
@@ -269,9 +269,10 @@ pub fn write_boot_info(
         physical_memory_offset,
         kernel_physical_base: executable_address_response.physical_base(),
     };
-    let mut handoff = unsafe { LIMINE_BOOT_BUFFERS.build_loader_defined_handoff(snapshot, kernel_image_len) }
-        .map_err(map_limine_handoff_error)
-        .map_err(report_limine_failure)?;
+    let mut handoff =
+        unsafe { LIMINE_BOOT_BUFFERS.build_loader_defined_handoff(snapshot, kernel_image_len) }
+            .map_err(map_limine_handoff_error)
+            .map_err(report_limine_failure)?;
     serial::debug_marker(b'V');
     if let Some(mode) = crate::boot_handoff_proof::apply(&mut handoff) {
         serial::print(format_args!(
@@ -281,10 +282,12 @@ pub fn write_boot_info(
     }
     serial::debug_marker(b'W');
     if handoff.memory_regions.len() > MAX_MEMORY_REGIONS {
-        return Err(report_limine_failure(LimineBootError::TooManyMemoryRegions {
-            count: handoff.memory_regions.len(),
-            capacity: MAX_MEMORY_REGIONS,
-        }));
+        return Err(report_limine_failure(
+            LimineBootError::TooManyMemoryRegions {
+                count: handoff.memory_regions.len(),
+                capacity: MAX_MEMORY_REGIONS,
+            },
+        ));
     }
     if handoff.modules.len() > MAX_MODULES {
         return Err(report_limine_failure(LimineBootError::TooManyModules {
@@ -370,17 +373,22 @@ fn map_limine_handoff_error(error: platform_x86_64::LimineHandoffError) -> Limin
 
 fn map_loader_defined_handoff_error(error: LoaderDefinedHandoffError) -> LimineBootError {
     match error {
-        LoaderDefinedHandoffError::InvalidBootInfo(error) => LimineBootError::InvalidBootInfo(error),
-        LoaderDefinedHandoffError::InvalidMagic => unreachable!("Limine handoff must preserve loader-defined magic"),
+        LoaderDefinedHandoffError::InvalidBootInfo(error) => {
+            LimineBootError::InvalidBootInfo(error)
+        }
+        LoaderDefinedHandoffError::InvalidMagic => {
+            unreachable!("Limine handoff must preserve loader-defined magic")
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{LimineBootError, map_loader_defined_handoff_error, map_limine_handoff_error, report_limine_failure};
-    use platform_x86_64::{
-        BootInfoValidationError, LoaderDefinedHandoffError, LimineHandoffError,
+    use super::{
+        LimineBootError, map_limine_handoff_error, map_loader_defined_handoff_error,
+        report_limine_failure,
     };
+    use platform_x86_64::{BootInfoValidationError, LimineHandoffError, LoaderDefinedHandoffError};
 
     #[test]
     fn limine_handoff_mapping_preserves_contract_refusal_families() {
@@ -479,17 +487,13 @@ mod tests {
             "invalid-module-path-utf8"
         );
         assert_eq!(
-            LimineBootError::InvalidBootInfo(
-                BootInfoValidationError::KernelRangeMustBeKernelImage
-            )
-            .summary_detail(),
+            LimineBootError::InvalidBootInfo(BootInfoValidationError::KernelRangeMustBeKernelImage)
+                .summary_detail(),
             "invalid-kernel-range-kind"
         );
         assert_eq!(
-            LimineBootError::InvalidBootInfo(
-                BootInfoValidationError::KernelRangeMustBePageAligned
-            )
-            .summary_detail(),
+            LimineBootError::InvalidBootInfo(BootInfoValidationError::KernelRangeMustBePageAligned)
+                .summary_detail(),
             "invalid-kernel-range-alignment"
         );
         assert_eq!(
@@ -513,7 +517,10 @@ mod tests {
 
     #[test]
     fn limine_boot_error_locator_codes_cover_remaining_refusal_families() {
-        assert_eq!(LimineBootError::MissingBaseRevision.locator_status_code(), 0x01);
+        assert_eq!(
+            LimineBootError::MissingBaseRevision.locator_status_code(),
+            0x01
+        );
         assert_eq!(
             LimineBootError::UnsupportedBaseRevision { loaded: Some(3) }.locator_status_code(),
             0x02
@@ -543,17 +550,13 @@ mod tests {
             0x31
         );
         assert_eq!(
-            LimineBootError::InvalidBootInfo(
-                BootInfoValidationError::KernelRangeMustBeKernelImage
-            )
-            .locator_status_code(),
+            LimineBootError::InvalidBootInfo(BootInfoValidationError::KernelRangeMustBeKernelImage)
+                .locator_status_code(),
             0x41
         );
         assert_eq!(
-            LimineBootError::InvalidBootInfo(
-                BootInfoValidationError::KernelRangeMustBePageAligned
-            )
-            .locator_status_code(),
+            LimineBootError::InvalidBootInfo(BootInfoValidationError::KernelRangeMustBePageAligned)
+                .locator_status_code(),
             0x42
         );
         assert_eq!(

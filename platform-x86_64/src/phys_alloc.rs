@@ -1,3 +1,18 @@
+//! Canonical subsystem role:
+//! - subsystem: x86_64 physical-frame mediation
+//! - owner layer: platform mediation
+//! - semantic owner: `platform-x86_64`
+//! - truth path role: platform-specific physical frame discovery and allocation
+//!   mechanics for the real x86 path
+//!
+//! Canonical contract families handled here:
+//! - physical frame run contracts
+//! - boot memory region mediation contracts
+//! - frame allocation mechanism contracts
+//!
+//! This module may mediate physical memory mechanics, but it must not redefine
+//! higher-level VM ownership from `kernel-core`.
+
 use crate::{BootInfo, BootMemoryRegion, BootMemoryRegionKind, PAGE_SIZE_4K, align_down, align_up};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

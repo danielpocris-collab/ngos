@@ -1,0 +1,13 @@
+[package]
+name = "ngos-compositor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+ngos-gfx-translate = { path = "../gfx-translate" }
+ngos-effects-pipeline = { path = "../effects-pipeline" }

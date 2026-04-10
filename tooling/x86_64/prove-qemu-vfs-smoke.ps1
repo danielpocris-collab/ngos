@@ -7,17 +7,21 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$BuildScript = Join-Path $PSScriptRoot "build-limine-uefi-vm.ps1"
+$BuildScript = Join-Path $PSScriptRoot "build-limine-uefi.ps1"
 $VerifyScript = Join-Path $PSScriptRoot "verify-qemu-vfs-log.ps1"
 $QemuExe = "C:\Program Files\qemu\qemu-system-x86_64.exe"
 $FirmwareSource = "C:\Program Files\qemu\share\edk2-x86_64-code.fd"
 $VarsSource = "C:\Program Files\qemu\share\edk2-i386-vars.fd"
 $Firmware = Join-Path $RepoRoot "target\qemu\edk2-x86_64-code.fd"
 $Vars = Join-Path $RepoRoot "target\qemu\edk2-x86_64-vars-vfs.fd"
-$EspImage = Join-Path $RepoRoot "target\qemu\limine-uefi-vm.img"
+$RunId = Get-Date -Format "yyyyMMdd-HHmmss"
+$StageName = "limine-uefi-vfs-proof-$RunId"
+$BuildImageName = "limine-uefi-vfs-proof-$RunId.img"
+$ProofImageName = "limine-uefi-vfs-proof-$RunId-proof.img"
+$EspImage = Join-Path $RepoRoot ("target\qemu\" + $ProofImageName)
 $SerialLog = Join-Path $RepoRoot "target\qemu\serial-vfs.log"
 $DebugconLog = Join-Path $RepoRoot "target\qemu\debugcon-vfs.log"
-$StageDir = Join-Path $RepoRoot "target\qemu\limine-uefi-vm"
+$StageDir = Join-Path $RepoRoot ("target\qemu\" + $StageName)
 $StageConfig = Join-Path $StageDir "limine.conf"
 $BootConfig = Join-Path $StageDir "EFI\BOOT\limine.conf"
 $MakeEspScript = Join-Path $PSScriptRoot "make_esp_image.py"
@@ -32,7 +36,7 @@ if (!(Test-Path $VarsSource)) {
     throw "UEFI variable store not found at $VarsSource"
 }
 
-& $BuildScript -Release:$Release
+& $BuildScript -Release:$Release -StageName $StageName -ImageName $BuildImageName
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to build Limine UEFI VM image."
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::eventing_model::BusEventInterest;
 
 impl KernelSyscallSurface {
     pub fn create_event_multiplexer(
@@ -249,6 +250,32 @@ impl KernelSyscallSurface {
         }
     }
 
+    pub fn event_multiplexer_watch_bus(
+        &mut self,
+        caller: ProcessId,
+        owner: ProcessId,
+        mux: EventMultiplexerDescriptor,
+        endpoint: BusEndpointId,
+        token: u64,
+        interest: BusEventInterest,
+        events: IoPollEvents,
+    ) -> Result<(), SyscallError> {
+        match self.dispatch(
+            SyscallContext::kernel(caller),
+            Syscall::WatchBusEventsDescriptor {
+                owner,
+                queue_fd: mux.fd,
+                endpoint,
+                token,
+                interest,
+                events,
+            },
+        )? {
+            SyscallResult::BusEventWatchRegistered => Ok(()),
+            other => panic!("unexpected syscall result: {other:?}"),
+        }
+    }
+
     pub fn event_multiplexer_remove_memory_wait_watch(
         &mut self,
         caller: ProcessId,
@@ -291,6 +318,28 @@ impl KernelSyscallSurface {
             },
         )? {
             SyscallResult::ResourceEventWatchRemoved => Ok(()),
+            other => panic!("unexpected syscall result: {other:?}"),
+        }
+    }
+
+    pub fn event_multiplexer_remove_bus_watch(
+        &mut self,
+        caller: ProcessId,
+        owner: ProcessId,
+        mux: EventMultiplexerDescriptor,
+        endpoint: BusEndpointId,
+        token: u64,
+    ) -> Result<(), SyscallError> {
+        match self.dispatch(
+            SyscallContext::kernel(caller),
+            Syscall::RemoveBusEventsDescriptor {
+                owner,
+                queue_fd: mux.fd,
+                endpoint,
+                token,
+            },
+        )? {
+            SyscallResult::BusEventWatchRemoved => Ok(()),
             other => panic!("unexpected syscall result: {other:?}"),
         }
     }
@@ -714,6 +763,20 @@ impl KernelSyscallSurface {
                 )?;
                 SyscallResult::NetworkEventWatchRegistered
             }
+            Syscall::WatchBusEventsDescriptor {
+                owner,
+                queue_fd,
+                endpoint,
+                token,
+                interest,
+                events,
+            } => {
+                context.require(CapabilityRights::READ)?;
+                self.runtime.watch_bus_events_descriptor(
+                    *owner, *queue_fd, *endpoint, *token, *interest, *events,
+                )?;
+                SyscallResult::BusEventWatchRegistered
+            }
             Syscall::RemoveResourceEventsDescriptor {
                 owner,
                 queue_fd,
@@ -746,6 +809,17 @@ impl KernelSyscallSurface {
                     *token,
                 )?;
                 SyscallResult::NetworkEventWatchRemoved
+            }
+            Syscall::RemoveBusEventsDescriptor {
+                owner,
+                queue_fd,
+                endpoint,
+                token,
+            } => {
+                context.require(CapabilityRights::READ)?;
+                self.runtime
+                    .remove_bus_events_descriptor(*owner, *queue_fd, *endpoint, *token)?;
+                SyscallResult::BusEventWatchRemoved
             }
             Syscall::ModifyWatchedEvent {
                 owner,

@@ -25,6 +25,7 @@ pub mod wasm;
 
 use alloc::string::String;
 use alloc::string::ToString;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::arch::asm;
 
@@ -96,7 +97,8 @@ use ngos_user_abi::{
     SYS_START_GPU_MEDIA_SESSION, SYS_STAT_PATH, SYS_STAT_PATH_AT, SYS_STATFS_PATH,
     SYS_STORE_MEMORY_WORD, SYS_SUBMIT_GPU_BUFFER, SYS_SYMLINK_PATH, SYS_SYMLINK_PATH_AT,
     SYS_SYNC_MEMORY_RANGE, SYS_TRANSFER_RESOURCE, SYS_TCP_ACCEPT, SYS_TCP_CLOSE, SYS_TCP_CONNECT,
-    SYS_TCP_LISTEN, SYS_TCP_RECV, SYS_TCP_RESET, SYS_TCP_SEND, SYS_TRUNCATE_PATH,
+    SYS_TCP_LISTEN, SYS_TCP_RECV, SYS_TCP_RESET, SYS_TCP_SEND, SYS_ICMP_ECHO_REQUEST,
+    SYS_TRUNCATE_PATH,
     SYS_TRUNCATE_PATH_AT,
     SYS_UNBIND_DEVICE_DRIVER, SYS_UNLINK_PATH, SYS_UNLINK_PATH_AT, SYS_UNMAP_MEMORY_RANGE,
     SYS_UNMOUNT_STORAGE_VOLUME, SYS_WAIT_EVENT_QUEUE, SYS_WATCH_BUS_EVENTS,
@@ -2788,6 +2790,29 @@ impl<B: SyscallBackend> Runtime<B> {
                 0,
                 0,
                 0,
+                0,
+            ],
+        )
+        .map(|_| ())
+    }
+
+    pub fn icmp_echo_request(
+        &self,
+        socket_path: &str,
+        target_ipv4: [u8; 4],
+        identifier: u16,
+        sequence: u16,
+        count: usize,
+    ) -> Result<(), ngos_user_abi::Errno> {
+        let target_u32 = u32::from_be_bytes(target_ipv4);
+        self.invoke(
+            SYS_ICMP_ECHO_REQUEST,
+            [
+                socket_path.as_ptr() as usize,
+                socket_path.len(),
+                target_u32 as usize,
+                ((identifier as usize) << 16) | (sequence as usize),
+                count,
                 0,
             ],
         )

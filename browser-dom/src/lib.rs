@@ -1,6 +1,20 @@
 //! NGOS Browser DOM
 //!
 //! DOM Level 4 implementation - 100% Proprietary
+//!
+//! Canonical subsystem role:
+//! - subsystem: browser DOM support
+//! - owner layer: application support layer
+//! - semantic owner: `browser-dom`
+//! - truth path role: browser-facing DOM support for browser application flows
+//!
+//! Canonical contract families defined here:
+//! - DOM node contracts
+//! - document/tree support contracts
+//! - browser DOM manipulation support contracts
+//!
+//! This crate may define browser DOM support behavior, but it must not
+//! redefine kernel, runtime, or product-level OS truth.
 
 pub use browser_core::{BrowserError, BrowserResult};
 use std::cell::RefCell;

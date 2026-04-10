@@ -214,6 +214,7 @@ pub const SYS_TCP_SEND: SyscallNumber = 203;
 pub const SYS_TCP_RECV: SyscallNumber = 204;
 pub const SYS_TCP_CLOSE: SyscallNumber = 205;
 pub const SYS_TCP_RESET: SyscallNumber = 206;
+pub const SYS_ICMP_ECHO_REQUEST: SyscallNumber = 207;
 pub const SYS_WATCH_PROCESS_EVENTS: SyscallNumber = 76;
 pub const SYS_REMOVE_PROCESS_EVENTS: SyscallNumber = 77;
 pub const SYS_WATCH_RESOURCE_EVENTS: SyscallNumber = 78;

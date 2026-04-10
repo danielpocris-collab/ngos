@@ -1,0 +1,13 @@
+[package]
+name = "ngos-shell-vm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "ngos_shell_vm"
+
+[dependencies]
+ngos-shell-types = { path = "../ngos-shell-types" }
+ngos-user-abi = { path = "../user-abi" }
+ngos-user-runtime = { path = "../user-runtime" }

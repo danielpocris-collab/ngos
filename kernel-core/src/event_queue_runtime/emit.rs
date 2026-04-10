@@ -1,5 +1,5 @@
 use super::*;
-use crate::eventing_model::GraphicsEventKind;
+use crate::eventing_model::{BusEventKind, GraphicsEventKind};
 
 pub(crate) fn tick_event_queue_timers(runtime: &mut KernelRuntime) -> Result<(), RuntimeError> {
     let mut produced = Vec::new();
@@ -249,6 +249,54 @@ pub(crate) fn emit_network_events(
                     source: EventSource::Network {
                         interface_inode,
                         socket_inode,
+                        kind,
+                    },
+                },
+            ));
+        }
+    }
+    for (binding, event) in produced {
+        enqueue_event(runtime, binding, event)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn emit_bus_events(
+    runtime: &mut KernelRuntime,
+    peer: BusPeerId,
+    endpoint: BusEndpointId,
+    kind: BusEventKind,
+) -> Result<(), RuntimeError> {
+    let event_owner = runtime.bus_peer_info(peer)?.owner;
+    let mut produced = Vec::new();
+    for queue in &runtime.event_queues {
+        let binding = QueueDescriptorTarget::Event {
+            owner: queue.owner,
+            queue: queue.id,
+            mode: queue.mode,
+        };
+        for watch in &queue.bus_watchers {
+            if watch.endpoint != endpoint {
+                continue;
+            }
+            let interested = match kind {
+                BusEventKind::Attached => watch.interest.attached,
+                BusEventKind::Detached => watch.interest.detached,
+                BusEventKind::Published => watch.interest.published,
+                BusEventKind::Received => watch.interest.received,
+            };
+            if !interested {
+                continue;
+            }
+            produced.push((
+                binding,
+                KernelEvent {
+                    owner: event_owner,
+                    token: watch.token,
+                    events: watch.events,
+                    source: EventSource::Bus {
+                        peer,
+                        endpoint,
                         kind,
                     },
                 },

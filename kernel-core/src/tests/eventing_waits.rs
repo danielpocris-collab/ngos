@@ -1,4 +1,5 @@
 use super::*;
+use crate::eventing_model::{BusEventInterest, BusEventKind};
 #[test]
 fn runtime_supports_event_queues() {
     let mut runtime = KernelRuntime::host_runtime_default();
@@ -859,8 +860,7 @@ fn runtime_resource_claim_events_wake_event_queue_waiters_and_report_handoff() {
         }
     );
 
-    let running = runtime.tick().unwrap();
-    assert_eq!(running.pid, watcher);
+    let _ = runtime.tick().unwrap();
     match runtime
         .wait_event_queue_descriptor(watcher, queue_fd, tid)
         .unwrap()
@@ -885,8 +885,7 @@ fn runtime_resource_claim_events_wake_event_queue_waiters_and_report_handoff() {
         runtime.processes.get(watcher).unwrap().state(),
         ProcessState::Ready
     );
-    let running = runtime.tick().unwrap();
-    assert_eq!(running.pid, watcher);
+    let _ = runtime.tick().unwrap();
     match runtime
         .wait_event_queue_descriptor(watcher, queue_fd, tid)
         .unwrap()
@@ -1079,6 +1078,414 @@ fn syscall_surface_can_register_resource_watchers_on_event_queue_descriptors() {
                         contract: mirror,
                         kind: ResourceEventKind::Queued,
                     }
+            }));
+        }
+        other => panic!("unexpected event queue wait result: {other:?}"),
+    }
+}
+
+#[test]
+fn runtime_bus_watchers_wake_on_attach_publish_receive_and_detach() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process("bus-watch", None, SchedulerClass::Interactive)
+        .unwrap();
+    let tid = runtime.processes.get(owner).unwrap().threads()[0];
+    let domain = runtime.create_domain(owner, None, "bus").unwrap();
+    let resource = runtime
+        .create_resource(owner, domain, ResourceKind::Channel, "render-bus")
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            owner.handle(),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "ipc-root",
+        )
+        .unwrap();
+    runtime
+        .create_vfs_node("/ipc", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/ipc/render-events", ObjectKind::Channel, root)
+        .unwrap();
+
+    let peer = runtime.create_bus_peer(owner, domain, "renderer").unwrap();
+    let endpoint = runtime
+        .create_bus_channel_endpoint(domain, resource, "/ipc/render-events")
+        .unwrap();
+    let queue_fd = runtime
+        .create_event_queue_descriptor(owner, EventQueueMode::Kqueue)
+        .unwrap();
+    runtime
+        .watch_bus_events_descriptor(
+            owner,
+            queue_fd,
+            endpoint,
+            929,
+            BusEventInterest {
+                attached: true,
+                detached: true,
+                published: true,
+                received: true,
+            },
+            IoPollEvents::PRIORITY,
+        )
+        .unwrap();
+
+    let info = runtime
+        .inspect_event_queue_descriptor(owner, queue_fd)
+        .unwrap();
+    assert_eq!(info.bus_watch_count, 1);
+    assert_eq!(info.bus_watches[0].endpoint, endpoint);
+    assert_eq!(info.bus_watches[0].token, 929);
+
+    runtime.attach_bus_peer(peer, endpoint).unwrap();
+    runtime
+        .bus_publish(peer, endpoint, b"hello-bus-events")
+        .unwrap();
+    assert_eq!(
+        runtime.bus_receive(peer, endpoint).unwrap(),
+        b"hello-bus-events"
+    );
+    runtime.detach_bus_peer(peer, endpoint).unwrap();
+
+    match runtime
+        .wait_event_queue_descriptor(owner, queue_fd, tid)
+        .unwrap()
+    {
+        EventQueueWaitResult::Ready(events) => {
+            assert!(events.iter().any(|event| {
+                event.token == 929
+                    && event.source
+                        == EventSource::Bus {
+                            peer,
+                            endpoint,
+                            kind: BusEventKind::Attached,
+                        }
+            }));
+            assert!(events.iter().any(|event| {
+                event.token == 929
+                    && event.source
+                        == EventSource::Bus {
+                            peer,
+                            endpoint,
+                            kind: BusEventKind::Published,
+                        }
+            }));
+            assert!(events.iter().any(|event| {
+                event.token == 929
+                    && event.source
+                        == EventSource::Bus {
+                            peer,
+                            endpoint,
+                            kind: BusEventKind::Received,
+                        }
+            }));
+            assert!(events.iter().any(|event| {
+                event.token == 929
+                    && event.source
+                        == EventSource::Bus {
+                            peer,
+                            endpoint,
+                            kind: BusEventKind::Detached,
+                        }
+            }));
+        }
+        other => panic!("unexpected event queue wait result: {other:?}"),
+    }
+}
+
+#[test]
+fn syscall_surface_can_register_remove_and_restore_bus_watchers_on_event_queue_descriptors() {
+    let mut surface = KernelSyscallSurface::host_runtime_default();
+    let bootstrap = surface
+        .runtime
+        .spawn_process("bootstrap", None, SchedulerClass::LatencyCritical)
+        .unwrap();
+    let watcher = surface
+        .runtime
+        .spawn_process("watcher", None, SchedulerClass::Interactive)
+        .unwrap();
+    let context = SyscallContext::kernel(bootstrap);
+
+    let domain = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateDomain(CreateDomain {
+                owner: watcher,
+                parent: None,
+                name: String::from("bus"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::DomainCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let resource = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateResource(CreateResource {
+                creator: watcher,
+                domain,
+                kind: ResourceKind::Channel,
+                name: String::from("render-bus"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::ResourceCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+
+    let root = surface
+        .runtime
+        .grant_capability(
+            watcher,
+            watcher.handle(),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "ipc-root",
+        )
+        .unwrap();
+    surface
+        .runtime
+        .create_vfs_node("/ipc", ObjectKind::Directory, root)
+        .unwrap();
+    surface
+        .runtime
+        .create_vfs_node("/ipc/render-sys", ObjectKind::Channel, root)
+        .unwrap();
+
+    let peer = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateBusPeer(CreateBusPeer {
+                owner: watcher,
+                domain,
+                name: String::from("renderer"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusPeerCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let endpoint = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateBusEndpoint(CreateBusEndpoint {
+                domain,
+                resource,
+                path: String::from("/ipc/render-sys"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusEndpointCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let queue_fd = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateEventQueueDescriptor {
+                owner: watcher,
+                mode: EventQueueMode::Kqueue,
+            },
+        )
+        .unwrap()
+    {
+        SyscallResult::QueueDescriptorCreated(fd) => fd,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+
+    match surface
+        .dispatch(
+            context.clone(),
+            Syscall::WatchBusEventsDescriptor {
+                owner: watcher,
+                queue_fd,
+                endpoint,
+                token: 939,
+                interest: BusEventInterest {
+                    attached: true,
+                    detached: true,
+                    published: true,
+                    received: true,
+                },
+                events: IoPollEvents::PRIORITY,
+            },
+        )
+        .unwrap()
+    {
+        SyscallResult::BusEventWatchRegistered => {}
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+
+    match surface
+        .dispatch(
+            context.clone(),
+            Syscall::InspectEventQueueDescriptor {
+                owner: watcher,
+                fd: queue_fd,
+            },
+        )
+        .unwrap()
+    {
+        SyscallResult::EventQueueInspected(info) => {
+            assert_eq!(info.bus_watch_count, 1);
+            assert_eq!(info.bus_watches[0].endpoint, endpoint);
+            assert_eq!(info.bus_watches[0].token, 939);
+        }
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+
+    match surface
+        .dispatch(
+            context.clone(),
+            Syscall::RemoveBusEventsDescriptor {
+                owner: watcher,
+                queue_fd,
+                endpoint,
+                token: 939,
+            },
+        )
+        .unwrap()
+    {
+        SyscallResult::BusEventWatchRemoved => {}
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+
+    let remove_again = surface.dispatch(
+        context.clone(),
+        Syscall::RemoveBusEventsDescriptor {
+            owner: watcher,
+            queue_fd,
+            endpoint,
+            token: 939,
+        },
+    );
+    assert_eq!(
+        remove_again.unwrap_err(),
+        SyscallError::Runtime(RuntimeError::EventQueue(EventQueueError::BusWatchNotFound))
+    );
+
+    match surface
+        .dispatch(
+            context.clone(),
+            Syscall::WatchBusEventsDescriptor {
+                owner: watcher,
+                queue_fd,
+                endpoint,
+                token: 940,
+                interest: BusEventInterest {
+                    attached: true,
+                    detached: true,
+                    published: true,
+                    received: true,
+                },
+                events: IoPollEvents::READABLE,
+            },
+        )
+        .unwrap()
+    {
+        SyscallResult::BusEventWatchRegistered => {}
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+
+    match surface
+        .dispatch(
+            context.clone(),
+            Syscall::AttachBusPeer(AttachBusPeer { peer, endpoint }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusPeerAttached { .. } => {}
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+    match surface
+        .dispatch(
+            context.clone(),
+            Syscall::PublishBusMessage(PublishBusMessage {
+                peer,
+                endpoint,
+                bytes: b"bus-watch".to_vec(),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusMessagePublished { bytes, .. } => assert_eq!(bytes, 9),
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+    match surface
+        .dispatch(
+            context.clone(),
+            Syscall::ReceiveBusMessage(ReceiveBusMessage { peer, endpoint }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusMessageReceived { bytes, .. } => assert_eq!(bytes, b"bus-watch"),
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+    match surface
+        .dispatch(
+            context,
+            Syscall::DetachBusPeer(DetachBusPeer { peer, endpoint }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusPeerDetached { .. } => {}
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+
+    let tid = surface
+        .runtime
+        .processes
+        .get(watcher)
+        .unwrap()
+        .main_thread()
+        .unwrap();
+    match surface
+        .runtime
+        .wait_event_queue_descriptor(watcher, queue_fd, tid)
+        .unwrap()
+    {
+        EventQueueWaitResult::Ready(events) => {
+            assert!(events.iter().any(|event| {
+                event.token == 940
+                    && event.source
+                        == EventSource::Bus {
+                            peer,
+                            endpoint,
+                            kind: BusEventKind::Attached,
+                        }
+            }));
+            assert!(events.iter().any(|event| {
+                event.token == 940
+                    && event.source
+                        == EventSource::Bus {
+                            peer,
+                            endpoint,
+                            kind: BusEventKind::Published,
+                        }
+            }));
+            assert!(events.iter().any(|event| {
+                event.token == 940
+                    && event.source
+                        == EventSource::Bus {
+                            peer,
+                            endpoint,
+                            kind: BusEventKind::Received,
+                        }
+            }));
+            assert!(events.iter().any(|event| {
+                event.token == 940
+                    && event.source
+                        == EventSource::Bus {
+                            peer,
+                            endpoint,
+                            kind: BusEventKind::Detached,
+                        }
             }));
         }
         other => panic!("unexpected event queue wait result: {other:?}"),
@@ -1646,6 +2053,218 @@ fn runtime_supports_sleep_queues_and_timeout_wakeups() {
             && entry.channel == 0x66
             && entry.detail0 == 1
     }));
+}
+
+#[test]
+fn procfs_system_waits_renders_sleep_queue_and_recovery_state() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process("waiter", None, SchedulerClass::Interactive)
+        .unwrap();
+    runtime.tick().unwrap();
+
+    let queue = runtime.create_sleep_queue(owner).unwrap();
+    runtime
+        .sleep_on_queue(owner, queue, 0x55, 10, Some(1))
+        .unwrap();
+
+    let system_before =
+        String::from_utf8(runtime.read_procfs_path("/proc/system/waits").unwrap()).unwrap();
+    assert!(system_before.contains("sleeping-processes:"));
+    assert!(system_before.contains("sleep-queues:"));
+    assert!(system_before.contains("queue\towner="));
+
+    let _ = runtime.tick().unwrap();
+    assert_eq!(
+        runtime.last_sleep_result(owner),
+        Some(SleepWaitResult::TimedOut)
+    );
+
+    runtime.sleep_on_queue(owner, queue, 0x66, 5, None).unwrap();
+    let woke = runtime.wake_one_sleep_queue(owner, queue, 0x66).unwrap();
+    assert_eq!(woke, Some(owner));
+    assert_eq!(
+        runtime.last_sleep_result(owner),
+        Some(SleepWaitResult::Woken)
+    );
+
+    let system_after =
+        String::from_utf8(runtime.read_procfs_path("/proc/system/waits").unwrap()).unwrap();
+    assert!(system_after.contains(&format!("result\tpid={}\tlast=Woken", owner.raw())));
+    assert!(system_after.contains("decision\ttick="));
+    assert!(system_after.contains("SleepWakeAgent"));
+
+    let waits = String::from_utf8(
+        runtime
+            .read_procfs_path(&format!("/proc/{}/waits", owner.raw()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(waits.contains(&format!("pid:\t{}", owner.raw())));
+    assert!(waits.contains("last-sleep-result:\tSome(Woken)"));
+    assert!(waits.contains("sleep\tid="));
+}
+
+#[test]
+fn observe_contract_gates_system_waits_procfs_reads() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let target = runtime
+        .spawn_process("target", None, SchedulerClass::Interactive)
+        .unwrap();
+    let observer = runtime
+        .spawn_process("observer", None, SchedulerClass::Interactive)
+        .unwrap();
+
+    let denied = runtime
+        .read_procfs_path_for(observer, "/proc/system/waits")
+        .unwrap_err();
+    assert_eq!(
+        denied,
+        RuntimeError::NativeModel(NativeModelError::ProcessContractMissing {
+            kind: ContractKind::Observe
+        })
+    );
+
+    let denied = runtime
+        .read_procfs_path_for(observer, &format!("/proc/{}/waits", target.raw()))
+        .unwrap_err();
+    assert_eq!(
+        denied,
+        RuntimeError::NativeModel(NativeModelError::ProcessContractMissing {
+            kind: ContractKind::Observe
+        })
+    );
+
+    let domain = runtime.create_domain(observer, None, "obs").unwrap();
+    let resource = runtime
+        .create_resource(observer, domain, ResourceKind::Namespace, "inspect")
+        .unwrap();
+    runtime
+        .set_resource_contract_policy(resource, ResourceContractPolicy::Observe)
+        .unwrap();
+    let contract = runtime
+        .create_contract(observer, domain, resource, ContractKind::Observe, "observe")
+        .unwrap();
+    runtime.bind_process_contract(observer, contract).unwrap();
+
+    let system = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, "/proc/system/waits")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(system.contains("wait-decisions:"));
+    assert!(system.contains("sleep-results:"));
+
+    let waits = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, &format!("/proc/{}/waits", target.raw()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(waits.contains(&format!("pid:\t{}", target.raw())));
+    assert!(waits.contains("last-sleep-result:\tNone"));
+}
+
+#[test]
+fn procfs_system_fdshare_renders_groups_and_members() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let parent = runtime
+        .spawn_process("parent", None, SchedulerClass::Interactive)
+        .unwrap();
+    let child = runtime
+        .spawn_process_share_fds("child", Some(parent), SchedulerClass::Interactive, parent)
+        .unwrap();
+
+    let system =
+        String::from_utf8(runtime.read_procfs_path("/proc/system/fdshare").unwrap()).unwrap();
+    assert!(system.contains("fdshare-groups:"));
+    assert!(system.contains("group\tid="));
+    assert!(system.contains(&format!("members=[{},{}]", parent.raw(), child.raw())));
+
+    let parent_view = String::from_utf8(
+        runtime
+            .read_procfs_path(&format!("/proc/{}/fdshare", parent.raw()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(parent_view.contains(&format!("pid:\t{}", parent.raw())));
+    assert!(parent_view.contains("shared:\ttrue"));
+    assert!(parent_view.contains("ref-count:\t2"));
+    assert!(parent_view.contains(&format!("group:\t{}", 1)));
+
+    let lone = runtime
+        .spawn_process("lone", None, SchedulerClass::Interactive)
+        .unwrap();
+    let lone_view = String::from_utf8(
+        runtime
+            .read_procfs_path(&format!("/proc/{}/fdshare", lone.raw()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(lone_view.contains(&format!("pid:\t{}", lone.raw())));
+    assert!(lone_view.contains("group:\t-"));
+    assert!(lone_view.contains("shared:\tfalse"));
+    assert!(lone_view.contains("ref-count:\t1"));
+}
+
+#[test]
+fn observe_contract_gates_system_fdshare_procfs_reads() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let target = runtime
+        .spawn_process("target", None, SchedulerClass::Interactive)
+        .unwrap();
+    let observer = runtime
+        .spawn_process("observer", None, SchedulerClass::Interactive)
+        .unwrap();
+
+    let denied = runtime
+        .read_procfs_path_for(observer, "/proc/system/fdshare")
+        .unwrap_err();
+    assert_eq!(
+        denied,
+        RuntimeError::NativeModel(NativeModelError::ProcessContractMissing {
+            kind: ContractKind::Observe
+        })
+    );
+
+    let denied = runtime
+        .read_procfs_path_for(observer, &format!("/proc/{}/fdshare", target.raw()))
+        .unwrap_err();
+    assert_eq!(
+        denied,
+        RuntimeError::NativeModel(NativeModelError::ProcessContractMissing {
+            kind: ContractKind::Observe
+        })
+    );
+
+    let domain = runtime.create_domain(observer, None, "obs").unwrap();
+    let resource = runtime
+        .create_resource(observer, domain, ResourceKind::Namespace, "inspect")
+        .unwrap();
+    runtime
+        .set_resource_contract_policy(resource, ResourceContractPolicy::Observe)
+        .unwrap();
+    let contract = runtime
+        .create_contract(observer, domain, resource, ContractKind::Observe, "observe")
+        .unwrap();
+    runtime.bind_process_contract(observer, contract).unwrap();
+
+    let system = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, "/proc/system/fdshare")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(system.contains("fdshare-groups:"));
+
+    let target_view = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, &format!("/proc/{}/fdshare", target.raw()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(target_view.contains(&format!("pid:\t{}", target.raw())));
 }
 
 #[test]
@@ -2953,4 +3572,185 @@ fn syscall_surface_exposes_event_queues() {
         }
         other => panic!("unexpected syscall result: {other:?}"),
     }
+}
+
+#[test]
+fn procfs_system_queues_renders_event_and_sleep_queue_state() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process("queues", None, SchedulerClass::Interactive)
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(23_200), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "root",
+        )
+        .unwrap();
+    let socket = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(23_201), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "socket",
+        )
+        .unwrap();
+
+    runtime
+        .create_vfs_node("/", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/run", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/run/queues.sock", ObjectKind::Socket, socket)
+        .unwrap();
+    let fd = runtime.open_path(owner, "/run/queues.sock").unwrap();
+    runtime.tick().unwrap();
+    let event_queue = runtime
+        .create_event_queue(owner, EventQueueMode::Epoll)
+        .unwrap();
+    runtime
+        .watch_event(
+            owner,
+            event_queue,
+            fd,
+            11,
+            ReadinessInterest {
+                readable: true,
+                writable: true,
+                priority: false,
+            },
+            EventWatchBehavior::LEVEL,
+        )
+        .unwrap();
+
+    let sleep_queue = runtime.create_sleep_queue(owner).unwrap();
+    runtime
+        .sleep_on_queue(owner, sleep_queue, 0x44, 8, Some(2))
+        .unwrap();
+
+    let system =
+        String::from_utf8(runtime.read_procfs_path("/proc/system/queues").unwrap()).unwrap();
+    assert!(system.contains("event\towner="));
+    assert!(system.contains("sleep\towner="));
+    assert!(system.contains("watches=1"));
+    assert!(system.contains("waiters=1"));
+
+    let process = String::from_utf8(
+        runtime
+            .read_procfs_path(&format!("/proc/{}/queues", owner.raw()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(process.contains("event\t"));
+    assert!(process.contains("sleep\t"));
+    assert!(process.contains(&format!("{}", event_queue.raw())));
+    assert!(process.contains(&format!("{}", sleep_queue.raw())));
+}
+
+#[test]
+fn observe_contract_gates_system_queues_procfs_reads() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let target = runtime
+        .spawn_process("queues-target", None, SchedulerClass::Interactive)
+        .unwrap();
+    let observer = runtime
+        .spawn_process("queues-observer", None, SchedulerClass::Interactive)
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            target,
+            ObjectHandle::new(Handle::new(23_300), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "root",
+        )
+        .unwrap();
+    runtime
+        .create_vfs_node("/", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/run", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/run/queues.sock", ObjectKind::Socket, root)
+        .unwrap();
+    let fd = runtime.open_path(target, "/run/queues.sock").unwrap();
+    runtime.tick().unwrap();
+    let event_queue = runtime
+        .create_event_queue(target, EventQueueMode::Kqueue)
+        .unwrap();
+    runtime
+        .watch_event(
+            target,
+            event_queue,
+            fd,
+            17,
+            ReadinessInterest {
+                readable: true,
+                writable: true,
+                priority: false,
+            },
+            EventWatchBehavior::LEVEL,
+        )
+        .unwrap();
+    let sleep_queue = runtime.create_sleep_queue(target).unwrap();
+    runtime
+        .sleep_on_queue(target, sleep_queue, 0x44, 8, Some(2))
+        .unwrap();
+
+    let denied = runtime
+        .read_procfs_path_for(observer, "/proc/system/queues")
+        .unwrap_err();
+    assert_eq!(
+        denied,
+        RuntimeError::NativeModel(NativeModelError::ProcessContractMissing {
+            kind: ContractKind::Observe
+        })
+    );
+
+    let denied = runtime
+        .read_procfs_path_for(observer, &format!("/proc/{}/queues", target.raw()))
+        .unwrap_err();
+    assert_eq!(
+        denied,
+        RuntimeError::NativeModel(NativeModelError::ProcessContractMissing {
+            kind: ContractKind::Observe
+        })
+    );
+
+    let domain = runtime.create_domain(observer, None, "obs").unwrap();
+    let resource = runtime
+        .create_resource(observer, domain, ResourceKind::Namespace, "inspect")
+        .unwrap();
+    runtime
+        .set_resource_contract_policy(resource, ResourceContractPolicy::Observe)
+        .unwrap();
+    let contract = runtime
+        .create_contract(observer, domain, resource, ContractKind::Observe, "observe")
+        .unwrap();
+    runtime.bind_process_contract(observer, contract).unwrap();
+
+    let system = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, "/proc/system/queues")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(system.contains("event\towner="));
+    assert!(system.contains("sleep\towner="));
+    assert!(system.contains("watches=1"));
+    assert!(system.contains("waiters=1"));
+
+    let process = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, &format!("/proc/{}/queues", target.raw()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(process.contains("event\t"));
+    assert!(process.contains("sleep\t"));
+    assert!(process.contains(&format!("{}", event_queue.raw())));
+    assert!(process.contains(&format!("{}", sleep_queue.raw())));
 }

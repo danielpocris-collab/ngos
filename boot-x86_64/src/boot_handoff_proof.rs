@@ -63,9 +63,9 @@ pub fn apply<'a>(handoff: &mut LoaderDefinedBootHandoff<'a>) -> Option<&'static 
 
 fn proof_mode(command_line: Option<&str>) -> Option<&str> {
     command_line.and_then(|command_line| {
-        command_line.split_whitespace().find_map(|token| {
-            token.strip_prefix("ngos.boot.handoff_corrupt=")
-        })
+        command_line
+            .split_whitespace()
+            .find_map(|token| token.strip_prefix("ngos.boot.handoff_corrupt="))
     })
 }
 
@@ -145,9 +145,7 @@ fn proof_region_storage() -> &'static mut [BootMemoryRegion] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_x86_64::{
-        BootInfoValidationError, BootProtocol, LoaderDefinedHandoffError,
-    };
+    use platform_x86_64::{BootInfoValidationError, BootProtocol, LoaderDefinedHandoffError};
 
     fn sample_handoff<'a>(
         command_line: Option<&'a str>,
@@ -233,14 +231,10 @@ mod tests {
 
         for (mode, expected) in cases {
             let regions = sample_regions();
-            let mut handoff = sample_handoff(
-                Some(mode),
-                &regions,
-            );
-            handoff.command_line = Some(Box::leak(format!(
-                "console=ttyS0 ngos.boot.handoff_corrupt={mode}"
-            )
-            .into_boxed_str()));
+            let mut handoff = sample_handoff(Some(mode), &regions);
+            handoff.command_line = Some(Box::leak(
+                format!("console=ttyS0 ngos.boot.handoff_corrupt={mode}").into_boxed_str(),
+            ));
 
             assert_eq!(apply(&mut handoff), Some(mode));
             assert_eq!(

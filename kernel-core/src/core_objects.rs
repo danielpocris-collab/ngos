@@ -1,3 +1,18 @@
+//! Canonical subsystem role:
+//! - subsystem: core handle and object allocation model
+//! - owner layer: Layer 1
+//! - semantic owner: `kernel-core`
+//! - truth path role: canonical handle/object identity and allocation truth for
+//!   kernel-owned objects
+//!
+//! Canonical contract families defined here:
+//! - handle identity contracts
+//! - core object allocation contracts
+//! - handle/object error contracts
+//!
+//! This module may define canonical core-object identity truth. Higher layers
+//! may observe or transport it, but they must not redefine it.
+
 use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

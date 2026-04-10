@@ -3,6 +3,21 @@
 //! Simple JavaScript interpreter - 100% Proprietary
 //! Note: This is a minimal JS engine for basic scripting.
 //! For full ECMAScript support, consider integrating QuickJS or V8.
+//!
+//! Canonical subsystem role:
+//! - subsystem: browser JavaScript support
+//! - owner layer: application support layer
+//! - semantic owner: `browser-js`
+//! - truth path role: browser-facing scripting support for browser application
+//!   flows
+//!
+//! Canonical contract families defined here:
+//! - JavaScript runtime support contracts
+//! - JS value and interpreter contracts
+//! - browser scripting support contracts
+//!
+//! This crate may define browser JavaScript support behavior, but it must not
+//! redefine kernel, runtime, or product-level OS truth.
 
 pub use browser_core::{BrowserError, BrowserResult};
 pub use browser_dom::{Document, Node};

@@ -9,20 +9,25 @@ pub(crate) fn run_native_resource_boot_smoke<B: SyscallBackend>(runtime: &Runtim
         Ok(id) => id,
         Err(_) => return 301,
     };
-    let primary = match runtime.create_contract(domain, resource, NativeContractKind::Display, "primary") {
-        Ok(id) => id,
-        Err(_) => return 302,
-    };
-    let mirror = match runtime.create_contract(domain, resource, NativeContractKind::Display, "mirror") {
-        Ok(id) => id,
-        Err(_) => return 303,
-    };
+    let primary =
+        match runtime.create_contract(domain, resource, NativeContractKind::Display, "primary") {
+            Ok(id) => id,
+            Err(_) => return 302,
+        };
+    let mirror =
+        match runtime.create_contract(domain, resource, NativeContractKind::Display, "mirror") {
+            Ok(id) => id,
+            Err(_) => return 303,
+        };
 
     if runtime
         .set_contract_state(primary, NativeContractState::Suspended)
         .is_ok()
     {
-        let _ = write_line(runtime, &format!("contract-state-updated id={primary} state=suspended"));
+        let _ = write_line(
+            runtime,
+            &format!("contract-state-updated id={primary} state=suspended"),
+        );
     } else {
         return 304;
     }
@@ -35,13 +40,19 @@ pub(crate) fn run_native_resource_boot_smoke<B: SyscallBackend>(runtime: &Runtim
     {
         return 306;
     }
-    let _ = write_line(runtime, &format!("contract-state-updated id={primary} state=active"));
+    let _ = write_line(
+        runtime,
+        &format!("contract-state-updated id={primary} state=active"),
+    );
 
     if runtime
         .set_resource_state(resource, NativeResourceState::Suspended)
         .is_ok()
     {
-        let _ = write_line(runtime, &format!("resource-state-updated id={resource} state=suspended"));
+        let _ = write_line(
+            runtime,
+            &format!("resource-state-updated id={resource} state=suspended"),
+        );
     } else {
         return 307;
     }
@@ -54,7 +65,10 @@ pub(crate) fn run_native_resource_boot_smoke<B: SyscallBackend>(runtime: &Runtim
     {
         return 309;
     }
-    let _ = write_line(runtime, &format!("resource-state-updated id={resource} state=active"));
+    let _ = write_line(
+        runtime,
+        &format!("resource-state-updated id={resource} state=active"),
+    );
 
     match runtime.claim_resource(primary) {
         Ok(ResourceClaimOutcome::Acquired {
@@ -63,7 +77,9 @@ pub(crate) fn run_native_resource_boot_smoke<B: SyscallBackend>(runtime: &Runtim
         }) if acquired == resource && acquire_count == 1 => {
             let _ = write_line(
                 runtime,
-                &format!("claim-acquired contract={primary} resource={resource} acquire_count={acquire_count}"),
+                &format!(
+                    "claim-acquired contract={primary} resource={resource} acquire_count={acquire_count}"
+                ),
             );
         }
         _ => return 310,
@@ -76,7 +92,9 @@ pub(crate) fn run_native_resource_boot_smoke<B: SyscallBackend>(runtime: &Runtim
         }) if queued == resource && holder_contract == primary && position == 1 => {
             let _ = write_line(
                 runtime,
-                &format!("claim-queued contract={mirror} resource={resource} holder={holder_contract} position={position}"),
+                &format!(
+                    "claim-queued contract={mirror} resource={resource} holder={holder_contract} position={position}"
+                ),
             );
         }
         _ => return 311,
@@ -87,17 +105,26 @@ pub(crate) fn run_native_resource_boot_smoke<B: SyscallBackend>(runtime: &Runtim
             contract,
             acquire_count,
             handoff_count,
-        }) if handed == resource && contract == mirror && acquire_count == 2 && handoff_count == 1 => {
+        }) if handed == resource
+            && contract == mirror
+            && acquire_count == 2
+            && handoff_count == 1 =>
+        {
             let _ = write_line(
                 runtime,
-                &format!("claim-handed-off resource={resource} to={mirror} acquire_count={acquire_count} handoff_count={handoff_count}"),
+                &format!(
+                    "claim-handed-off resource={resource} to={mirror} acquire_count={acquire_count} handoff_count={handoff_count}"
+                ),
             );
         }
         _ => return 312,
     }
     match runtime.release_claimed_resource(mirror) {
         Ok(ResourceReleaseOutcome::Released { resource: released }) if released == resource => {
-            let _ = write_line(runtime, &format!("claim-released contract={mirror} resource={resource}"));
+            let _ = write_line(
+                runtime,
+                &format!("claim-released contract={mirror} resource={resource}"),
+            );
         }
         _ => return 313,
     }

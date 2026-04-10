@@ -13,6 +13,23 @@
     clippy::write_with_newline
 )]
 
+//! Canonical subsystem role:
+//! - subsystem: boot diagnostics and failure analysis
+//! - owner layer: Layer 0
+//! - semantic owner: `boot-x86_64`
+//! - truth path role: early diagnostic truth surface for boot, crash, and
+//!   first-user bring-up
+//!
+//! Canonical contract families exposed here:
+//! - boot diagnostics contracts
+//! - crash and failure-analysis contracts
+//! - chronoscope / replay inspection contracts
+//! - first-user status reporting contracts
+//!
+//! This crate may report authoritative boot-stage diagnostics and evidence,
+//! but it must not replace the long-term runtime truth surfaces owned by
+//! `kernel-core`.
+
 use alloc::vec::Vec;
 #[cfg(target_os = "none")]
 use core::arch::asm;
@@ -2776,7 +2793,7 @@ pub fn emit_report() {
     dump_failure_history();
     if let Some(status) = last_user_status() {
         serial::print(format_args!(
-            "ngos/x86_64: diag last_user started={} main={} exited={} faulted={} exit_code={} syscalls={} boot_stage={} boot_status={}\n",
+            "ngos/x86_64: diag last_user started={} main={} exited={} faulted={} exit_code={} syscalls={} boot_stage={} boot_status={} cpu_xsave={} cpu_save_area={} cpu_xcr0={:#x} cpu_boot_seed={:#x} cpu_hw_installed={} cpu_hw_skipped={} cpu_hw_attempts={} cpu_hw_refusal={}\n",
             status.started,
             status.main_reached,
             status.exited,
@@ -2784,9 +2801,45 @@ pub fn emit_report() {
             status.exit_code,
             status.syscall_count,
             status.boot_report_stage,
-            status.boot_report_status
+            status.boot_report_status,
+            status.cpu_xsave_enabled,
+            status.cpu_save_area_bytes,
+            status.cpu_xcr0_mask,
+            status.cpu_boot_seed_marker,
+            status.cpu_hw_provider_installed,
+            status.cpu_hw_provider_skipped,
+            status.cpu_hw_provider_attempts,
+            status.cpu_hw_provider_refusal_code
         ));
     }
+    let cpu_status = crate::cpu_runtime_status::snapshot();
+    serial::print(format_args!(
+        "ngos/x86_64: diag cpu_runtime sse={} xsave={} save_area={} fsgsbase={} pcid={} invpcid={} pku={} smep={} smap={} umip={} xcr0={:#x} probe_attempted={} probe_saved={} probe_restored={} probe_required={} probe_refusal={} probe_seed={:#x} tlb_flushes={} tlb_method={} apic_mode={} hw_provider_installed={} hw_provider_skipped={} hw_provider_attempts={} hw_provider_refusal={}\n",
+        cpu_status.sse_ready,
+        cpu_status.xsave_enabled,
+        cpu_status.save_area_bytes,
+        cpu_status.fsgsbase_enabled,
+        cpu_status.pcid_enabled,
+        cpu_status.invpcid_available,
+        cpu_status.pku_enabled,
+        cpu_status.smep_enabled,
+        cpu_status.smap_enabled,
+        cpu_status.umip_enabled,
+        cpu_status.xcr0,
+        cpu_status.probe_attempted,
+        cpu_status.probe_saved,
+        cpu_status.probe_restored,
+        cpu_status.probe_required_bytes,
+        cpu_status.probe_refusal_code,
+        cpu_status.probe_seed_marker,
+        cpu_status.tlb_flush_count,
+        cpu_status.last_tlb_flush_method,
+        cpu_status.local_apic_mode,
+        cpu_status.hardware_provider_installed,
+        cpu_status.hardware_provider_skipped,
+        cpu_status.hardware_provider_install_attempts,
+        cpu_status.hardware_provider_refusal_code
+    ));
 }
 
 #[allow(dead_code)]
@@ -9719,13 +9772,18 @@ mod tests {
             record_boot_stage(BootTraceStage::Stage0, Some(index), index);
         }
         let trace = snapshot_trace();
-        let cpu0_nonzero = trace[0].iter().filter(|entry| entry.sequence != 0).count();
-        assert!(cpu0_nonzero != 0);
-        let last_detail = trace[0]
+        let retained = trace
             .iter()
+            .flat_map(|cpu_trace| cpu_trace.iter())
             .filter(|entry| entry.sequence != 0)
+            .count();
+        assert!(retained != 0);
+        let last_detail = trace
+            .iter()
+            .flat_map(|cpu_trace| cpu_trace.iter())
+            .filter(|entry| entry.sequence != 0)
+            .max_by_key(|entry| entry.sequence)
             .map(|entry| entry.b)
-            .max()
             .unwrap();
         assert_eq!(last_detail, TRACE_CAPACITY as u64 + 3);
     }

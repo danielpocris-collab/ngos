@@ -1,6 +1,21 @@
 //! NGOS Browser Core
 //!
 //! Core types, traits, and error definitions shared across all browser crates.
+//!
+//! Canonical subsystem role:
+//! - subsystem: browser core support
+//! - owner layer: application support layer
+//! - semantic owner: `browser-core`
+//! - truth path role: shared browser-facing support contracts for browser
+//!   vertical crates
+//!
+//! Canonical contract families defined here:
+//! - browser error contracts
+//! - browser shared result contracts
+//! - browser shared core type contracts
+//!
+//! This crate may define browser-vertical support contracts, but it must not
+//! redefine kernel, runtime, or product-level OS truth.
 
 use thiserror::Error;
 
@@ -51,6 +66,18 @@ pub struct Url {
 
 impl Url {
     pub fn parse(s: &str) -> Result<Self, BrowserError> {
+        if let Some(path) = s.strip_prefix("file://") {
+            let normalized = if path.is_empty() { "/" } else { path };
+            return Ok(Self {
+                scheme: String::from("file"),
+                host: String::new(),
+                port: None,
+                path: String::from(normalized),
+                query: None,
+                fragment: None,
+            });
+        }
+
         // Simple URL parser
         let without_fragment = s.split('#').next().unwrap_or(s);
         let (url_part, fragment) = if s.contains('#') {
@@ -105,6 +132,9 @@ impl Url {
     }
 
     pub fn origin(&self) -> String {
+        if self.scheme == "file" {
+            return String::from("file://");
+        }
         match self.port {
             Some(port) => format!("{}://{}:{}", self.scheme, self.host, port),
             None => format!("{}://{}", self.scheme, self.host),
@@ -180,5 +210,15 @@ mod tests {
     fn parse_url_with_fragment() {
         let url = Url::parse("http://example.com/page#section").unwrap();
         assert_eq!(url.fragment, Some(String::from("section")));
+    }
+
+    #[test]
+    fn parse_file_url() {
+        let url =
+            Url::parse("file://C:/Users/pocri/OneDrive/Desktop/experiment/docs/ui-preview.html")
+                .unwrap();
+        assert_eq!(url.scheme, "file");
+        assert_eq!(url.host, "");
+        assert!(url.path.contains("ui-preview.html"));
     }
 }

@@ -1,0 +1,15 @@
+[package]
+name = "ngos-shell-repair"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "ngos_shell_repair"
+
+[dependencies]
+ngos-shell-types   = { path = "../ngos-shell-types" }
+ngos-shell-proc    = { path = "../ngos-shell-proc" }
+ngos-shell-vfs     = { path = "../ngos-shell-vfs" }
+ngos-user-abi      = { path = "../user-abi" }
+ngos-user-runtime  = { path = "../user-runtime" }
+ngos-semantic-runtime = { path = "../semantic-runtime" }

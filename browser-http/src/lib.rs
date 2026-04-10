@@ -1,6 +1,21 @@
 //! NGOS Browser HTTP Stack
 //!
 //! HTTP/1.1 client - 100% Proprietary, no external deps
+//!
+//! Canonical subsystem role:
+//! - subsystem: browser HTTP support
+//! - owner layer: application support layer
+//! - semantic owner: `browser-http`
+//! - truth path role: browser-facing HTTP transport support for browser
+//!   application flows
+//!
+//! Canonical contract families defined here:
+//! - HTTP client contracts
+//! - request/response support contracts
+//! - browser network transport support contracts
+//!
+//! This crate may define browser HTTP support behavior, but it must not
+//! redefine kernel, runtime, or product-level OS truth.
 
 pub use browser_core::{BrowserError, BrowserResult, Url};
 

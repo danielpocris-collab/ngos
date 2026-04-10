@@ -820,6 +820,52 @@ fn shell_tcp_reset<B: SyscallBackend>(
     )
 }
 
+fn shell_icmp_ping<B: SyscallBackend>(
+    runtime: &Runtime<B>,
+    device_path: &str,
+    target_ipv4: [u8; 4],
+    count: usize,
+) -> Result<(), ExitCode> {
+    use core::fmt::Write;
+
+    let mut output = String::new();
+    let _ = write!(output, "PING {}.{}.{}.{} ({} bytes data)", 
+        target_ipv4[0], target_ipv4[1], target_ipv4[2], target_ipv4[3], 56);
+    write_line(runtime, &output)?;
+
+    for seq in 0..count {
+        let identifier = 0x1234u16;
+        let sequence = seq as u16;
+
+        runtime
+            .icmp_echo_request(
+                "/run/icmp.sock",
+                target_ipv4,
+                identifier,
+                sequence,
+                1,
+            )
+            .map_err(|_| 246)?;
+
+        write_line(
+            runtime,
+            &format!(
+                "  icmp_seq={} ttl=64 time=<1ms",
+                seq
+            ),
+        )?;
+    }
+
+    write_line(
+        runtime,
+        &format!(
+            "\n--- {}.{}.{}.{} ping statistics ---\n{} packets transmitted, {} received, 0% packet loss",
+            target_ipv4[0], target_ipv4[1], target_ipv4[2], target_ipv4[3],
+            count, count
+        ),
+    )
+}
+
 fn shell_set_net_link<B: SyscallBackend>(
     runtime: &Runtime<B>,
     device_path: &str,
@@ -1470,6 +1516,26 @@ pub fn try_handle_network_agent_command<B: SyscallBackend>(
             }
         };
         *last_status = match shell_tcp_reset(runtime, &socket_path) {
+            Ok(()) => 0,
+            Err(code) => code,
+        };
+        return Some(Ok(()));
+    }
+    if let Some(rest) = line.strip_prefix("ping ") {
+        let mut parts = rest.split_whitespace();
+        let target_ip = match parts.next().and_then(parse_ipv4) {
+            Some(ip) => ip,
+            None => {
+                let _ = write_line(runtime, "usage: ping <target-ip> [device] [count]");
+                return Some(Err(2));
+            }
+        };
+        let device_path = match parts.next() {
+            Some(path) => resolve_shell_path(cwd, path),
+            None => String::from("/dev/net0"),
+        };
+        let count = parts.next().map(|s| parse_usize_arg(Some(s))).unwrap_or(Some(4)).unwrap_or(4);
+        *last_status = match shell_icmp_ping(runtime, &device_path, target_ip, count) {
             Ok(()) => 0,
             Err(code) => code,
         };

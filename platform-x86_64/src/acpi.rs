@@ -1,3 +1,18 @@
+//! Canonical subsystem role:
+//! - subsystem: x86_64 firmware and ACPI mediation
+//! - owner layer: platform mediation
+//! - semantic owner: `platform-x86_64`
+//! - truth path role: platform-specific discovery of ACPI and firmware table
+//!   mechanics on the real x86 path
+//!
+//! Canonical contract families handled here:
+//! - ACPI root discovery contracts
+//! - firmware table probe contracts
+//! - topology/firmware mediation contracts
+//!
+//! This module may mediate firmware and ACPI mechanics, but it must not
+//! redefine higher-level kernel ownership of topology or device semantics.
+
 use alloc::vec::Vec;
 use core::{mem::size_of, ptr};
 

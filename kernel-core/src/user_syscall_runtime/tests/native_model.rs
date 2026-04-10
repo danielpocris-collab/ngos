@@ -2205,3 +2205,1186 @@ fn native_model_user_syscalls_transfer_resource_between_contracts() {
     assert_eq!(resource_record.holder_contract as usize, target);
     assert_eq!(resource_record.acquire_count, 2);
 }
+
+#[test]
+fn native_model_user_syscalls_route_bus_messages_and_inspect_entities() {
+    let (mut runtime, pid, mapped) = setup_runtime_with_user_process();
+    runtime
+        .copy_to_user(pid, mapped as usize, b"system")
+        .unwrap();
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x20, b"bus-peer")
+        .unwrap();
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x40, b"/run/bus0")
+        .unwrap();
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x60, b"/run")
+        .unwrap();
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x300, b"hello-bus")
+        .unwrap();
+
+    let domain = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_CREATE_DOMAIN, [0, mapped as usize, 6, 0, 0, 0]),
+        )
+        .into_result()
+        .unwrap();
+    let resource = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_CREATE_RESOURCE,
+                [
+                    domain,
+                    NativeResourceKind::Channel as usize,
+                    mapped as usize + 6,
+                    8,
+                    0,
+                    0,
+                ],
+            ),
+        )
+        .into_result()
+        .unwrap();
+    let peer = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_CREATE_BUS_PEER,
+                [domain, mapped as usize + 0x20, 8, 0, 0, 0],
+            ),
+        )
+        .into_result()
+        .unwrap();
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_MKDIR_PATH, [mapped as usize + 0x60, 4, 0, 0, 0, 0]),
+        ),
+        SyscallReturn::ok(0)
+    );
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_MKCHAN_PATH, [mapped as usize + 0x40, 9, 0, 0, 0, 0]),
+        ),
+        SyscallReturn::ok(0)
+    );
+    let endpoint = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_CREATE_BUS_ENDPOINT,
+                [domain, resource, mapped as usize + 0x40, 9, 0, 0],
+            ),
+        )
+        .into_result()
+        .unwrap();
+
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_ATTACH_BUS_PEER, [peer, endpoint, 0, 0, 0, 0]),
+        ),
+        SyscallReturn::ok(0)
+    );
+
+    let ids_ptr = mapped as usize + 0x80;
+    let peer_record_ptr = mapped as usize + 0x100;
+    let endpoint_record_ptr = mapped as usize + 0x180;
+    let message_ptr = mapped as usize + 0x300;
+    let receive_ptr = mapped as usize + 0x400;
+
+    let listed_peers = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_LIST_BUS_PEERS, [ids_ptr, 4, 0, 0, 0, 0]),
+        )
+        .into_result()
+        .unwrap();
+    assert_eq!(listed_peers, 1);
+    let peer_id_bytes = runtime.copy_from_user(pid, ids_ptr, 8).unwrap();
+    assert_eq!(
+        u64::from_ne_bytes(peer_id_bytes.try_into().unwrap()) as usize,
+        peer
+    );
+
+    let listed_endpoints = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_LIST_BUS_ENDPOINTS, [ids_ptr, 4, 0, 0, 0, 0]),
+        )
+        .into_result()
+        .unwrap();
+    assert_eq!(listed_endpoints, 1);
+    let endpoint_id_bytes = runtime.copy_from_user(pid, ids_ptr, 8).unwrap();
+    assert_eq!(
+        u64::from_ne_bytes(endpoint_id_bytes.try_into().unwrap()) as usize,
+        endpoint
+    );
+
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_INSPECT_BUS_PEER, [peer, peer_record_ptr, 0, 0, 0, 0]),
+        ),
+        SyscallReturn::ok(0)
+    );
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_INSPECT_BUS_ENDPOINT,
+                [endpoint, endpoint_record_ptr, 0, 0, 0, 0],
+            ),
+        ),
+        SyscallReturn::ok(0)
+    );
+
+    let peer_bytes = runtime
+        .copy_from_user(
+            pid,
+            peer_record_ptr,
+            core::mem::size_of::<NativeBusPeerRecord>(),
+        )
+        .unwrap();
+    let peer_record =
+        unsafe { core::ptr::read_unaligned(peer_bytes.as_ptr().cast::<NativeBusPeerRecord>()) };
+    assert_eq!(peer_record.id as usize, peer);
+    assert_eq!(peer_record.owner as usize, pid.raw() as usize);
+    assert_eq!(peer_record.domain as usize, domain);
+    assert_eq!(peer_record.attached_endpoint_count, 1);
+    assert_eq!(peer_record.publish_count, 0);
+    assert_eq!(peer_record.receive_count, 0);
+
+    let endpoint_bytes = runtime
+        .copy_from_user(
+            pid,
+            endpoint_record_ptr,
+            core::mem::size_of::<NativeBusEndpointRecord>(),
+        )
+        .unwrap();
+    let endpoint_record = unsafe {
+        core::ptr::read_unaligned(endpoint_bytes.as_ptr().cast::<NativeBusEndpointRecord>())
+    };
+    assert_eq!(endpoint_record.id as usize, endpoint);
+    assert_eq!(endpoint_record.domain as usize, domain);
+    assert_eq!(endpoint_record.resource as usize, resource);
+    assert_eq!(endpoint_record.kind, 0);
+    assert_eq!(endpoint_record.attached_peer_count, 1);
+    assert_eq!(endpoint_record.queue_depth, 0);
+
+    let wrote = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_PUBLISH_BUS_MESSAGE,
+                [peer, endpoint, message_ptr, 9, 0, 0],
+            ),
+        )
+        .into_result()
+        .unwrap();
+    assert_eq!(wrote, 9);
+
+    let read = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_RECEIVE_BUS_MESSAGE,
+                [peer, endpoint, receive_ptr, 32, 0, 0],
+            ),
+        )
+        .into_result()
+        .unwrap();
+    assert_eq!(read, 9);
+    assert_eq!(
+        runtime.copy_from_user(pid, receive_ptr, 9).unwrap(),
+        b"hello-bus"
+    );
+
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_INSPECT_BUS_PEER, [peer, peer_record_ptr, 0, 0, 0, 0]),
+        ),
+        SyscallReturn::ok(0)
+    );
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_INSPECT_BUS_ENDPOINT,
+                [endpoint, endpoint_record_ptr, 0, 0, 0, 0],
+            ),
+        ),
+        SyscallReturn::ok(0)
+    );
+
+    let peer_bytes = runtime
+        .copy_from_user(
+            pid,
+            peer_record_ptr,
+            core::mem::size_of::<NativeBusPeerRecord>(),
+        )
+        .unwrap();
+    let peer_record =
+        unsafe { core::ptr::read_unaligned(peer_bytes.as_ptr().cast::<NativeBusPeerRecord>()) };
+    assert_eq!(peer_record.publish_count, 1);
+    assert_eq!(peer_record.receive_count, 1);
+    assert_eq!(peer_record.last_endpoint as usize, endpoint);
+
+    let endpoint_bytes = runtime
+        .copy_from_user(
+            pid,
+            endpoint_record_ptr,
+            core::mem::size_of::<NativeBusEndpointRecord>(),
+        )
+        .unwrap();
+    let endpoint_record = unsafe {
+        core::ptr::read_unaligned(endpoint_bytes.as_ptr().cast::<NativeBusEndpointRecord>())
+    };
+    assert_eq!(endpoint_record.publish_count, 1);
+    assert_eq!(endpoint_record.receive_count, 1);
+    assert_eq!(endpoint_record.byte_count, 9);
+    assert_eq!(endpoint_record.queue_depth, 0);
+    assert_eq!(endpoint_record.last_peer as usize, peer);
+}
+
+#[test]
+fn native_model_user_syscalls_refuse_unattached_bus_peer_and_recover_after_reattach() {
+    let (mut runtime, pid, mapped) = setup_runtime_with_user_process();
+    runtime
+        .copy_to_user(pid, mapped as usize, b"system")
+        .unwrap();
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x20, b"bus-peer")
+        .unwrap();
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x40, b"/run/bus0")
+        .unwrap();
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x60, b"/run")
+        .unwrap();
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x300, b"payload")
+        .unwrap();
+
+    let domain = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_CREATE_DOMAIN, [0, mapped as usize, 6, 0, 0, 0]),
+        )
+        .into_result()
+        .unwrap();
+    let resource = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_CREATE_RESOURCE,
+                [
+                    domain,
+                    NativeResourceKind::Channel as usize,
+                    mapped as usize + 6,
+                    8,
+                    0,
+                    0,
+                ],
+            ),
+        )
+        .into_result()
+        .unwrap();
+    let peer = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_CREATE_BUS_PEER,
+                [domain, mapped as usize + 0x20, 8, 0, 0, 0],
+            ),
+        )
+        .into_result()
+        .unwrap();
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_MKDIR_PATH, [mapped as usize + 0x60, 4, 0, 0, 0, 0]),
+        ),
+        SyscallReturn::ok(0)
+    );
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_MKCHAN_PATH, [mapped as usize + 0x40, 9, 0, 0, 0, 0]),
+        ),
+        SyscallReturn::ok(0)
+    );
+    let endpoint = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_CREATE_BUS_ENDPOINT,
+                [domain, resource, mapped as usize + 0x40, 9, 0, 0],
+            ),
+        )
+        .into_result()
+        .unwrap();
+
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_ATTACH_BUS_PEER, [peer, endpoint, 0, 0, 0, 0]),
+        ),
+        SyscallReturn::ok(0)
+    );
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_DETACH_BUS_PEER, [peer, endpoint, 0, 0, 0, 0]),
+        ),
+        SyscallReturn::ok(0)
+    );
+
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_PUBLISH_BUS_MESSAGE,
+                [peer, endpoint, mapped as usize + 0x300, 7, 0, 0],
+            ),
+        ),
+        SyscallReturn::err(Errno::Inval)
+    );
+
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_ATTACH_BUS_PEER, [peer, endpoint, 0, 0, 0, 0]),
+        ),
+        SyscallReturn::ok(0)
+    );
+
+    let wrote = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_PUBLISH_BUS_MESSAGE,
+                [peer, endpoint, mapped as usize + 0x300, 7, 0, 0],
+            ),
+        )
+        .into_result()
+        .unwrap();
+    assert_eq!(wrote, 7);
+}
+
+#[test]
+fn native_model_user_syscalls_refuse_bus_overflow_and_recover_after_receive() {
+    let (mut runtime, pid, mapped) = setup_runtime_with_user_process();
+    runtime
+        .copy_to_user(pid, mapped as usize, b"system")
+        .unwrap();
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x20, b"bus-peer")
+        .unwrap();
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x40, b"/run/bus0")
+        .unwrap();
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x60, b"/run")
+        .unwrap();
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x300, b"recovered")
+        .unwrap();
+
+    let domain = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_CREATE_DOMAIN, [0, mapped as usize, 6, 0, 0, 0]),
+        )
+        .into_result()
+        .unwrap();
+    let resource = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_CREATE_RESOURCE,
+                [
+                    domain,
+                    NativeResourceKind::Channel as usize,
+                    mapped as usize + 6,
+                    8,
+                    0,
+                    0,
+                ],
+            ),
+        )
+        .into_result()
+        .unwrap();
+    let peer = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_CREATE_BUS_PEER,
+                [domain, mapped as usize + 0x20, 8, 0, 0, 0],
+            ),
+        )
+        .into_result()
+        .unwrap();
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_MKDIR_PATH, [mapped as usize + 0x60, 4, 0, 0, 0, 0]),
+        ),
+        SyscallReturn::ok(0)
+    );
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_MKCHAN_PATH, [mapped as usize + 0x40, 9, 0, 0, 0, 0]),
+        ),
+        SyscallReturn::ok(0)
+    );
+    let endpoint = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_CREATE_BUS_ENDPOINT,
+                [domain, resource, mapped as usize + 0x40, 9, 0, 0],
+            ),
+        )
+        .into_result()
+        .unwrap();
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_ATTACH_BUS_PEER, [peer, endpoint, 0, 0, 0, 0]),
+        ),
+        SyscallReturn::ok(0)
+    );
+
+    let endpoint_record_ptr = mapped as usize + 0x180;
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_INSPECT_BUS_ENDPOINT,
+                [endpoint, endpoint_record_ptr, 0, 0, 0, 0],
+            ),
+        ),
+        SyscallReturn::ok(0)
+    );
+    let endpoint_bytes = runtime
+        .copy_from_user(
+            pid,
+            endpoint_record_ptr,
+            core::mem::size_of::<NativeBusEndpointRecord>(),
+        )
+        .unwrap();
+    let endpoint_record = unsafe {
+        core::ptr::read_unaligned(endpoint_bytes.as_ptr().cast::<NativeBusEndpointRecord>())
+    };
+    assert_eq!(endpoint_record.queue_capacity, 64);
+    assert_eq!(endpoint_record.peak_queue_depth, 0);
+    assert_eq!(endpoint_record.overflow_count, 0);
+    for index in 0..endpoint_record.queue_capacity {
+        let payload = format!("msg-{index}");
+        runtime
+            .copy_to_user(pid, mapped as usize + 0x500, payload.as_bytes())
+            .unwrap();
+        assert_eq!(
+            runtime.dispatch_user_syscall_frame(
+                pid,
+                SyscallFrame::new(
+                    SYS_PUBLISH_BUS_MESSAGE,
+                    [peer, endpoint, mapped as usize + 0x500, payload.len(), 0, 0],
+                ),
+            ),
+            SyscallReturn::ok(payload.len())
+        );
+    }
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_PUBLISH_BUS_MESSAGE,
+                [peer, endpoint, mapped as usize + 0x300, 9, 0, 0],
+            ),
+        ),
+        SyscallReturn::err(Errno::Again)
+    );
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_INSPECT_BUS_ENDPOINT,
+                [endpoint, endpoint_record_ptr, 0, 0, 0, 0],
+            ),
+        ),
+        SyscallReturn::ok(0)
+    );
+    let endpoint_bytes = runtime
+        .copy_from_user(
+            pid,
+            endpoint_record_ptr,
+            core::mem::size_of::<NativeBusEndpointRecord>(),
+        )
+        .unwrap();
+    let endpoint_record = unsafe {
+        core::ptr::read_unaligned(endpoint_bytes.as_ptr().cast::<NativeBusEndpointRecord>())
+    };
+    assert_eq!(endpoint_record.queue_depth, endpoint_record.queue_capacity);
+    assert_eq!(
+        endpoint_record.peak_queue_depth,
+        endpoint_record.queue_capacity
+    );
+    assert_eq!(endpoint_record.overflow_count, 1);
+
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_RECEIVE_BUS_MESSAGE,
+                [peer, endpoint, mapped as usize + 0x600, 32, 0, 0]
+            ),
+        ),
+        SyscallReturn::ok(5)
+    );
+    assert_eq!(
+        runtime
+            .copy_from_user(pid, mapped as usize + 0x600, 5)
+            .unwrap(),
+        b"msg-0"
+    );
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_PUBLISH_BUS_MESSAGE,
+                [peer, endpoint, mapped as usize + 0x300, 9, 0, 0],
+            ),
+        ),
+        SyscallReturn::ok(9)
+    );
+}
+
+#[test]
+fn native_model_user_syscalls_shared_bus_endpoint_preserves_fifo_and_detach_isolates_one_peer() {
+    let (mut runtime, pid, mapped) = setup_runtime_with_user_process();
+    runtime
+        .copy_to_user(pid, mapped as usize, b"system")
+        .unwrap();
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x20, b"peer-a")
+        .unwrap();
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x30, b"peer-b")
+        .unwrap();
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x40, b"/run/bus0")
+        .unwrap();
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x60, b"/run")
+        .unwrap();
+
+    let domain = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_CREATE_DOMAIN, [0, mapped as usize, 6, 0, 0, 0]),
+        )
+        .into_result()
+        .unwrap();
+    let resource = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_CREATE_RESOURCE,
+                [
+                    domain,
+                    NativeResourceKind::Channel as usize,
+                    mapped as usize + 6,
+                    8,
+                    0,
+                    0,
+                ],
+            ),
+        )
+        .into_result()
+        .unwrap();
+    let peer_a = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_CREATE_BUS_PEER,
+                [domain, mapped as usize + 0x20, 6, 0, 0, 0],
+            ),
+        )
+        .into_result()
+        .unwrap();
+    let peer_b = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_CREATE_BUS_PEER,
+                [domain, mapped as usize + 0x30, 6, 0, 0, 0],
+            ),
+        )
+        .into_result()
+        .unwrap();
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_MKDIR_PATH, [mapped as usize + 0x60, 4, 0, 0, 0, 0]),
+        ),
+        SyscallReturn::ok(0)
+    );
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_MKCHAN_PATH, [mapped as usize + 0x40, 9, 0, 0, 0, 0]),
+        ),
+        SyscallReturn::ok(0)
+    );
+    let endpoint = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_CREATE_BUS_ENDPOINT,
+                [domain, resource, mapped as usize + 0x40, 9, 0, 0],
+            ),
+        )
+        .into_result()
+        .unwrap();
+    for peer in [peer_a, peer_b] {
+        assert_eq!(
+            runtime.dispatch_user_syscall_frame(
+                pid,
+                SyscallFrame::new(SYS_ATTACH_BUS_PEER, [peer, endpoint, 0, 0, 0, 0]),
+            ),
+            SyscallReturn::ok(0)
+        );
+    }
+
+    for (offset, peer, payload) in [
+        (0x500usize, peer_a, b"a-1".as_slice()),
+        (0x520usize, peer_b, b"b-1".as_slice()),
+        (0x540usize, peer_a, b"a-2".as_slice()),
+    ] {
+        runtime
+            .copy_to_user(pid, mapped as usize + offset, payload)
+            .unwrap();
+        assert_eq!(
+            runtime.dispatch_user_syscall_frame(
+                pid,
+                SyscallFrame::new(
+                    SYS_PUBLISH_BUS_MESSAGE,
+                    [
+                        peer,
+                        endpoint,
+                        mapped as usize + offset,
+                        payload.len(),
+                        0,
+                        0
+                    ],
+                ),
+            ),
+            SyscallReturn::ok(payload.len())
+        );
+    }
+
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_RECEIVE_BUS_MESSAGE,
+                [peer_b, endpoint, mapped as usize + 0x600, 16, 0, 0],
+            ),
+        ),
+        SyscallReturn::ok(3)
+    );
+    assert_eq!(
+        runtime
+            .copy_from_user(pid, mapped as usize + 0x600, 3)
+            .unwrap(),
+        b"a-1"
+    );
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_RECEIVE_BUS_MESSAGE,
+                [peer_a, endpoint, mapped as usize + 0x620, 16, 0, 0],
+            ),
+        ),
+        SyscallReturn::ok(3)
+    );
+    assert_eq!(
+        runtime
+            .copy_from_user(pid, mapped as usize + 0x620, 3)
+            .unwrap(),
+        b"b-1"
+    );
+
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_DETACH_BUS_PEER, [peer_a, endpoint, 0, 0, 0, 0]),
+        ),
+        SyscallReturn::ok(0)
+    );
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x640, b"blocked-a")
+        .unwrap();
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_PUBLISH_BUS_MESSAGE,
+                [peer_a, endpoint, mapped as usize + 0x640, 9, 0, 0],
+            ),
+        ),
+        SyscallReturn::err(Errno::Inval)
+    );
+
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x660, b"b-2")
+        .unwrap();
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_PUBLISH_BUS_MESSAGE,
+                [peer_b, endpoint, mapped as usize + 0x660, 3, 0, 0],
+            ),
+        ),
+        SyscallReturn::ok(3)
+    );
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_RECEIVE_BUS_MESSAGE,
+                [peer_b, endpoint, mapped as usize + 0x680, 16, 0, 0],
+            ),
+        ),
+        SyscallReturn::ok(3)
+    );
+    assert_eq!(
+        runtime
+            .copy_from_user(pid, mapped as usize + 0x680, 3)
+            .unwrap(),
+        b"a-2"
+    );
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_RECEIVE_BUS_MESSAGE,
+                [peer_b, endpoint, mapped as usize + 0x6a0, 16, 0, 0],
+            ),
+        ),
+        SyscallReturn::ok(3)
+    );
+    assert_eq!(
+        runtime
+            .copy_from_user(pid, mapped as usize + 0x6a0, 3)
+            .unwrap(),
+        b"b-2"
+    );
+
+    let endpoint_record_ptr = mapped as usize + 0x180;
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_INSPECT_BUS_ENDPOINT,
+                [endpoint, endpoint_record_ptr, 0, 0, 0, 0],
+            ),
+        ),
+        SyscallReturn::ok(0)
+    );
+    let endpoint_bytes = runtime
+        .copy_from_user(
+            pid,
+            endpoint_record_ptr,
+            core::mem::size_of::<NativeBusEndpointRecord>(),
+        )
+        .unwrap();
+    let endpoint_record = unsafe {
+        core::ptr::read_unaligned(endpoint_bytes.as_ptr().cast::<NativeBusEndpointRecord>())
+    };
+    assert_eq!(endpoint_record.attached_peer_count, 1);
+    assert_eq!(endpoint_record.publish_count, 4);
+    assert_eq!(endpoint_record.receive_count, 4);
+    assert_eq!(endpoint_record.last_peer as usize, peer_b);
+}
+
+#[test]
+fn native_model_user_syscalls_isolate_parallel_bus_endpoints_for_shared_and_distinct_peers() {
+    let (mut runtime, pid, mapped) = setup_runtime_with_user_process();
+    runtime
+        .copy_to_user(pid, mapped as usize, b"system")
+        .unwrap();
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x20, b"shared")
+        .unwrap();
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x30, b"other")
+        .unwrap();
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x40, b"/run/bus-a")
+        .unwrap();
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x60, b"/run")
+        .unwrap();
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x80, b"/run/bus-b")
+        .unwrap();
+
+    let domain = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_CREATE_DOMAIN, [0, mapped as usize, 6, 0, 0, 0]),
+        )
+        .into_result()
+        .unwrap();
+    let resource_a = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_CREATE_RESOURCE,
+                [
+                    domain,
+                    NativeResourceKind::Channel as usize,
+                    mapped as usize + 6,
+                    8,
+                    0,
+                    0,
+                ],
+            ),
+        )
+        .into_result()
+        .unwrap();
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x0a, b"render-b")
+        .unwrap();
+    let resource_b = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_CREATE_RESOURCE,
+                [
+                    domain,
+                    NativeResourceKind::Channel as usize,
+                    mapped as usize + 0x0a,
+                    8,
+                    0,
+                    0,
+                ],
+            ),
+        )
+        .into_result()
+        .unwrap();
+    let peer_shared = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_CREATE_BUS_PEER,
+                [domain, mapped as usize + 0x20, 6, 0, 0, 0],
+            ),
+        )
+        .into_result()
+        .unwrap();
+    let peer_other = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_CREATE_BUS_PEER,
+                [domain, mapped as usize + 0x30, 5, 0, 0, 0],
+            ),
+        )
+        .into_result()
+        .unwrap();
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_MKDIR_PATH, [mapped as usize + 0x60, 4, 0, 0, 0, 0]),
+        ),
+        SyscallReturn::ok(0)
+    );
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_MKCHAN_PATH, [mapped as usize + 0x40, 10, 0, 0, 0, 0]),
+        ),
+        SyscallReturn::ok(0)
+    );
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_MKCHAN_PATH, [mapped as usize + 0x80, 10, 0, 0, 0, 0]),
+        ),
+        SyscallReturn::ok(0)
+    );
+    let endpoint_a = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_CREATE_BUS_ENDPOINT,
+                [domain, resource_a, mapped as usize + 0x40, 10, 0, 0],
+            ),
+        )
+        .into_result()
+        .unwrap();
+    let endpoint_b = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_CREATE_BUS_ENDPOINT,
+                [domain, resource_b, mapped as usize + 0x80, 10, 0, 0],
+            ),
+        )
+        .into_result()
+        .unwrap();
+    for (peer, endpoint) in [
+        (peer_shared, endpoint_a),
+        (peer_shared, endpoint_b),
+        (peer_other, endpoint_b),
+    ] {
+        assert_eq!(
+            runtime.dispatch_user_syscall_frame(
+                pid,
+                SyscallFrame::new(SYS_ATTACH_BUS_PEER, [peer, endpoint, 0, 0, 0, 0]),
+            ),
+            SyscallReturn::ok(0)
+        );
+    }
+
+    for (offset, peer, endpoint, payload) in [
+        (0x500usize, peer_shared, endpoint_a, b"a-1".as_slice()),
+        (0x520usize, peer_shared, endpoint_b, b"b-1".as_slice()),
+        (0x540usize, peer_other, endpoint_b, b"b-2".as_slice()),
+    ] {
+        runtime
+            .copy_to_user(pid, mapped as usize + offset, payload)
+            .unwrap();
+        assert_eq!(
+            runtime.dispatch_user_syscall_frame(
+                pid,
+                SyscallFrame::new(
+                    SYS_PUBLISH_BUS_MESSAGE,
+                    [
+                        peer,
+                        endpoint,
+                        mapped as usize + offset,
+                        payload.len(),
+                        0,
+                        0
+                    ],
+                ),
+            ),
+            SyscallReturn::ok(payload.len())
+        );
+    }
+
+    for (peer, endpoint, output_offset, expected) in [
+        (peer_shared, endpoint_a, 0x600usize, b"a-1".as_slice()),
+        (peer_shared, endpoint_a, 0x620usize, b"".as_slice()),
+        (peer_other, endpoint_b, 0x640usize, b"b-1".as_slice()),
+        (peer_shared, endpoint_b, 0x660usize, b"b-2".as_slice()),
+    ] {
+        assert_eq!(
+            runtime.dispatch_user_syscall_frame(
+                pid,
+                SyscallFrame::new(
+                    SYS_RECEIVE_BUS_MESSAGE,
+                    [peer, endpoint, mapped as usize + output_offset, 16, 0, 0],
+                ),
+            ),
+            SyscallReturn::ok(expected.len())
+        );
+        assert_eq!(
+            runtime
+                .copy_from_user(pid, mapped as usize + output_offset, expected.len())
+                .unwrap(),
+            expected
+        );
+    }
+
+    let endpoint_record_ptr = mapped as usize + 0x180;
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_INSPECT_BUS_ENDPOINT,
+                [endpoint_a, endpoint_record_ptr, 0, 0, 0, 0],
+            ),
+        ),
+        SyscallReturn::ok(0)
+    );
+    let endpoint_a_bytes = runtime
+        .copy_from_user(
+            pid,
+            endpoint_record_ptr,
+            core::mem::size_of::<NativeBusEndpointRecord>(),
+        )
+        .unwrap();
+    let endpoint_a_record = unsafe {
+        core::ptr::read_unaligned(endpoint_a_bytes.as_ptr().cast::<NativeBusEndpointRecord>())
+    };
+    assert_eq!(endpoint_a_record.publish_count, 1);
+    assert_eq!(endpoint_a_record.receive_count, 2);
+    assert_eq!(endpoint_a_record.queue_depth, 0);
+
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_INSPECT_BUS_ENDPOINT,
+                [endpoint_b, endpoint_record_ptr, 0, 0, 0, 0],
+            ),
+        ),
+        SyscallReturn::ok(0)
+    );
+    let endpoint_b_bytes = runtime
+        .copy_from_user(
+            pid,
+            endpoint_record_ptr,
+            core::mem::size_of::<NativeBusEndpointRecord>(),
+        )
+        .unwrap();
+    let endpoint_b_record = unsafe {
+        core::ptr::read_unaligned(endpoint_b_bytes.as_ptr().cast::<NativeBusEndpointRecord>())
+    };
+    assert_eq!(endpoint_b_record.publish_count, 2);
+    assert_eq!(endpoint_b_record.receive_count, 2);
+    assert_eq!(endpoint_b_record.queue_depth, 0);
+}
+
+#[test]
+fn native_model_user_syscalls_enforce_bus_io_contract_policy_and_recover_after_binding() {
+    let (mut runtime, pid, mapped) = setup_runtime_with_user_process();
+    runtime
+        .copy_to_user(pid, mapped as usize, b"system")
+        .unwrap();
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x20, b"bus-peer")
+        .unwrap();
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x40, b"/run/bus-policy")
+        .unwrap();
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x60, b"/run")
+        .unwrap();
+    runtime
+        .copy_to_user(pid, mapped as usize + 0x300, b"policy-ok")
+        .unwrap();
+
+    let domain_raw = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_CREATE_DOMAIN, [0, mapped as usize, 6, 0, 0, 0]),
+        )
+        .into_result()
+        .unwrap();
+    let resource_raw = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_CREATE_RESOURCE,
+                [
+                    domain_raw,
+                    NativeResourceKind::Channel as usize,
+                    mapped as usize + 6,
+                    8,
+                    0,
+                    0,
+                ],
+            ),
+        )
+        .into_result()
+        .unwrap();
+    let peer = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_CREATE_BUS_PEER,
+                [domain_raw, mapped as usize + 0x20, 8, 0, 0, 0],
+            ),
+        )
+        .into_result()
+        .unwrap();
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_MKDIR_PATH, [mapped as usize + 0x60, 4, 0, 0, 0, 0]),
+        ),
+        SyscallReturn::ok(0)
+    );
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_MKCHAN_PATH, [mapped as usize + 0x40, 15, 0, 0, 0, 0]),
+        ),
+        SyscallReturn::ok(0)
+    );
+    let endpoint = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_CREATE_BUS_ENDPOINT,
+                [domain_raw, resource_raw, mapped as usize + 0x40, 15, 0, 0],
+            ),
+        )
+        .into_result()
+        .unwrap();
+
+    let resource = runtime
+        .resource_list()
+        .into_iter()
+        .find(|entry| entry.id.raw() as usize == resource_raw)
+        .unwrap()
+        .id;
+    let domain = runtime
+        .domain_list()
+        .into_iter()
+        .find(|entry| entry.id.raw() as usize == domain_raw)
+        .unwrap()
+        .id;
+    runtime
+        .set_resource_contract_policy(resource, ResourceContractPolicy::Io)
+        .unwrap();
+
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_ATTACH_BUS_PEER, [peer, endpoint, 0, 0, 0, 0]),
+        ),
+        SyscallReturn::err(Errno::Access)
+    );
+
+    let contract = runtime
+        .create_contract(pid, domain, resource, ContractKind::Io, "bus-io")
+        .unwrap();
+    runtime.bind_process_contract(pid, contract).unwrap();
+
+    assert_eq!(
+        runtime.dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(SYS_ATTACH_BUS_PEER, [peer, endpoint, 0, 0, 0, 0]),
+        ),
+        SyscallReturn::ok(0)
+    );
+
+    let wrote = runtime
+        .dispatch_user_syscall_frame(
+            pid,
+            SyscallFrame::new(
+                SYS_PUBLISH_BUS_MESSAGE,
+                [peer, endpoint, mapped as usize + 0x300, 9, 0, 0],
+            ),
+        )
+        .into_result()
+        .unwrap();
+    assert_eq!(wrote, 9);
+}

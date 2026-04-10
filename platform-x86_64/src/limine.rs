@@ -448,9 +448,8 @@ mod tests {
     #[test]
     fn loader_defined_handoff_rejects_invalid_module_path_utf8() {
         let mut buffers = LimineBootBuffers::new();
-        let invalid_path = unsafe {
-            CStr::from_bytes_with_nul_unchecked(b"/kernel/ngos-userland-native\xc3(\0")
-        };
+        let invalid_path =
+            unsafe { CStr::from_bytes_with_nul_unchecked(b"/kernel/ngos-userland-native\xc3(\0") };
         let module = test_file(invalid_path);
         let modules: &'static [&'static File] = Box::leak(Vec::from([module]).into_boxed_slice());
         let snapshot = LimineBootSnapshot {

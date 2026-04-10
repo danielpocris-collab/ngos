@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+ngos-audio-translate = { path = "../audio-translate" }
+ngos-gfx-translate = { path = "../gfx-translate" }
+ngos-input-translate = { path = "../input-translate" }
+ngos-shell-gpu = { path = "../ngos-shell-gpu" }
+ngos-shell-proc = { path = "../ngos-shell-proc" }
 ngos-user-abi = { path = "../user-abi" }
 ngos-user-runtime = { path = "../user-runtime" }
 

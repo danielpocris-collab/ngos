@@ -1,6 +1,20 @@
 //! NGOS Browser CSS Parser
 //!
 //! CSS parser - 100% Proprietary, no external deps
+//!
+//! Canonical subsystem role:
+//! - subsystem: browser CSS support
+//! - owner layer: application support layer
+//! - semantic owner: `browser-css`
+//! - truth path role: browser-facing stylesheet parsing and style support
+//!
+//! Canonical contract families defined here:
+//! - stylesheet contracts
+//! - selector/declaration support contracts
+//! - browser style parsing contracts
+//!
+//! This crate may define browser CSS support behavior, but it must not
+//! redefine kernel, runtime, or product-level OS truth.
 
 pub use browser_core::{BrowserError, BrowserResult};
 pub use browser_dom::{Document, Node};

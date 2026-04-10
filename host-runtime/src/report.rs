@@ -157,6 +157,7 @@ pub struct HostRuntimeNativeSessionReport {
     pub pid: u64,
     pub exit_code: i32,
     pub stdout_bytes: usize,
+    pub ui_presentation_backend: &'static str,
     pub session_reported: bool,
     pub session_report_count: u64,
     pub session_status: u32,
@@ -185,6 +186,10 @@ impl HostRuntimeNativeSessionReport {
             self.domain_count,
             self.resource_count,
             self.contract_count,
+        ));
+        out.push_str(&format!(
+            "presentation: ui-backend={}\n",
+            self.ui_presentation_backend,
         ));
         out.push_str(&format!(
             "session: reported={} count={} status={} stage={} code={} detail={}\n",
@@ -1257,6 +1262,7 @@ mod tests {
             pid: 2,
             exit_code: 0,
             stdout_bytes: 4,
+            ui_presentation_backend: "skia-host",
             session_reported: true,
             session_report_count: 1,
             session_status: 0,

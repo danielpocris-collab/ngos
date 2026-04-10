@@ -1,0 +1,19 @@
+cargo:rerun-if-env-changed=DOCS_RS
+cargo:rerun-if-env-changed=SKIA_DEBUG
+cargo:rerun-if-env-changed=SKIA_SOURCE_DIR
+cargo:rerun-if-env-changed=FORCE_SKIA_BUILD
+cargo:rerun-if-env-changed=FORCE_SKIA_BINARIES_DOWNLOAD
+TRYING TO DOWNLOAD AND INSTALL SKIA BINARIES: 0.93.1/319323662b1685a112f5-x86_64-pc-windows-msvc-jpegd-jpege-pdf
+cargo:rerun-if-env-changed=SKIA_BINARIES_URL
+  FROM: https://github.com/rust-skia/skia-binaries/releases/download/0.93.1/skia-binaries-319323662b1685a112f5-x86_64-pc-windows-msvc-jpegd-jpege-pdf.tar.gz
+UNPACKING ARCHIVE INTO: C:\Users\pocri\OneDrive\Desktop\experiment\target-cpu-boot\debug\build\skia-bindings-91e9351bcc8e8dee\out\skia
+DOWNLOAD AND INSTALL SUCCEEDED
+cargo:rustc-link-search=C:\Users\pocri\OneDrive\Desktop\experiment\target-cpu-boot\debug\build\skia-bindings-91e9351bcc8e8dee\out\skia
+cargo:rustc-link-lib=skia
+cargo:rustc-link-lib=skia-bindings
+cargo:rustc-link-lib=usp10
+cargo:rustc-link-lib=ole32
+cargo:rustc-link-lib=user32
+cargo:rustc-link-lib=gdi32
+cargo:rustc-link-lib=fontsub
+cargo:rustc-link-lib=Advapi32

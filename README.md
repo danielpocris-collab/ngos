@@ -48,6 +48,11 @@ Asta inseamna:
 - orice front nou trebuie sa fie impins prin slice-uri verticale reale, nu prin manageri tot mai mari
 - regula nano-semantica se aplica nu doar kernelului, ci si userland-ului, shell-ului, tooling-ului si oricarei suprafete noi de control sau dezvoltare
 - un shell mare este acceptat numai daca ramane compus din agenti/moduluri semantice mici, nu daca revine la manageri interni opaci
+- shell-ul este documentat separat in [docs/ngos-shell-model.md](/C:/Users/pocri/OneDrive/Desktop/experiment/docs/ngos-shell-model.md) si [docs/shell-closure-status.md](/C:/Users/pocri/OneDrive/Desktop/experiment/docs/shell-closure-status.md)
+- directia pentru un shell best-in-class este sintetizata in [docs/ngos-shell-best-in-class-roadmap.md](/C:/Users/pocri/OneDrive/Desktop/experiment/docs/ngos-shell-best-in-class-roadmap.md)
+- planul de implementare pentru shell este in [docs/ngos-shell-implementation-plan.md](/C:/Users/pocri/OneDrive/Desktop/experiment/docs/ngos-shell-implementation-plan.md)
+- specificatia mare a limbajului de shell este in [docs/ngos-shell-language-spec.md](/C:/Users/pocri/OneDrive/Desktop/experiment/docs/ngos-shell-language-spec.md)
+- specificatia pentru shell orientat pe coding este in [docs/ngos-shell-for-coding-spec.md](/C:/Users/pocri/OneDrive/Desktop/experiment/docs/ngos-shell-for-coding-spec.md)
 - userland-ul `ngos` trebuie sa creasca ca ecosistem semantic coerent, nu ca acumulare de logica compactata intr-un singur bloc
 
 Nu este acceptata dezvoltarea inapoi spre model monolitic intern, chiar daca suprafata externa ramane unitara.
@@ -210,6 +215,13 @@ Fiecare pas trebuie sa lase in urma un subsistem mai puternic, mai testabil si m
 - toolchain: Rust + LLVM
 - kernel core fara dependenta directa de OS-ul gazda
 - backend-uri de platforma separate de logica nucleului
+
+## Documente de Arhitectura
+
+- model general: [docs/project-architecture.md](C:/Users/pocri/OneDrive/Desktop/experiment/docs/project-architecture.md)
+- directie arhitecturala: [docs/ngos-architecture-direction.md](C:/Users/pocri/OneDrive/Desktop/experiment/docs/ngos-architecture-direction.md)
+- model `VFS`: [docs/ngos-vfs-model.md](C:/Users/pocri/OneDrive/Desktop/experiment/docs/ngos-vfs-model.md)
+- status closure `VFS`: [docs/vfs-closure-status.md](C:/Users/pocri/OneDrive/Desktop/experiment/docs/vfs-closure-status.md)
 
 ## Structura Logica
 

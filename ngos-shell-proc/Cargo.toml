@@ -1,0 +1,13 @@
+[package]
+name = "ngos-shell-proc"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "ngos_shell_proc"
+crate-type = ["rlib"]
+
+[dependencies]
+ngos-shell-types = { path = "../ngos-shell-types" }
+ngos-user-abi = { path = "../user-abi" }
+ngos-user-runtime = { path = "../user-runtime" }

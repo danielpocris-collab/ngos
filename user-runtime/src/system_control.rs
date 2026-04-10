@@ -5,6 +5,21 @@ use alloc::{
     vec::Vec,
 };
 
+/// Canonical subsystem role:
+/// - subsystem: user runtime semantic extraction and control helpers
+/// - owner layer: Layer 2
+/// - semantic owner: `user-runtime`
+/// - truth path role: consumes kernel truth from `user-abi` and prepares it
+///   for userland control surfaces
+///
+/// Canonical contract families consumed here:
+/// - system snapshot contracts
+/// - process/network/device inspection contracts
+/// - verified-core contracts
+/// - scheduler fairness contracts
+///
+/// This module may classify and explain system truth.
+/// It must not redefine the underlying kernel truth it consumes.
 use crate::Runtime;
 pub use ngos_semantic_runtime::{
     AdaptiveState, AdaptiveStateSnapshot, CognitiveTier, ComputeMode, CpuLoadStats, CpuMask,
@@ -17,10 +32,10 @@ pub use ngos_semantic_runtime::{
     semantic_entity_kind_name, semantic_for_channel, semantic_verdict_name,
 };
 use ngos_user_abi::{
-    Errno, NativeContractRecord, NativeEventQueueMode, NativeEventRecord, NativeEventSourceKind,
-    NativeNetworkInterfaceRecord, NativeNetworkSocketRecord, NativeProcessRecord,
-    NativeResourceRecord, NativeSchedulerClass, NativeSystemSnapshotRecord, PollEvents,
-    SyscallBackend,
+    Errno, NativeBusEndpointRecord, NativeBusPeerRecord, NativeContractRecord,
+    NativeEventQueueMode, NativeEventRecord, NativeEventSourceKind, NativeNetworkInterfaceRecord,
+    NativeNetworkSocketRecord, NativeProcessRecord, NativeResourceRecord, NativeSchedulerClass,
+    NativeSystemSnapshotRecord, PollEvents, SyscallBackend,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,10 +91,24 @@ pub struct SocketEntity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BusPeerEntity {
+    pub id: usize,
+    pub record: NativeBusPeerRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BusEndpointEntity {
+    pub id: usize,
+    pub record: NativeBusEndpointRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SystemFact {
     Process(ProcessEntity),
     Device(DeviceEntity),
     Socket(SocketEntity),
+    BusPeer(BusPeerEntity),
+    BusEndpoint(BusEndpointEntity),
     Resource {
         id: usize,
         record: NativeResourceRecord,
@@ -119,6 +148,15 @@ pub enum EventFilter {
         tx_drained: bool,
         poll_events: PollEvents,
     },
+    Bus {
+        endpoint: usize,
+        token: CapabilityToken,
+        attached: bool,
+        detached: bool,
+        published: bool,
+        received: bool,
+        poll_events: PollEvents,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +176,9 @@ pub enum ProcessAction {
     Renice {
         class: NativeSchedulerClass,
         budget: u32,
+    },
+    SetAffinity {
+        cpu_mask: u64,
     },
 }
 
@@ -181,6 +222,9 @@ impl<'a, B: SyscallBackend> SystemController<'a, B> {
             ProcessAction::Kill { signal } => self.runtime.send_signal(handle.pid, signal),
             ProcessAction::Renice { class, budget } => {
                 self.runtime.renice_process(handle.pid, class, budget)
+            }
+            ProcessAction::SetAffinity { cpu_mask } => {
+                self.runtime.set_process_affinity(handle.pid, cpu_mask)
             }
         }
     }
@@ -272,6 +316,8 @@ impl<'a, B: SyscallBackend> SystemController<'a, B> {
         let queue_fd = self
             .runtime
             .create_event_queue(NativeEventQueueMode::Kqueue)?;
+        self.runtime
+            .fcntl(queue_fd, ngos_user_abi::FcntlCmd::SetFl { nonblock: true })?;
         match &filter {
             EventFilter::Process {
                 pid,
@@ -327,6 +373,24 @@ impl<'a, B: SyscallBackend> SystemController<'a, B> {
                 *tx_drained,
                 *poll_events,
             )?,
+            EventFilter::Bus {
+                endpoint,
+                token,
+                attached,
+                detached,
+                published,
+                received,
+                poll_events,
+            } => self.runtime.watch_bus_events(
+                queue_fd,
+                *endpoint,
+                token.value,
+                *attached,
+                *detached,
+                *published,
+                *received,
+                *poll_events,
+            )?,
         }
         Ok(EventStream { queue_fd, filter })
     }
@@ -336,6 +400,7 @@ impl<'a, B: SyscallBackend> SystemController<'a, B> {
         previous: Option<&NativeSystemSnapshotRecord>,
     ) -> Result<SystemPressureMetrics, Errno> {
         let snapshot = self.runtime.inspect_system_snapshot()?;
+        let facts = self.collect_facts()?;
         let cpu_utilization_pct = match previous {
             Some(previous) if snapshot.current_tick > previous.current_tick => {
                 let tick_delta = snapshot.current_tick - previous.current_tick;
@@ -355,12 +420,59 @@ impl<'a, B: SyscallBackend> SystemController<'a, B> {
             .saturating_mul(100)
             .checked_div(event_capacity)
             .unwrap_or(0) as u32;
+        let bus_endpoints = collect_bus_endpoint_entities(&facts);
+        let bus_endpoint_count = bus_endpoints.len() as u64;
+        let bus_queue_depth_total = bus_endpoints
+            .iter()
+            .map(|endpoint| endpoint.record.queue_depth)
+            .sum::<u64>();
+        let bus_queue_capacity_total = bus_endpoints
+            .iter()
+            .map(|endpoint| endpoint.record.queue_capacity)
+            .sum::<u64>();
+        let bus_overflow_total = bus_endpoints
+            .iter()
+            .map(|endpoint| endpoint.record.overflow_count)
+            .sum::<u64>();
+        let saturated_bus_endpoint_count = bus_endpoints
+            .iter()
+            .filter(|endpoint| {
+                endpoint.record.queue_capacity != 0
+                    && endpoint.record.queue_depth >= endpoint.record.queue_capacity
+            })
+            .count() as u64;
+        let bus_pressure_pct = bus_queue_depth_total
+            .saturating_mul(100)
+            .checked_div(bus_queue_capacity_total.max(1))
+            .unwrap_or(0) as u32;
         Ok(SystemPressureMetrics {
+            verified_core_ok: snapshot.verified_core_ok(),
+            verified_core_violation_count: snapshot.verified_core_violation_count(),
             run_queue_total: snapshot.queued_processes,
             run_queue_latency_critical: snapshot.queued_latency_critical,
             run_queue_interactive: snapshot.queued_interactive,
             run_queue_normal: snapshot.queued_normal,
             run_queue_background: snapshot.queued_background,
+            run_queue_urgent_latency_critical: snapshot.queued_urgent_latency_critical,
+            run_queue_urgent_interactive: snapshot.queued_urgent_interactive,
+            run_queue_urgent_normal: snapshot.queued_urgent_normal,
+            run_queue_urgent_background: snapshot.queued_urgent_background,
+            scheduler_lag_debt_total: snapshot.scheduler_lag_debt_total(),
+            scheduler_dispatch_total: snapshot.scheduler_dispatch_total(),
+            scheduler_runtime_ticks_total: snapshot.scheduler_runtime_ticks_total(),
+            scheduler_runtime_imbalance: snapshot.scheduler_runtime_imbalance(),
+            scheduler_cpu_count: snapshot.scheduler_cpu_count,
+            scheduler_running_cpu: snapshot
+                .scheduler_has_running_cpu()
+                .then_some(snapshot.scheduler_running_cpu),
+            scheduler_cpu_load_imbalance: snapshot.scheduler_cpu_load_imbalance,
+            scheduler_starved: snapshot.starved_any(),
+            bus_endpoint_count,
+            saturated_bus_endpoint_count,
+            bus_queue_depth_total,
+            bus_queue_capacity_total,
+            bus_pressure_pct,
+            bus_overflow_total,
             snapshot,
             cpu_utilization_pct,
             socket_pressure_pct,
@@ -385,13 +497,25 @@ impl<'a, B: SyscallBackend> SystemController<'a, B> {
     }
 
     pub fn classify_pressure(&self, metrics: &SystemPressureMetrics) -> PressureState {
-        let high_scheduler_pressure =
-            metrics.run_queue_total >= 3 && metrics.cpu_utilization_pct >= 75;
+        if !metrics.verified_core_ok {
+            return PressureState::MixedPressure;
+        }
+        let high_scheduler_pressure = (metrics.run_queue_total >= 3
+            && metrics.cpu_utilization_pct >= 75)
+            || metrics.scheduler_starved
+            || metrics.scheduler_lag_debt_total >= 6
+            || (metrics.scheduler_runtime_ticks_total >= 4
+                && metrics.scheduler_runtime_imbalance >= 3)
+            || (metrics.scheduler_cpu_count >= 2 && metrics.scheduler_cpu_load_imbalance >= 2)
+            || metrics.run_queue_urgent_total() >= 2;
         let network_backpressure = metrics.snapshot.saturated_socket_count > 0
             || metrics.socket_pressure_pct >= 80
             || metrics.rx_drop_delta > 0
             || metrics.tx_drop_delta > 0
-            || metrics.event_queue_pressure_pct >= 75;
+            || metrics.event_queue_pressure_pct >= 75
+            || metrics.saturated_bus_endpoint_count > 0
+            || metrics.bus_pressure_pct >= 80
+            || metrics.bus_overflow_total > 0;
         match (high_scheduler_pressure, network_backpressure) {
             (true, true) => PressureState::MixedPressure,
             (true, false) => PressureState::HighSchedulerPressure,
@@ -414,7 +538,11 @@ impl<'a, B: SyscallBackend> SystemController<'a, B> {
             thermal_c: self.thermal_proxy(&metrics),
         };
         adaptive_state.record(&observation);
-        let channel = pressure_channel_name(pressure).to_string();
+        let channel = if metrics.verified_core_ok {
+            pressure_channel_name(pressure).to_string()
+        } else {
+            String::from("kernel::verified-core")
+        };
         Ok(SemanticSystemState {
             semantic: semantic_for_channel(&channel),
             channel,
@@ -430,6 +558,21 @@ impl<'a, B: SyscallBackend> SystemController<'a, B> {
         if metrics.run_queue_total >= 3 {
             anomaly = anomaly.saturating_add(25);
         }
+        if metrics.run_queue_urgent_total() >= 2 {
+            anomaly = anomaly.saturating_add(15);
+        }
+        if metrics.scheduler_starved {
+            anomaly = anomaly.saturating_add(20);
+        }
+        if metrics.scheduler_lag_debt_total >= 6 {
+            anomaly = anomaly.saturating_add(15);
+        }
+        if metrics.scheduler_runtime_ticks_total >= 4 && metrics.scheduler_runtime_imbalance >= 3 {
+            anomaly = anomaly.saturating_add(15);
+        }
+        if metrics.scheduler_cpu_count >= 2 && metrics.scheduler_cpu_load_imbalance >= 2 {
+            anomaly = anomaly.saturating_add(15);
+        }
         if metrics.cpu_utilization_pct >= 75 {
             anomaly = anomaly.saturating_add(25);
         }
@@ -439,8 +582,19 @@ impl<'a, B: SyscallBackend> SystemController<'a, B> {
         if metrics.event_queue_pressure_pct >= 75 {
             anomaly = anomaly.saturating_add(15);
         }
+        if metrics.bus_pressure_pct >= 80 {
+            anomaly = anomaly.saturating_add(15);
+        }
+        if metrics.bus_overflow_total > 0 {
+            anomaly = anomaly.saturating_add(20);
+        }
         if metrics.rx_drop_delta > 0 || metrics.tx_drop_delta > 0 {
             anomaly = anomaly.saturating_add(20);
+        }
+        if !metrics.verified_core_ok {
+            anomaly = anomaly
+                .saturating_add(35)
+                .saturating_add((metrics.verified_core_violation_count as u32).saturating_mul(5));
         }
         anomaly.min(100)
     }
@@ -448,7 +602,8 @@ impl<'a, B: SyscallBackend> SystemController<'a, B> {
     fn thermal_proxy(&self, metrics: &SystemPressureMetrics) -> i16 {
         let thermal = 35u32
             .saturating_add(metrics.cpu_utilization_pct / 2)
-            .saturating_add(metrics.event_queue_pressure_pct / 4);
+            .saturating_add(metrics.event_queue_pressure_pct / 4)
+            .saturating_add(metrics.bus_pressure_pct / 8);
         thermal.min(110) as i16
     }
 
@@ -485,6 +640,26 @@ impl<'a, B: SyscallBackend> SystemController<'a, B> {
 
         for handle in self.enumerate_devices()? {
             facts.push(SystemFact::Device(self.device_stats(&handle)?));
+        }
+
+        let mut bus_peers = vec![0u64; 64];
+        let bus_peer_count = self.runtime.list_bus_peers(&mut bus_peers)?;
+        bus_peers.truncate(bus_peer_count);
+        for peer in bus_peers {
+            facts.push(SystemFact::BusPeer(BusPeerEntity {
+                id: peer as usize,
+                record: self.runtime.inspect_bus_peer(peer as usize)?,
+            }));
+        }
+
+        let mut bus_endpoints = vec![0u64; 64];
+        let bus_endpoint_count = self.runtime.list_bus_endpoints(&mut bus_endpoints)?;
+        bus_endpoints.truncate(bus_endpoint_count);
+        for endpoint in bus_endpoints {
+            facts.push(SystemFact::BusEndpoint(BusEndpointEntity {
+                id: endpoint as usize,
+                record: self.runtime.inspect_bus_endpoint(endpoint as usize)?,
+            }));
         }
 
         for resource in self.query_resources()? {
@@ -539,6 +714,24 @@ impl<'a, B: SyscallBackend> SystemController<'a, B> {
                         policy_fingerprint: socket_policy_fingerprint(&socket),
                     },
                 }),
+                SystemFact::BusPeer(peer) => entities.push(SemanticEntity {
+                    kind: SemanticEntityKind::BusPeer,
+                    subject: format!("bus-peer:{}", peer.id),
+                    semantic: semantic_for_channel("ipc::bus-peer"),
+                    policy: SemanticPolicyView {
+                        cpu_mask: u64::MAX,
+                        policy_fingerprint: bus_peer_policy_fingerprint(&peer),
+                    },
+                }),
+                SystemFact::BusEndpoint(endpoint) => entities.push(SemanticEntity {
+                    kind: SemanticEntityKind::BusEndpoint,
+                    subject: format!("bus-endpoint:{}", endpoint.id),
+                    semantic: semantic_for_channel("ipc::bus-endpoint"),
+                    policy: SemanticPolicyView {
+                        cpu_mask: u64::MAX,
+                        policy_fingerprint: bus_endpoint_policy_fingerprint(&endpoint),
+                    },
+                }),
                 SystemFact::Resource { id, record } => entities.push(SemanticEntity {
                     kind: SemanticEntityKind::Resource,
                     subject: format!("resource:{id}"),
@@ -567,6 +760,17 @@ impl<'a, B: SyscallBackend> SystemController<'a, B> {
         previous: Option<&NativeSystemSnapshotRecord>,
     ) -> Result<SemanticTopologySnapshot, Errno> {
         let snapshot = self.runtime.inspect_system_snapshot()?;
+        if let Some(topology) = self.observe_scheduler_topology_from_procfs()? {
+            return Ok(topology);
+        }
+        Ok(self.observe_topology_from_snapshot(previous, &snapshot))
+    }
+
+    fn observe_topology_from_snapshot(
+        &self,
+        previous: Option<&NativeSystemSnapshotRecord>,
+        snapshot: &NativeSystemSnapshotRecord,
+    ) -> SemanticTopologySnapshot {
         let run_events = match previous {
             Some(previous) if snapshot.current_tick > previous.current_tick => {
                 snapshot.busy_ticks.saturating_sub(previous.busy_ticks)
@@ -580,19 +784,77 @@ impl<'a, B: SyscallBackend> SystemController<'a, B> {
             _ => snapshot.current_tick.max(1),
         };
         let idle_events = total_events.saturating_sub(run_events.min(total_events));
-        Ok(SemanticTopologySnapshot {
-            online_cpus: 1,
-            entries: vec![SemanticCpuTopologyEntry {
-                cpu_index: 0,
-                apic_id: 0,
+        let online_cpus = snapshot.scheduler_cpu_count.max(1) as usize;
+        let running_cpu = if snapshot.scheduler_has_running_cpu() {
+            Some(snapshot.scheduler_running_cpu as usize)
+        } else {
+            None
+        };
+        let entries = (0..online_cpus)
+            .map(|cpu_index| SemanticCpuTopologyEntry {
+                cpu_index,
+                apic_id: cpu_index as u32,
                 launched: true,
                 online: true,
                 load: CpuLoadStats {
-                    run_events,
+                    run_events: if Some(cpu_index) == running_cpu {
+                        run_events.max(1)
+                    } else {
+                        0
+                    },
                     idle_events,
                 },
-            }],
-        })
+            })
+            .collect();
+        SemanticTopologySnapshot {
+            online_cpus,
+            entries,
+        }
+    }
+
+    fn observe_scheduler_topology_from_procfs(
+        &self,
+    ) -> Result<Option<SemanticTopologySnapshot>, Errno> {
+        let text = match self.read_procfs_text("/proc/system/scheduler") {
+            Ok(text) => text,
+            Err(Errno::NoEnt | Errno::Access | Errno::Perm | Errno::Inval) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let mut online_cpus = None;
+        let mut entries = Vec::new();
+        for line in text.lines() {
+            if let Some(count) = parse_scheduler_cpu_summary_count(line) {
+                online_cpus = Some(count);
+                continue;
+            }
+            if let Some(entry) = parse_scheduler_cpu_topology_entry(line) {
+                entries.push(entry);
+            }
+        }
+        if entries.is_empty() {
+            return Ok(None);
+        }
+        entries.sort_by_key(|entry| entry.cpu_index);
+        Ok(Some(SemanticTopologySnapshot {
+            online_cpus: online_cpus.unwrap_or(entries.len().max(1)),
+            entries,
+        }))
+    }
+
+    fn read_procfs_text(&self, path: &str) -> Result<String, Errno> {
+        let mut capacity = 256usize;
+        loop {
+            let mut buffer = vec![0u8; capacity];
+            let count = self.runtime.read_procfs(path, &mut buffer)?;
+            if count < buffer.len() {
+                buffer.truncate(count);
+                return String::from_utf8(buffer).map_err(|_| Errno::Inval);
+            }
+            capacity = capacity.saturating_mul(2);
+            if capacity > 64 * 1024 {
+                return Err(Errno::TooBig);
+            }
+        }
     }
 
     pub fn plan_pressure_response(
@@ -604,6 +866,7 @@ impl<'a, B: SyscallBackend> SystemController<'a, B> {
         let facts = self.collect_facts()?;
         let processes = collect_process_entities(&facts);
         let devices = collect_device_entities(&facts);
+        let bus_endpoints = collect_bus_endpoint_entities(&facts);
         let mut actions = Vec::new();
 
         if matches!(
@@ -688,6 +951,31 @@ impl<'a, B: SyscallBackend> SystemController<'a, B> {
             });
         }
 
+        if matches!(
+            semantic_state.pressure,
+            PressureState::NetworkBackpressure | PressureState::MixedPressure
+        ) {
+            for endpoint in bus_endpoints {
+                if endpoint.record.queue_depth == 0 && endpoint.record.overflow_count == 0 {
+                    continue;
+                }
+                if endpoint.record.last_peer == 0 {
+                    continue;
+                }
+                actions.push(SemanticActionRecord {
+                    reason: String::from("bus-backpressure"),
+                    detail: format!(
+                        "drain endpoint={} peer={} depth={} capacity={} overflows={}",
+                        endpoint.id,
+                        endpoint.record.last_peer,
+                        endpoint.record.queue_depth,
+                        endpoint.record.queue_capacity,
+                        endpoint.record.overflow_count
+                    ),
+                });
+            }
+        }
+
         Ok(SemanticDecisionPlan {
             trigger: semantic_state.pressure,
             semantic: semantic_state.semantic,
@@ -754,8 +1042,56 @@ pub fn event_source_name(record: &NativeEventRecord) -> &'static str {
         Some(NativeEventSourceKind::Resource) => "resource",
         Some(NativeEventSourceKind::Network) => "network",
         Some(NativeEventSourceKind::Graphics) => "graphics",
+        Some(NativeEventSourceKind::Bus) => "bus",
+        Some(NativeEventSourceKind::Vfs) => "vfs",
         None => "unknown",
     }
+}
+
+fn parse_scheduler_cpu_summary_count(line: &str) -> Option<usize> {
+    if !line.starts_with("cpu-summary:\t") {
+        return None;
+    }
+    line.split('\t')
+        .find_map(|field| field.strip_prefix("count="))
+        .and_then(|value| value.parse::<usize>().ok())
+}
+
+fn parse_scheduler_cpu_topology_entry(line: &str) -> Option<SemanticCpuTopologyEntry> {
+    if !line.starts_with("cpu\t") {
+        return None;
+    }
+    let mut cpu_index = None;
+    let mut apic_id = None;
+    let mut queued_load = 0u64;
+    let mut runtime_ticks = 0u64;
+    let mut running = false;
+    for field in line.split('\t').skip(1) {
+        if let Some(value) = field.strip_prefix("index=") {
+            cpu_index = value.parse::<usize>().ok();
+        } else if let Some(value) = field.strip_prefix("apic-id=") {
+            apic_id = value.parse::<u32>().ok();
+        } else if let Some(value) = field.strip_prefix("queued-load=") {
+            queued_load = value.parse::<u64>().ok()?;
+        } else if let Some(value) = field.strip_prefix("runtime-ticks=") {
+            runtime_ticks = value.parse::<u64>().ok()?;
+        } else if let Some(value) = field.strip_prefix("running=") {
+            running = value == "true";
+        }
+    }
+    let cpu_index = cpu_index?;
+    Some(SemanticCpuTopologyEntry {
+        cpu_index,
+        apic_id: apic_id.unwrap_or(cpu_index as u32),
+        launched: true,
+        online: true,
+        load: CpuLoadStats {
+            run_events: queued_load
+                .saturating_add(runtime_ticks)
+                .saturating_add(u64::from(running)),
+            idle_events: 1,
+        },
+    })
 }
 
 fn process_policy_fingerprint(process: &ProcessEntity) -> u64 {
@@ -781,6 +1117,22 @@ fn socket_policy_fingerprint(socket: &SocketEntity) -> u64 {
         | (socket.record.rx_queue_limit << 8)
         | ((socket.record.local_port as u64) << 32)
         | ((socket.record.remote_port as u64) << 48)
+}
+
+fn bus_peer_policy_fingerprint(peer: &BusPeerEntity) -> u64 {
+    peer.record.attached_endpoint_count
+        | (peer.record.publish_count << 16)
+        | (peer.record.receive_count << 32)
+        | (peer.record.last_endpoint << 48)
+}
+
+fn bus_endpoint_policy_fingerprint(endpoint: &BusEndpointEntity) -> u64 {
+    endpoint.record.attached_peer_count
+        | (endpoint.record.queue_depth << 16)
+        | (endpoint.record.queue_capacity << 24)
+        | (endpoint.record.peak_queue_depth << 32)
+        | (endpoint.record.overflow_count << 40)
+        | (endpoint.record.last_peer << 48)
 }
 
 fn resource_policy_fingerprint(record: &NativeResourceRecord) -> u64 {
@@ -822,6 +1174,16 @@ fn collect_device_entities(
         .collect()
 }
 
+fn collect_bus_endpoint_entities(facts: &[SystemFact]) -> Vec<BusEndpointEntity> {
+    facts
+        .iter()
+        .filter_map(|fact| match fact {
+            SystemFact::BusEndpoint(endpoint) => Some(endpoint.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn protected_process(process: &ProcessEntity) -> bool {
     matches!(
         NativeSchedulerClass::from_raw(process.record.scheduler_class),
@@ -858,5 +1220,310 @@ fn scheduler_class_label(raw: u32) -> &'static str {
         Some(NativeSchedulerClass::BestEffort) => "best-effort",
         Some(NativeSchedulerClass::Background) => "background",
         None => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::cell::RefCell;
+    use ngos_user_abi::{
+        SYS_INSPECT_SYSTEM_SNAPSHOT, SYS_LIST_BUS_ENDPOINTS, SYS_LIST_BUS_PEERS,
+        SYS_LIST_CONTRACTS, SYS_LIST_DOMAINS, SYS_LIST_PATH, SYS_LIST_PROCESSES,
+        SYS_LIST_RESOURCES, SYS_READ_PROCFS, SyscallFrame, SyscallReturn,
+    };
+
+    struct SnapshotBackend {
+        snapshot: NativeSystemSnapshotRecord,
+        procfs_scheduler: Option<Vec<u8>>,
+        last: RefCell<Option<SyscallFrame>>,
+    }
+
+    impl SnapshotBackend {
+        fn new(snapshot: NativeSystemSnapshotRecord) -> Self {
+            Self {
+                snapshot,
+                procfs_scheduler: None,
+                last: RefCell::new(None),
+            }
+        }
+
+        fn with_scheduler_procfs(snapshot: NativeSystemSnapshotRecord, text: &str) -> Self {
+            Self {
+                snapshot,
+                procfs_scheduler: Some(text.as_bytes().to_vec()),
+                last: RefCell::new(None),
+            }
+        }
+    }
+
+    impl SyscallBackend for SnapshotBackend {
+        unsafe fn syscall(&self, frame: SyscallFrame) -> SyscallReturn {
+            *self.last.borrow_mut() = Some(frame);
+            if frame.number == SYS_INSPECT_SYSTEM_SNAPSHOT {
+                let ptr = frame.arg0 as *mut NativeSystemSnapshotRecord;
+                unsafe {
+                    ptr.write(self.snapshot);
+                }
+                SyscallReturn::ok(0)
+            } else if frame.number == SYS_READ_PROCFS {
+                let path = unsafe {
+                    core::str::from_utf8_unchecked(core::slice::from_raw_parts(
+                        frame.arg0 as *const u8,
+                        frame.arg1,
+                    ))
+                };
+                if path != "/proc/system/scheduler" {
+                    return SyscallReturn::err(Errno::NoEnt);
+                }
+                let Some(payload) = self.procfs_scheduler.as_ref() else {
+                    return SyscallReturn::err(Errno::NoEnt);
+                };
+                let dst =
+                    unsafe { core::slice::from_raw_parts_mut(frame.arg2 as *mut u8, frame.arg3) };
+                let copy_len = core::cmp::min(dst.len(), payload.len());
+                dst[..copy_len].copy_from_slice(&payload[..copy_len]);
+                SyscallReturn::ok(copy_len)
+            } else if matches!(
+                frame.number,
+                SYS_LIST_PROCESSES
+                    | SYS_LIST_PATH
+                    | SYS_LIST_BUS_PEERS
+                    | SYS_LIST_BUS_ENDPOINTS
+                    | SYS_LIST_DOMAINS
+                    | SYS_LIST_RESOURCES
+                    | SYS_LIST_CONTRACTS
+            ) {
+                SyscallReturn::ok(0)
+            } else {
+                SyscallReturn::err(Errno::Inval)
+            }
+        }
+    }
+
+    fn base_snapshot() -> NativeSystemSnapshotRecord {
+        NativeSystemSnapshotRecord {
+            current_tick: 100,
+            busy_ticks: 60,
+            process_count: 3,
+            active_process_count: 3,
+            blocked_process_count: 0,
+            queued_processes: 2,
+            queued_latency_critical: 0,
+            queued_interactive: 1,
+            queued_normal: 1,
+            queued_background: 0,
+            queued_urgent_latency_critical: 0,
+            queued_urgent_interactive: 0,
+            queued_urgent_normal: 0,
+            queued_urgent_background: 0,
+            lag_debt_latency_critical: 0,
+            lag_debt_interactive: 0,
+            lag_debt_normal: 0,
+            lag_debt_background: 0,
+            dispatch_count_latency_critical: 0,
+            dispatch_count_interactive: 0,
+            dispatch_count_normal: 0,
+            dispatch_count_background: 0,
+            runtime_ticks_latency_critical: 0,
+            runtime_ticks_interactive: 0,
+            runtime_ticks_normal: 0,
+            runtime_ticks_background: 0,
+            scheduler_cpu_count: 1,
+            scheduler_running_cpu: u64::MAX,
+            scheduler_cpu_load_imbalance: 0,
+            starved_latency_critical: 0,
+            starved_interactive: 0,
+            starved_normal: 0,
+            starved_background: 0,
+            deferred_task_count: 0,
+            sleeping_processes: 0,
+            total_event_queue_count: 1,
+            total_event_queue_pending: 1,
+            total_event_queue_waiters: 0,
+            total_socket_count: 1,
+            saturated_socket_count: 0,
+            total_socket_rx_depth: 1,
+            total_socket_rx_limit: 16,
+            max_socket_rx_depth: 1,
+            total_network_tx_dropped: 0,
+            total_network_rx_dropped: 0,
+            running_pid: 1,
+            reserved0: NativeSystemSnapshotRecord::VERIFIED_CORE_OK_TRUE,
+            reserved1: 0,
+        }
+    }
+
+    #[test]
+    fn observe_semantic_state_keeps_pressure_channel_when_verified_core_is_clean() {
+        let runtime = Runtime::new(SnapshotBackend::new(base_snapshot()));
+        let controller = SystemController::new(&runtime);
+        let mut adaptive = AdaptiveState::new();
+        let state = controller
+            .observe_semantic_state(None, &mut adaptive)
+            .unwrap();
+
+        assert_eq!(state.channel, "proc::steady");
+        assert_eq!(state.pressure, PressureState::Stable);
+        assert!(state.metrics.verified_core_ok);
+        assert_eq!(state.metrics.verified_core_violation_count, 0);
+    }
+
+    #[test]
+    fn observe_semantic_state_escalates_to_kernel_channel_when_verified_core_is_broken() {
+        let mut snapshot = base_snapshot();
+        snapshot.reserved0 = NativeSystemSnapshotRecord::VERIFIED_CORE_OK_FALSE;
+        snapshot.reserved1 = 4;
+        let runtime = Runtime::new(SnapshotBackend::new(snapshot));
+        let controller = SystemController::new(&runtime);
+        let mut adaptive = AdaptiveState::new();
+        let state = controller
+            .observe_semantic_state(None, &mut adaptive)
+            .unwrap();
+
+        assert_eq!(state.channel, "kernel::verified-core");
+        assert_eq!(state.pressure, PressureState::MixedPressure);
+        assert!(!state.metrics.verified_core_ok);
+        assert_eq!(state.metrics.verified_core_violation_count, 4);
+        assert!(state.observation.anomaly_score >= 35);
+        assert_eq!(state.semantic.class, SemanticClass::Process);
+        assert!(
+            state
+                .semantic
+                .capabilities
+                .contains(&SemanticCapability::Protect)
+        );
+    }
+
+    #[test]
+    fn observe_semantic_state_escalates_scheduler_pressure_when_starved() {
+        let mut snapshot = base_snapshot();
+        snapshot.starved_background = NativeSystemSnapshotRecord::SCHEDULER_POLICY_TRUE;
+        let runtime = Runtime::new(SnapshotBackend::new(snapshot));
+        let controller = SystemController::new(&runtime);
+        let mut adaptive = AdaptiveState::new();
+        let state = controller
+            .observe_semantic_state(None, &mut adaptive)
+            .unwrap();
+
+        assert_eq!(state.channel, "proc::scheduler");
+        assert_eq!(state.pressure, PressureState::HighSchedulerPressure);
+        assert!(state.metrics.scheduler_starved);
+        assert!(state.observation.anomaly_score >= 20);
+    }
+
+    #[test]
+    fn observe_semantic_state_escalates_scheduler_pressure_when_lag_debt_accumulates() {
+        let mut snapshot = base_snapshot();
+        snapshot.lag_debt_interactive = 4;
+        snapshot.lag_debt_background = 3;
+        let runtime = Runtime::new(SnapshotBackend::new(snapshot));
+        let controller = SystemController::new(&runtime);
+        let mut adaptive = AdaptiveState::new();
+        let state = controller
+            .observe_semantic_state(None, &mut adaptive)
+            .unwrap();
+
+        assert_eq!(state.channel, "proc::scheduler");
+        assert_eq!(state.pressure, PressureState::HighSchedulerPressure);
+        assert_eq!(state.metrics.scheduler_lag_debt_total, 7);
+        assert!(state.observation.anomaly_score >= 15);
+    }
+
+    #[test]
+    fn observe_semantic_state_escalates_scheduler_pressure_when_runtime_service_is_imbalanced() {
+        let mut snapshot = base_snapshot();
+        snapshot.runtime_ticks_interactive = 5;
+        snapshot.runtime_ticks_background = 1;
+        snapshot.dispatch_count_interactive = 5;
+        snapshot.dispatch_count_background = 1;
+        let runtime = Runtime::new(SnapshotBackend::new(snapshot));
+        let controller = SystemController::new(&runtime);
+        let mut adaptive = AdaptiveState::new();
+        let state = controller
+            .observe_semantic_state(None, &mut adaptive)
+            .unwrap();
+
+        assert_eq!(state.channel, "proc::scheduler");
+        assert_eq!(state.pressure, PressureState::HighSchedulerPressure);
+        assert_eq!(state.metrics.scheduler_runtime_imbalance, 4);
+        assert!(state.observation.anomaly_score >= 15);
+    }
+
+    #[test]
+    fn observe_semantic_state_escalates_scheduler_pressure_when_cpu_load_is_imbalanced() {
+        let mut snapshot = base_snapshot();
+        snapshot.scheduler_cpu_count = 2;
+        snapshot.scheduler_running_cpu = 0;
+        snapshot.scheduler_cpu_load_imbalance = 3;
+        let runtime = Runtime::new(SnapshotBackend::new(snapshot));
+        let controller = SystemController::new(&runtime);
+        let mut adaptive = AdaptiveState::new();
+        let state = controller
+            .observe_semantic_state(None, &mut adaptive)
+            .unwrap();
+
+        assert_eq!(state.channel, "proc::scheduler");
+        assert_eq!(state.pressure, PressureState::HighSchedulerPressure);
+        assert_eq!(state.metrics.scheduler_cpu_count, 2);
+        assert_eq!(state.metrics.scheduler_running_cpu, Some(0));
+        assert_eq!(state.metrics.scheduler_cpu_load_imbalance, 3);
+        assert!(state.observation.anomaly_score >= 15);
+    }
+
+    #[test]
+    fn observe_topology_reads_real_scheduler_cpu_entries_from_procfs() {
+        let mut snapshot = base_snapshot();
+        snapshot.scheduler_cpu_count = 2;
+        let runtime = Runtime::new(SnapshotBackend::with_scheduler_procfs(
+            snapshot,
+            "cpu-summary:\tcount=2\trunning=1\tload-imbalance=2\trebalance-ops=4\trebalance-migrations=1\tlast-rebalance=1\n\
+cpu\tindex=0\tapic-id=17\tpackage=0\tcore-group=0\tsibling-group=0\tinferred-topology=true\tqueued-load=3\tdispatches=5\truntime-ticks=8\trunning=false\n\
+cpu\tindex=1\tapic-id=18\tpackage=0\tcore-group=0\tsibling-group=1\tinferred-topology=true\tqueued-load=1\tdispatches=9\truntime-ticks=2\trunning=true\n",
+        ));
+        let controller = SystemController::new(&runtime);
+        let topology = controller.observe_topology(None).unwrap();
+
+        assert_eq!(topology.online_cpus, 2);
+        assert_eq!(topology.entries.len(), 2);
+        assert_eq!(topology.entries[0].cpu_index, 0);
+        assert_eq!(topology.entries[0].apic_id, 17);
+        assert_eq!(topology.entries[0].load.run_events, 11);
+        assert_eq!(topology.entries[1].cpu_index, 1);
+        assert_eq!(topology.entries[1].apic_id, 18);
+        assert_eq!(topology.entries[1].load.run_events, 4);
+    }
+
+    #[test]
+    fn observe_topology_falls_back_to_snapshot_when_procfs_is_unavailable() {
+        let mut snapshot = base_snapshot();
+        snapshot.scheduler_cpu_count = 2;
+        snapshot.scheduler_running_cpu = 1;
+        snapshot.current_tick = 120;
+        snapshot.busy_ticks = 75;
+        let previous = base_snapshot();
+        let runtime = Runtime::new(SnapshotBackend::new(snapshot));
+        let controller = SystemController::new(&runtime);
+        let topology = controller.observe_topology(Some(&previous)).unwrap();
+
+        assert_eq!(topology.online_cpus, 2);
+        assert_eq!(topology.entries.len(), 2);
+        assert_eq!(topology.entries[0].load.run_events, 0);
+        assert_eq!(topology.entries[1].load.run_events, 15);
+    }
+
+    #[test]
+    fn event_source_name_reports_bus_for_bus_event_records() {
+        let record = NativeEventRecord {
+            token: 1,
+            events: 0,
+            source_kind: NativeEventSourceKind::Bus as u32,
+            source_arg0: 10,
+            source_arg1: 20,
+            source_arg2: 0,
+            detail0: 2,
+            detail1: 0,
+        };
+        assert_eq!(event_source_name(&record), "bus");
     }
 }

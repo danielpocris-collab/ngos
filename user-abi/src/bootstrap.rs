@@ -1,10 +1,28 @@
+//! Canonical subsystem role:
+//! - subsystem: bootstrap and session ABI parsing
+//! - owner layer: Layer 2
+//! - semantic owner: `user-abi`
+//! - truth path role: canonical parsing and materialization of first-user boot
+//!   contracts
+//!
+//! Canonical contract families handled here:
+//! - boot environment contracts
+//! - session context contracts
+//! - first-user CPU bootstrap contracts
+//!
+//! This module may parse and materialize canonical bootstrap transport into ABI
+//! structures, but it must not invent kernel truth beyond the contract it
+//! receives.
+
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::mem;
 
 use crate::{
-    AT_ENTRY, AT_PAGESZ, AuxvEntry, BOOT_ARG_FLAG, BOOT_ENV_CMDLINE_PREFIX, BOOT_ENV_MARKER,
+    AT_ENTRY, AT_PAGESZ, AuxvEntry, BOOT_ARG_FLAG, BOOT_ENV_CMDLINE_PREFIX,
+    BOOT_ENV_CPU_BOOT_SEED_PREFIX, BOOT_ENV_CPU_HW_PROVIDER_PREFIX, BOOT_ENV_CPU_SAVE_AREA_PREFIX,
+    BOOT_ENV_CPU_XCR0_PREFIX, BOOT_ENV_CPU_XSAVE_PREFIX, BOOT_ENV_MARKER,
     BOOT_ENV_MODULE_LEN_PREFIX, BOOT_ENV_MODULE_PHYS_END_PREFIX, BOOT_ENV_MODULE_PHYS_START_PREFIX,
     BOOT_ENV_MODULE_PREFIX, BOOT_ENV_OUTCOME_POLICY_PREFIX, BOOT_ENV_PROTOCOL_PREFIX,
     BootstrapArgs, CWD_ENV_PREFIX, FRAMEBUFFER_BPP_ENV_PREFIX, FRAMEBUFFER_HEIGHT_ENV_PREFIX,
@@ -38,6 +56,15 @@ pub struct FramebufferContext {
     pub bpp: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BootCpuContext {
+    pub xsave_managed: bool,
+    pub save_area_bytes: u64,
+    pub xcr0_mask: u64,
+    pub boot_seed_marker: u64,
+    pub hardware_provider_available: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootContext {
     pub protocol: String,
@@ -66,6 +93,7 @@ pub struct BootContext {
     pub kernel_phys_start: u64,
     pub kernel_phys_end: u64,
     pub boot_outcome_policy: BootOutcomePolicy,
+    pub cpu: BootCpuContext,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +112,7 @@ pub struct SessionContext {
     pub phnum: u64,
     pub page_size: u64,
     pub entry: u64,
+    pub cpu: BootCpuContext,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +154,41 @@ fn parse_outcome_policy(
         "require-zero-exit" => Ok(BootOutcomePolicy::RequireZeroExit),
         "allow-any-exit" => Ok(BootOutcomePolicy::AllowAnyExit),
         _ => Err(BootContextError::InvalidNumber(prefix)),
+    }
+}
+
+fn parse_bool_flag(
+    bootstrap: &BootstrapArgs<'_>,
+    prefix: &'static str,
+) -> Result<bool, BootContextError> {
+    match required_env(bootstrap, prefix)? {
+        "0" => Ok(false),
+        "1" => Ok(true),
+        _ => Err(BootContextError::InvalidNumber(prefix)),
+    }
+}
+
+fn optional_env_u64(
+    bootstrap: &BootstrapArgs<'_>,
+    prefix: &'static str,
+    default: u64,
+) -> Result<u64, BootContextError> {
+    match bootstrap.env_value(prefix) {
+        Some(value) => parse_u64(value, prefix),
+        None => Ok(default),
+    }
+}
+
+fn optional_bool_flag(
+    bootstrap: &BootstrapArgs<'_>,
+    prefix: &'static str,
+    default: bool,
+) -> Result<bool, BootContextError> {
+    match bootstrap.env_value(prefix) {
+        Some("0") => Ok(false),
+        Some("1") => Ok(true),
+        Some(_) => Err(BootContextError::InvalidNumber(prefix)),
+        None => Ok(default),
     }
 }
 
@@ -196,6 +260,16 @@ pub fn parse_boot_context(bootstrap: &BootstrapArgs<'_>) -> Result<BootContext, 
         kernel_phys_start,
         kernel_phys_end,
         boot_outcome_policy: parse_outcome_policy(bootstrap, BOOT_ENV_OUTCOME_POLICY_PREFIX)?,
+        cpu: BootCpuContext {
+            xsave_managed: parse_bool_flag(bootstrap, BOOT_ENV_CPU_XSAVE_PREFIX)?,
+            save_area_bytes: required_env_u64(bootstrap, BOOT_ENV_CPU_SAVE_AREA_PREFIX)?,
+            xcr0_mask: required_env_u64(bootstrap, BOOT_ENV_CPU_XCR0_PREFIX)?,
+            boot_seed_marker: required_env_u64(bootstrap, BOOT_ENV_CPU_BOOT_SEED_PREFIX)?,
+            hardware_provider_available: parse_bool_flag(
+                bootstrap,
+                BOOT_ENV_CPU_HW_PROVIDER_PREFIX,
+            )?,
+        },
     })
 }
 
@@ -225,6 +299,17 @@ pub fn parse_session_context(
         entry: bootstrap
             .aux_value(AT_ENTRY)
             .ok_or(BootContextError::Missing("AT_ENTRY"))? as u64,
+        cpu: BootCpuContext {
+            xsave_managed: optional_bool_flag(bootstrap, BOOT_ENV_CPU_XSAVE_PREFIX, false)?,
+            save_area_bytes: optional_env_u64(bootstrap, BOOT_ENV_CPU_SAVE_AREA_PREFIX, 0)?,
+            xcr0_mask: optional_env_u64(bootstrap, BOOT_ENV_CPU_XCR0_PREFIX, 0)?,
+            boot_seed_marker: optional_env_u64(bootstrap, BOOT_ENV_CPU_BOOT_SEED_PREFIX, 0)?,
+            hardware_provider_available: optional_bool_flag(
+                bootstrap,
+                BOOT_ENV_CPU_HW_PROVIDER_PREFIX,
+                false,
+            )?,
+        },
     })
 }
 
@@ -407,6 +492,11 @@ mod tests {
             "NGOS_KERNEL_PHYS_START=0x100000",
             "NGOS_KERNEL_PHYS_END=0x101000",
             "NGOS_BOOT_OUTCOME_POLICY=require-zero-exit",
+            "NGOS_BOOT_CPU_XSAVE=1",
+            "NGOS_BOOT_CPU_SAVE_AREA=4096",
+            "NGOS_BOOT_CPU_XCR0=0xe7",
+            "NGOS_BOOT_CPU_BOOT_SEED=0x12345678",
+            "NGOS_BOOT_CPU_HW_PROVIDER=1",
             "NGOS_FRAMEBUFFER_PRESENT=1",
             "NGOS_FRAMEBUFFER_WIDTH=1920",
             "NGOS_FRAMEBUFFER_HEIGHT=1080",
@@ -438,6 +528,11 @@ mod tests {
             context.boot_outcome_policy,
             BootOutcomePolicy::RequireZeroExit
         );
+        assert!(context.cpu.xsave_managed);
+        assert_eq!(context.cpu.save_area_bytes, 4096);
+        assert_eq!(context.cpu.xcr0_mask, 0xe7);
+        assert_eq!(context.cpu.boot_seed_marker, 0x12345678);
+        assert!(context.cpu.hardware_provider_available);
         assert_eq!(context.framebuffer.unwrap().width, 1920);
     }
 
@@ -468,6 +563,11 @@ mod tests {
             "NGOS_KERNEL_PHYS_START=0x100000",
             "NGOS_KERNEL_PHYS_END=0x101000",
             "NGOS_BOOT_OUTCOME_POLICY=require-zero-exit",
+            "NGOS_BOOT_CPU_XSAVE=0",
+            "NGOS_BOOT_CPU_SAVE_AREA=0",
+            "NGOS_BOOT_CPU_XCR0=0x0",
+            "NGOS_BOOT_CPU_BOOT_SEED=0x0",
+            "NGOS_BOOT_CPU_HW_PROVIDER=0",
             "NGOS_FRAMEBUFFER_PRESENT=1",
             "NGOS_FRAMEBUFFER_WIDTH=1920",
             "NGOS_FRAMEBUFFER_HEIGHT=1080",
@@ -511,6 +611,11 @@ mod tests {
             "NGOS_PHDR=0x40",
             "NGOS_PHENT=56",
             "NGOS_PHNUM=2",
+            "NGOS_BOOT_CPU_XSAVE=1",
+            "NGOS_BOOT_CPU_SAVE_AREA=4096",
+            "NGOS_BOOT_CPU_XCR0=0xe7",
+            "NGOS_BOOT_CPU_BOOT_SEED=0x12345678",
+            "NGOS_BOOT_CPU_HW_PROVIDER=1",
         ];
         let auxv = [
             AuxvEntry {
@@ -531,5 +636,49 @@ mod tests {
         assert_eq!(context.image_path, "/bin/ngos-userland-native");
         assert_eq!(context.page_size, 4096);
         assert_eq!(context.entry, 0x401000);
+        assert!(context.cpu.xsave_managed);
+        assert_eq!(context.cpu.save_area_bytes, 4096);
+        assert_eq!(context.cpu.xcr0_mask, 0xe7);
+        assert_eq!(context.cpu.boot_seed_marker, 0x12345678);
+        assert!(context.cpu.hardware_provider_available);
+    }
+
+    #[test]
+    fn parse_session_context_allows_missing_boot_cpu_contract() {
+        let argv = ["ngos-userland-native"];
+        let envp = [
+            SESSION_ENV_MARKER,
+            "NGOS_SESSION_PROTOCOL=kernel-launch",
+            "NGOS_SESSION_OUTCOME_POLICY=require-zero-exit",
+            "NGOS_PROCESS_NAME=ngos-userland-native",
+            "NGOS_IMAGE_PATH=/bin/ngos-userland-native",
+            "NGOS_CWD=/",
+            "NGOS_ROOT_MOUNT_PATH=/",
+            "NGOS_ROOT_MOUNT_NAME=rootfs",
+            "NGOS_IMAGE_BASE=0x400000",
+            "NGOS_STACK_TOP=0x7fffffff0000",
+            "NGOS_PHDR=0x40",
+            "NGOS_PHENT=56",
+            "NGOS_PHNUM=2",
+        ];
+        let auxv = [
+            AuxvEntry {
+                key: AT_PAGESZ,
+                value: 4096,
+            },
+            AuxvEntry {
+                key: AT_ENTRY,
+                value: 0x401000,
+            },
+        ];
+        let bootstrap = BootstrapArgs::new(&argv, &envp, &auxv);
+
+        let context = parse_session_context(&bootstrap).unwrap();
+        assert_eq!(context.protocol, "kernel-launch");
+        assert!(!context.cpu.xsave_managed);
+        assert_eq!(context.cpu.save_area_bytes, 0);
+        assert_eq!(context.cpu.xcr0_mask, 0);
+        assert_eq!(context.cpu.boot_seed_marker, 0);
+        assert!(!context.cpu.hardware_provider_available);
     }
 }

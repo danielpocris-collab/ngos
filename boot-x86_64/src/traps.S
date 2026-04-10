@@ -65,21 +65,37 @@ __ngos_x86_64_isr\vector:
 
 .equ SYSCALL_RESULT_RAW, 56
 .equ SYSCALL_RESULT_DISPOSITION, 64
+.equ SYSCALL_SWITCH_RIP, 72
+.equ SYSCALL_SWITCH_RSP, 80
+.equ SYSCALL_SWITCH_RFLAGS, 88
+.equ SYSCALL_SWITCH_R15, 96
+.equ SYSCALL_SWITCH_R14, 104
+.equ SYSCALL_SWITCH_R13, 112
+.equ SYSCALL_SWITCH_R12, 120
+.equ SYSCALL_SWITCH_RBP, 128
+.equ SYSCALL_SWITCH_RBX, 136
+.equ SYSCALL_SWITCH_R10, 144
+.equ SYSCALL_SWITCH_R9, 152
+.equ SYSCALL_SWITCH_R8, 160
+.equ SYSCALL_SWITCH_RDI, 168
+.equ SYSCALL_SWITCH_RSI, 176
+.equ SYSCALL_SWITCH_RDX, 184
+.equ SYSCALL_SWITCH_RAX, 192
 
-.equ SAVE_R15, 72
-.equ SAVE_R14, 80
-.equ SAVE_R13, 88
-.equ SAVE_R12, 96
-.equ SAVE_RBP, 104
-.equ SAVE_RBX, 112
-.equ SAVE_R10, 120
-.equ SAVE_R9, 128
-.equ SAVE_R8, 136
-.equ SAVE_RDI, 144
-.equ SAVE_RSI, 152
-.equ SAVE_RDX, 160
-.equ SAVE_RAX, 168
-.equ SYSCALL_STACK_FRAME_SIZE, 176
+.equ SAVE_R15, 200
+.equ SAVE_R14, 208
+.equ SAVE_R13, 216
+.equ SAVE_R12, 224
+.equ SAVE_RBP, 232
+.equ SAVE_RBX, 240
+.equ SAVE_R10, 248
+.equ SAVE_R9, 256
+.equ SAVE_R8, 264
+.equ SAVE_RDI, 272
+.equ SAVE_RSI, 280
+.equ SAVE_RDX, 288
+.equ SAVE_RAX, 296
+.equ SYSCALL_STACK_FRAME_SIZE, 304
 
 .extern __ngos_x86_64_syscall_stack_top
 .extern __ngos_x86_64_saved_user_rsp
@@ -151,8 +167,12 @@ __ngos_x86_64_syscall_entry:
     call x86_64_syscall_dispatch
 
     cmp qword ptr [rsp + SYSCALL_RESULT_DISPOSITION], 0
-    jne __ngos_x86_64_syscall_halt
+    je __ngos_x86_64_syscall_return
+    cmp qword ptr [rsp + SYSCALL_RESULT_DISPOSITION], 2
+    je __ngos_x86_64_syscall_switch
+    jmp __ngos_x86_64_syscall_halt
 
+__ngos_x86_64_syscall_return:
     mov r15, qword ptr [rsp + SAVE_R15]
     mov r14, qword ptr [rsp + SAVE_R14]
     mov r13, qword ptr [rsp + SAVE_R13]
@@ -169,6 +189,25 @@ __ngos_x86_64_syscall_entry:
     mov rcx, qword ptr [rip + __ngos_x86_64_saved_user_rip]
     mov r11, qword ptr [rip + __ngos_x86_64_saved_user_rflags]
     mov rsp, qword ptr [rip + __ngos_x86_64_saved_user_rsp]
+    sysretq
+
+__ngos_x86_64_syscall_switch:
+    mov r15, qword ptr [rsp + SYSCALL_SWITCH_R15]
+    mov r14, qword ptr [rsp + SYSCALL_SWITCH_R14]
+    mov r13, qword ptr [rsp + SYSCALL_SWITCH_R13]
+    mov r12, qword ptr [rsp + SYSCALL_SWITCH_R12]
+    mov rbp, qword ptr [rsp + SYSCALL_SWITCH_RBP]
+    mov rbx, qword ptr [rsp + SYSCALL_SWITCH_RBX]
+    mov r10, qword ptr [rsp + SYSCALL_SWITCH_R10]
+    mov r9, qword ptr [rsp + SYSCALL_SWITCH_R9]
+    mov r8, qword ptr [rsp + SYSCALL_SWITCH_R8]
+    mov rdi, qword ptr [rsp + SYSCALL_SWITCH_RDI]
+    mov rsi, qword ptr [rsp + SYSCALL_SWITCH_RSI]
+    mov rdx, qword ptr [rsp + SYSCALL_SWITCH_RDX]
+    mov rax, qword ptr [rsp + SYSCALL_SWITCH_RAX]
+    mov rcx, qword ptr [rsp + SYSCALL_SWITCH_RIP]
+    mov r11, qword ptr [rsp + SYSCALL_SWITCH_RFLAGS]
+    mov rsp, qword ptr [rsp + SYSCALL_SWITCH_RSP]
     sysretq
 
 __ngos_x86_64_syscall_halt:

@@ -1,6 +1,21 @@
 //! NGOS Browser Layout Engine
 //!
 //! Block, inline, flexbox, grid layout - Proprietary
+//!
+//! Canonical subsystem role:
+//! - subsystem: browser layout support
+//! - owner layer: application support layer
+//! - semantic owner: `browser-layout`
+//! - truth path role: browser-facing layout computation support for browser UI
+//!   presentation flows
+//!
+//! Canonical contract families defined here:
+//! - browser layout contracts
+//! - browser box/tree geometry contracts
+//! - browser layout computation support contracts
+//!
+//! This crate may define browser layout support behavior, but it must not
+//! redefine kernel, runtime, or product-level OS truth.
 
 pub use browser_core::{BrowserError, BrowserResult};
 pub use browser_css::{ComputedStyles, Stylesheet};

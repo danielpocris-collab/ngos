@@ -718,6 +718,1012 @@ fn runtime_inspect_system_exports_resource_agent_decisions() {
 }
 
 #[test]
+fn procfs_system_resources_renders_state_and_recovery_flow() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process("owner", None, SchedulerClass::Interactive)
+        .unwrap();
+    let domain = runtime.create_domain(owner, None, "display").unwrap();
+    let resource = runtime
+        .create_resource(owner, domain, ResourceKind::Device, "gpu0")
+        .unwrap();
+    let primary = runtime
+        .create_contract(owner, domain, resource, ContractKind::Display, "scanout")
+        .unwrap();
+    let mirror = runtime
+        .create_contract(owner, domain, resource, ContractKind::Display, "mirror")
+        .unwrap();
+
+    let system_before =
+        String::from_utf8(runtime.read_procfs_path("/proc/system/resources").unwrap()).unwrap();
+    assert!(system_before.contains("resources:\t1"));
+    assert!(system_before.contains("resource\tid="));
+    assert!(system_before.contains("holder=-"));
+    assert!(system_before.contains("waiting=0"));
+
+    runtime.claim_resource_via_contract(primary).unwrap();
+    runtime.claim_resource_via_contract(mirror).unwrap();
+
+    let queued =
+        String::from_utf8(runtime.read_procfs_path("/proc/system/resources").unwrap()).unwrap();
+    assert!(queued.contains("queued:\t1"));
+    assert!(queued.contains(&format!("holder={}", primary.raw())));
+    assert!(queued.contains(&format!("waiters=[{}]", mirror.raw())));
+    assert!(queued.contains("decision\ttick="));
+
+    runtime
+        .release_claimed_resource_via_contract(primary)
+        .unwrap();
+
+    let recovered =
+        String::from_utf8(runtime.read_procfs_path("/proc/system/resources").unwrap()).unwrap();
+    assert!(recovered.contains(&format!("holder={}", mirror.raw())));
+    assert!(recovered.contains("handoffs=1"));
+    assert!(recovered.contains("resource-decisions:"));
+}
+
+#[test]
+fn observe_contract_gates_system_resources_procfs_reads() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let target = runtime
+        .spawn_process("target", None, SchedulerClass::Interactive)
+        .unwrap();
+    let observer = runtime
+        .spawn_process("observer", None, SchedulerClass::Interactive)
+        .unwrap();
+
+    let denied = runtime
+        .read_procfs_path_for(observer, "/proc/system/resources")
+        .unwrap_err();
+    assert_eq!(
+        denied,
+        RuntimeError::NativeModel(NativeModelError::ProcessContractMissing {
+            kind: ContractKind::Observe
+        })
+    );
+
+    let denied = runtime
+        .read_procfs_path_for(observer, &format!("/proc/{}/resources", target.raw()))
+        .unwrap_err();
+    assert_eq!(
+        denied,
+        RuntimeError::NativeModel(NativeModelError::ProcessContractMissing {
+            kind: ContractKind::Observe
+        })
+    );
+
+    let domain = runtime.create_domain(observer, None, "obs").unwrap();
+    let resource = runtime
+        .create_resource(observer, domain, ResourceKind::Namespace, "inspect")
+        .unwrap();
+    runtime
+        .set_resource_contract_policy(resource, ResourceContractPolicy::Observe)
+        .unwrap();
+    let contract = runtime
+        .create_contract(observer, domain, resource, ContractKind::Observe, "observe")
+        .unwrap();
+    runtime.bind_process_contract(observer, contract).unwrap();
+
+    let system = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, "/proc/system/resources")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(system.contains("resources:"));
+    assert!(system.contains("resource-decisions:"));
+
+    let target_view = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, &format!("/proc/{}/resources", target.raw()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(target_view.contains(&format!("pid:\t{}", target.raw())));
+}
+
+#[test]
+fn runtime_bus_routes_channel_messages_and_reports_procfs_state() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process("owner", None, SchedulerClass::Interactive)
+        .unwrap();
+    let observer = runtime
+        .spawn_process("observer", None, SchedulerClass::Interactive)
+        .unwrap();
+
+    let domain = runtime.create_domain(owner, None, "bus").unwrap();
+    let resource = runtime
+        .create_resource(owner, domain, ResourceKind::Channel, "render-bus")
+        .unwrap();
+    runtime
+        .set_resource_contract_policy(resource, ResourceContractPolicy::Io)
+        .unwrap();
+    let bus_contract = runtime
+        .create_contract(owner, domain, resource, ContractKind::Io, "render-bus-io")
+        .unwrap();
+    runtime.bind_process_contract(owner, bus_contract).unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            owner.handle(),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "ipc-root",
+        )
+        .unwrap();
+    runtime
+        .create_vfs_node("/ipc", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/ipc/render", ObjectKind::Channel, root)
+        .unwrap();
+
+    let peer = runtime.create_bus_peer(owner, domain, "renderer").unwrap();
+    let endpoint = runtime
+        .create_bus_channel_endpoint(domain, resource, "/ipc/render")
+        .unwrap();
+    runtime.attach_bus_peer(peer, endpoint).unwrap();
+    assert_eq!(
+        runtime.bus_publish(peer, endpoint, b"hello-bus").unwrap(),
+        9
+    );
+    assert_eq!(runtime.bus_receive(peer, endpoint).unwrap(), b"hello-bus");
+
+    let observe_domain = runtime.create_domain(observer, None, "obs").unwrap();
+    let observe_resource = runtime
+        .create_resource(
+            observer,
+            observe_domain,
+            ResourceKind::Namespace,
+            "inspect-bus",
+        )
+        .unwrap();
+    runtime
+        .set_resource_contract_policy(observe_resource, ResourceContractPolicy::Observe)
+        .unwrap();
+    let observe_contract = runtime
+        .create_contract(
+            observer,
+            observe_domain,
+            observe_resource,
+            ContractKind::Observe,
+            "observe-bus",
+        )
+        .unwrap();
+    runtime
+        .bind_process_contract(observer, observe_contract)
+        .unwrap();
+
+    let procfs = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, "/proc/system/bus")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(procfs.contains("bus-peers:\t1"));
+    assert!(procfs.contains("bus-endpoints:\t1"));
+    assert!(procfs.contains("peer\tid="));
+    assert!(procfs.contains("endpoint\tid="));
+    assert!(procfs.contains("path=/ipc/render"));
+    assert!(procfs.contains("contract-policy=io"));
+    assert!(procfs.contains("publishes=1"));
+    assert!(procfs.contains("receives=1"));
+}
+
+#[test]
+fn observe_contract_gates_bus_procfs_and_bus_rejects_unattached_peers() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process("owner", None, SchedulerClass::Interactive)
+        .unwrap();
+    let observer = runtime
+        .spawn_process("observer", None, SchedulerClass::Interactive)
+        .unwrap();
+    let domain = runtime.create_domain(owner, None, "bus").unwrap();
+    let resource = runtime
+        .create_resource(owner, domain, ResourceKind::Channel, "render-bus")
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            owner.handle(),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "ipc-root",
+        )
+        .unwrap();
+    runtime
+        .create_vfs_node("/ipc", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/ipc/render", ObjectKind::Channel, root)
+        .unwrap();
+    let peer = runtime.create_bus_peer(owner, domain, "renderer").unwrap();
+    let endpoint = runtime
+        .create_bus_channel_endpoint(domain, resource, "/ipc/render")
+        .unwrap();
+
+    let denied = runtime
+        .read_procfs_path_for(observer, "/proc/system/bus")
+        .unwrap_err();
+    assert_eq!(
+        denied,
+        RuntimeError::NativeModel(NativeModelError::ProcessContractMissing {
+            kind: ContractKind::Observe
+        })
+    );
+
+    let publish_denied = runtime.bus_publish(peer, endpoint, b"blocked").unwrap_err();
+    assert_eq!(
+        publish_denied,
+        RuntimeError::NativeModel(NativeModelError::BusPeerNotAttached { peer, endpoint })
+    );
+}
+
+#[test]
+fn runtime_bus_detach_is_reversible_and_restores_refusal_state() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process("owner", None, SchedulerClass::Interactive)
+        .unwrap();
+    let domain = runtime.create_domain(owner, None, "bus").unwrap();
+    let resource = runtime
+        .create_resource(owner, domain, ResourceKind::Channel, "render-bus")
+        .unwrap();
+    runtime
+        .set_resource_contract_policy(resource, ResourceContractPolicy::Io)
+        .unwrap();
+    let bus_contract = runtime
+        .create_contract(owner, domain, resource, ContractKind::Io, "render-bus-io")
+        .unwrap();
+    runtime.bind_process_contract(owner, bus_contract).unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            owner.handle(),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "ipc-root",
+        )
+        .unwrap();
+    runtime
+        .create_vfs_node("/ipc", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/ipc/render", ObjectKind::Channel, root)
+        .unwrap();
+    let peer = runtime.create_bus_peer(owner, domain, "renderer").unwrap();
+    let endpoint = runtime
+        .create_bus_channel_endpoint(domain, resource, "/ipc/render")
+        .unwrap();
+
+    runtime.attach_bus_peer(peer, endpoint).unwrap();
+    runtime.bus_publish(peer, endpoint, b"one").unwrap();
+    runtime.detach_bus_peer(peer, endpoint).unwrap();
+
+    let denied = runtime.bus_publish(peer, endpoint, b"two").unwrap_err();
+    assert_eq!(
+        denied,
+        RuntimeError::NativeModel(NativeModelError::BusPeerNotAttached { peer, endpoint })
+    );
+
+    runtime.attach_bus_peer(peer, endpoint).unwrap();
+    assert_eq!(runtime.bus_receive(peer, endpoint).unwrap(), b"one");
+}
+
+#[test]
+fn runtime_bus_io_contract_policy_gates_attach_publish_and_recovers_after_binding() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process("owner", None, SchedulerClass::Interactive)
+        .unwrap();
+    let client = runtime
+        .spawn_process("client", None, SchedulerClass::Interactive)
+        .unwrap();
+    let domain = runtime.create_domain(owner, None, "bus").unwrap();
+    let resource = runtime
+        .create_resource(owner, domain, ResourceKind::Channel, "render-bus")
+        .unwrap();
+    runtime
+        .set_resource_contract_policy(resource, ResourceContractPolicy::Io)
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            owner.handle(),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "ipc-root",
+        )
+        .unwrap();
+    runtime
+        .create_vfs_node("/ipc", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/ipc/policy", ObjectKind::Channel, root)
+        .unwrap();
+    let peer = runtime.create_bus_peer(client, domain, "renderer").unwrap();
+    let endpoint = runtime
+        .create_bus_channel_endpoint(domain, resource, "/ipc/policy")
+        .unwrap();
+
+    assert_eq!(
+        runtime.attach_bus_peer(peer, endpoint),
+        Err(RuntimeError::NativeModel(
+            NativeModelError::ProcessContractMissing {
+                kind: ContractKind::Io
+            }
+        ))
+    );
+
+    let foreign_resource = runtime
+        .create_resource(owner, domain, ResourceKind::Channel, "wrong-bus")
+        .unwrap();
+    runtime
+        .set_resource_contract_policy(foreign_resource, ResourceContractPolicy::Io)
+        .unwrap();
+    let foreign_contract = runtime
+        .create_contract(
+            client,
+            domain,
+            foreign_resource,
+            ContractKind::Io,
+            "wrong-io",
+        )
+        .unwrap();
+    runtime
+        .bind_process_contract(client, foreign_contract)
+        .unwrap();
+    assert_eq!(
+        runtime.attach_bus_peer(peer, endpoint),
+        Err(RuntimeError::NativeModel(
+            NativeModelError::ResourceBindingMismatch
+        ))
+    );
+
+    let bus_contract = runtime
+        .create_contract(client, domain, resource, ContractKind::Io, "render-bus-io")
+        .unwrap();
+    runtime.bind_process_contract(client, bus_contract).unwrap();
+    runtime.attach_bus_peer(peer, endpoint).unwrap();
+    assert_eq!(
+        runtime.bus_publish(peer, endpoint, b"policy-ok").unwrap(),
+        9
+    );
+    assert_eq!(runtime.bus_receive(peer, endpoint).unwrap(), b"policy-ok");
+}
+
+#[test]
+fn runtime_bus_endpoint_capability_delegates_and_revocation_restores_denial() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process("owner", None, SchedulerClass::Interactive)
+        .unwrap();
+    let delegate = runtime
+        .spawn_process("delegate", None, SchedulerClass::Interactive)
+        .unwrap();
+    let observer = runtime
+        .spawn_process("observer", None, SchedulerClass::Interactive)
+        .unwrap();
+    let domain = runtime.create_domain(owner, None, "bus").unwrap();
+    let resource = runtime
+        .create_resource(owner, domain, ResourceKind::Channel, "render-bus")
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            owner.handle(),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "ipc-root",
+        )
+        .unwrap();
+    runtime
+        .create_vfs_node("/ipc", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/ipc/delegated", ObjectKind::Channel, root)
+        .unwrap();
+    let peer = runtime
+        .create_bus_peer(delegate, domain, "delegate-peer")
+        .unwrap();
+    let endpoint = runtime
+        .create_bus_channel_endpoint(domain, resource, "/ipc/delegated")
+        .unwrap();
+
+    assert_eq!(
+        runtime.attach_bus_peer(peer, endpoint),
+        Err(RuntimeError::NativeModel(
+            NativeModelError::BusAccessDenied {
+                owner: delegate,
+                endpoint,
+                required: CapabilityRights::ADMIN,
+            }
+        ))
+    );
+
+    let endpoint_cap = runtime
+        .grant_capability(
+            owner,
+            endpoint.handle(),
+            CapabilityRights::READ
+                | CapabilityRights::WRITE
+                | CapabilityRights::ADMIN
+                | CapabilityRights::DUPLICATE,
+            "bus-endpoint-root",
+        )
+        .unwrap();
+    let delegated_io = runtime
+        .duplicate_capability(
+            endpoint_cap,
+            delegate,
+            CapabilityRights::READ | CapabilityRights::WRITE,
+            "bus-endpoint-delegate-io",
+        )
+        .unwrap();
+    assert_eq!(
+        runtime.attach_bus_peer(peer, endpoint),
+        Err(RuntimeError::NativeModel(
+            NativeModelError::BusAccessDenied {
+                owner: delegate,
+                endpoint,
+                required: CapabilityRights::ADMIN,
+            }
+        ))
+    );
+    let delegated = runtime
+        .duplicate_capability(
+            endpoint_cap,
+            delegate,
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::ADMIN,
+            "bus-endpoint-delegate-admin",
+        )
+        .unwrap();
+
+    runtime.attach_bus_peer(peer, endpoint).unwrap();
+    assert_eq!(
+        runtime.bus_publish(peer, endpoint, b"delegated").unwrap(),
+        9
+    );
+    assert_eq!(runtime.bus_receive(peer, endpoint).unwrap(), b"delegated");
+    let delegated_cap_count_before = runtime
+        .capabilities
+        .objects
+        .iter()
+        .filter(|(_, capability)| capability.target() == endpoint.handle())
+        .count();
+    assert!(delegated_cap_count_before >= 2);
+
+    let observe_domain = runtime.create_domain(observer, None, "obs").unwrap();
+    let observe_resource = runtime
+        .create_resource(
+            observer,
+            observe_domain,
+            ResourceKind::Namespace,
+            "inspect-bus",
+        )
+        .unwrap();
+    runtime
+        .set_resource_contract_policy(observe_resource, ResourceContractPolicy::Observe)
+        .unwrap();
+    let observe_contract = runtime
+        .create_contract(
+            observer,
+            observe_domain,
+            observe_resource,
+            ContractKind::Observe,
+            "observe-bus",
+        )
+        .unwrap();
+    runtime
+        .bind_process_contract(observer, observe_contract)
+        .unwrap();
+    let procfs = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, "/proc/system/bus")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(procfs.contains("path=/ipc/delegated"));
+    assert!(
+        procfs.contains("delegated-caps="),
+        "procfs bus view did not expose delegation count: {procfs}"
+    );
+
+    runtime.revoke_capability(delegated_io).unwrap();
+    runtime.revoke_capability(delegated).unwrap();
+    let delegated_cap_count_after = runtime
+        .capabilities
+        .objects
+        .iter()
+        .filter(|(_, capability)| capability.target() == endpoint.handle())
+        .count();
+    assert_eq!(delegated_cap_count_after + 2, delegated_cap_count_before);
+    assert_eq!(
+        runtime.bus_publish(peer, endpoint, b"blocked"),
+        Err(RuntimeError::NativeModel(
+            NativeModelError::BusAccessDenied {
+                owner: delegate,
+                endpoint,
+                required: CapabilityRights::WRITE,
+            }
+        ))
+    );
+    let procfs = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, "/proc/system/bus")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        procfs.contains("delegated-caps="),
+        "procfs bus view did not expose delegation count after revoke: {procfs}"
+    );
+}
+
+#[test]
+fn runtime_bus_requires_admin_rights_for_attach_and_detach_but_allows_io_after_attach() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process("owner", None, SchedulerClass::Interactive)
+        .unwrap();
+    let delegate = runtime
+        .spawn_process("delegate", None, SchedulerClass::Interactive)
+        .unwrap();
+    let domain = runtime.create_domain(owner, None, "bus").unwrap();
+    let resource = runtime
+        .create_resource(owner, domain, ResourceKind::Channel, "render-bus")
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            owner.handle(),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "ipc-root",
+        )
+        .unwrap();
+    runtime
+        .create_vfs_node("/ipc", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/ipc/admin-rights", ObjectKind::Channel, root)
+        .unwrap();
+    let peer = runtime
+        .create_bus_peer(delegate, domain, "delegate-peer")
+        .unwrap();
+    let endpoint = runtime
+        .create_bus_channel_endpoint(domain, resource, "/ipc/admin-rights")
+        .unwrap();
+
+    let endpoint_cap = runtime
+        .grant_capability(
+            owner,
+            endpoint.handle(),
+            CapabilityRights::READ
+                | CapabilityRights::WRITE
+                | CapabilityRights::ADMIN
+                | CapabilityRights::DUPLICATE,
+            "bus-endpoint-root",
+        )
+        .unwrap();
+    let io_only = runtime
+        .duplicate_capability(
+            endpoint_cap,
+            delegate,
+            CapabilityRights::READ | CapabilityRights::WRITE,
+            "bus-endpoint-io-only",
+        )
+        .unwrap();
+
+    assert_eq!(
+        runtime.attach_bus_peer(peer, endpoint),
+        Err(RuntimeError::NativeModel(
+            NativeModelError::BusAccessDenied {
+                owner: delegate,
+                endpoint,
+                required: CapabilityRights::ADMIN,
+            }
+        ))
+    );
+
+    runtime
+        .revoke_capability(io_only)
+        .expect("io-only capability should revoke cleanly");
+    let admin_cap = runtime
+        .duplicate_capability(
+            endpoint_cap,
+            delegate,
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::ADMIN,
+            "bus-endpoint-admin",
+        )
+        .unwrap();
+
+    runtime.attach_bus_peer(peer, endpoint).unwrap();
+    assert_eq!(runtime.bus_publish(peer, endpoint, b"admin-ok").unwrap(), 8);
+    assert_eq!(runtime.bus_receive(peer, endpoint).unwrap(), b"admin-ok");
+
+    runtime
+        .revoke_capability(admin_cap)
+        .expect("admin capability should revoke cleanly");
+    assert_eq!(
+        runtime.detach_bus_peer(peer, endpoint),
+        Err(RuntimeError::NativeModel(
+            NativeModelError::BusAccessDenied {
+                owner: delegate,
+                endpoint,
+                required: CapabilityRights::ADMIN,
+            }
+        ))
+    );
+
+    let recovery_cap = runtime
+        .duplicate_capability(
+            endpoint_cap,
+            delegate,
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::ADMIN,
+            "bus-endpoint-admin-recovery",
+        )
+        .unwrap();
+    runtime.detach_bus_peer(peer, endpoint).unwrap();
+    assert_eq!(
+        runtime.bus_publish(peer, endpoint, b"blocked"),
+        Err(RuntimeError::NativeModel(
+            NativeModelError::BusPeerNotAttached { peer, endpoint }
+        ))
+    );
+    runtime
+        .revoke_capability(recovery_cap)
+        .expect("recovery capability should revoke cleanly");
+}
+
+#[test]
+fn runtime_bus_queue_capacity_refuses_overflow_and_recovers_after_receive() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process("owner", None, SchedulerClass::Interactive)
+        .unwrap();
+    let observer = runtime
+        .spawn_process("observer", None, SchedulerClass::Interactive)
+        .unwrap();
+    let domain = runtime.create_domain(owner, None, "bus").unwrap();
+    let resource = runtime
+        .create_resource(owner, domain, ResourceKind::Channel, "render-bus")
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            owner.handle(),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "ipc-root",
+        )
+        .unwrap();
+    runtime
+        .create_vfs_node("/ipc", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/ipc/capacity", ObjectKind::Channel, root)
+        .unwrap();
+
+    let peer = runtime.create_bus_peer(owner, domain, "renderer").unwrap();
+    let endpoint = runtime
+        .create_bus_channel_endpoint(domain, resource, "/ipc/capacity")
+        .unwrap();
+    runtime.attach_bus_peer(peer, endpoint).unwrap();
+    let endpoint_info = runtime.bus_endpoint_info(endpoint).unwrap();
+    assert_eq!(endpoint_info.queue_capacity, 64);
+
+    for index in 0..endpoint_info.queue_capacity {
+        let payload = format!("msg-{index}");
+        assert_eq!(
+            runtime
+                .bus_publish(peer, endpoint, payload.as_bytes())
+                .unwrap(),
+            payload.len()
+        );
+    }
+    let filled = runtime.bus_endpoint_info(endpoint).unwrap();
+    assert_eq!(filled.queue_depth, filled.queue_capacity);
+    assert_eq!(filled.peak_queue_depth, filled.queue_capacity);
+    assert_eq!(filled.overflow_count, 0);
+    assert_eq!(
+        runtime.bus_publish(peer, endpoint, b"overflow"),
+        Err(RuntimeError::NativeModel(NativeModelError::BusQueueFull {
+            endpoint,
+            capacity: filled.queue_capacity,
+        }))
+    );
+    let still_filled = runtime.bus_endpoint_info(endpoint).unwrap();
+    assert_eq!(still_filled.queue_depth, still_filled.queue_capacity);
+    assert_eq!(still_filled.peak_queue_depth, still_filled.queue_capacity);
+    assert_eq!(still_filled.overflow_count, 1);
+
+    let first = runtime.bus_receive(peer, endpoint).unwrap();
+    assert_eq!(first, b"msg-0");
+    let drained = runtime.bus_endpoint_info(endpoint).unwrap();
+    assert_eq!(drained.queue_depth + 1, drained.queue_capacity);
+    assert_eq!(
+        runtime.bus_publish(peer, endpoint, b"recovered").unwrap(),
+        9
+    );
+
+    let observe_domain = runtime.create_domain(observer, None, "obs").unwrap();
+    let observe_resource = runtime
+        .create_resource(
+            observer,
+            observe_domain,
+            ResourceKind::Namespace,
+            "inspect-bus",
+        )
+        .unwrap();
+    runtime
+        .set_resource_contract_policy(observe_resource, ResourceContractPolicy::Observe)
+        .unwrap();
+    let observe_contract = runtime
+        .create_contract(
+            observer,
+            observe_domain,
+            observe_resource,
+            ContractKind::Observe,
+            "observe-bus",
+        )
+        .unwrap();
+    runtime
+        .bind_process_contract(observer, observe_contract)
+        .unwrap();
+    let procfs = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, "/proc/system/bus")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(procfs.contains("path=/ipc/capacity"));
+    assert!(procfs.contains("queue-capacity=64"));
+    assert!(procfs.contains("queue-peak=64"));
+    assert!(procfs.contains("overflows=1"));
+}
+
+#[test]
+fn runtime_bus_shared_endpoint_preserves_fifo_and_detach_isolates_one_peer() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process("owner", None, SchedulerClass::Interactive)
+        .unwrap();
+    let observer = runtime
+        .spawn_process("observer", None, SchedulerClass::Interactive)
+        .unwrap();
+    let domain = runtime.create_domain(owner, None, "bus").unwrap();
+    let resource = runtime
+        .create_resource(owner, domain, ResourceKind::Channel, "render-bus")
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            owner.handle(),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "ipc-root",
+        )
+        .unwrap();
+    runtime
+        .create_vfs_node("/ipc", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/ipc/shared", ObjectKind::Channel, root)
+        .unwrap();
+
+    let peer_a = runtime
+        .create_bus_peer(owner, domain, "renderer-a")
+        .unwrap();
+    let peer_b = runtime
+        .create_bus_peer(owner, domain, "renderer-b")
+        .unwrap();
+    let endpoint = runtime
+        .create_bus_channel_endpoint(domain, resource, "/ipc/shared")
+        .unwrap();
+    runtime.attach_bus_peer(peer_a, endpoint).unwrap();
+    runtime.attach_bus_peer(peer_b, endpoint).unwrap();
+
+    assert_eq!(runtime.bus_publish(peer_a, endpoint, b"a-1").unwrap(), 3);
+    assert_eq!(runtime.bus_publish(peer_b, endpoint, b"b-1").unwrap(), 3);
+    assert_eq!(runtime.bus_publish(peer_a, endpoint, b"a-2").unwrap(), 3);
+    assert_eq!(runtime.bus_receive(peer_b, endpoint).unwrap(), b"a-1");
+    assert_eq!(runtime.bus_receive(peer_a, endpoint).unwrap(), b"b-1");
+
+    runtime.detach_bus_peer(peer_a, endpoint).unwrap();
+    assert_eq!(
+        runtime.bus_publish(peer_a, endpoint, b"blocked-a"),
+        Err(RuntimeError::NativeModel(
+            NativeModelError::BusPeerNotAttached {
+                peer: peer_a,
+                endpoint,
+            }
+        ))
+    );
+    assert_eq!(runtime.bus_publish(peer_b, endpoint, b"b-2").unwrap(), 3);
+    assert_eq!(runtime.bus_receive(peer_b, endpoint).unwrap(), b"a-2");
+    assert_eq!(runtime.bus_receive(peer_b, endpoint).unwrap(), b"b-2");
+
+    let endpoint_info = runtime.bus_endpoint_info(endpoint).unwrap();
+    assert_eq!(endpoint_info.attached_peers, vec![peer_b]);
+    assert_eq!(endpoint_info.publish_count, 4);
+    assert_eq!(endpoint_info.receive_count, 4);
+    assert_eq!(endpoint_info.last_peer, Some(peer_b));
+
+    let observe_domain = runtime.create_domain(observer, None, "obs").unwrap();
+    let observe_resource = runtime
+        .create_resource(
+            observer,
+            observe_domain,
+            ResourceKind::Namespace,
+            "inspect-bus",
+        )
+        .unwrap();
+    runtime
+        .set_resource_contract_policy(observe_resource, ResourceContractPolicy::Observe)
+        .unwrap();
+    let observe_contract = runtime
+        .create_contract(
+            observer,
+            observe_domain,
+            observe_resource,
+            ContractKind::Observe,
+            "observe-bus",
+        )
+        .unwrap();
+    runtime
+        .bind_process_contract(observer, observe_contract)
+        .unwrap();
+    let procfs = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, "/proc/system/bus")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(procfs.contains("path=/ipc/shared"));
+    assert!(procfs.contains(&format!("peers=[{}]", peer_b.raw())));
+}
+
+#[test]
+fn runtime_bus_isolates_parallel_endpoints_for_shared_and_distinct_peers() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process("owner", None, SchedulerClass::Interactive)
+        .unwrap();
+    let peer_process = runtime
+        .spawn_process("peer-process", None, SchedulerClass::Interactive)
+        .unwrap();
+    let observer = runtime
+        .spawn_process("observer", None, SchedulerClass::Interactive)
+        .unwrap();
+    let domain = runtime.create_domain(owner, None, "bus").unwrap();
+    let resource_a = runtime
+        .create_resource(owner, domain, ResourceKind::Channel, "render-a")
+        .unwrap();
+    let resource_b = runtime
+        .create_resource(owner, domain, ResourceKind::Channel, "render-b")
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            owner.handle(),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "ipc-root",
+        )
+        .unwrap();
+    runtime
+        .create_vfs_node("/ipc", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/ipc/render-a", ObjectKind::Channel, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/ipc/render-b", ObjectKind::Channel, root)
+        .unwrap();
+
+    let peer_shared = runtime.create_bus_peer(owner, domain, "shared").unwrap();
+    let peer_other = runtime
+        .create_bus_peer(peer_process, domain, "other")
+        .unwrap();
+    let endpoint_a = runtime
+        .create_bus_channel_endpoint(domain, resource_a, "/ipc/render-a")
+        .unwrap();
+    let endpoint_b = runtime
+        .create_bus_channel_endpoint(domain, resource_b, "/ipc/render-b")
+        .unwrap();
+    let endpoint_b_cap = runtime
+        .grant_capability(
+            owner,
+            endpoint_b.handle(),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "render-b-root",
+        )
+        .unwrap();
+    runtime
+        .duplicate_capability(
+            endpoint_b_cap,
+            peer_process,
+            CapabilityRights::READ | CapabilityRights::WRITE,
+            "render-b-delegate",
+        )
+        .unwrap();
+    runtime.attach_bus_peer(peer_shared, endpoint_a).unwrap();
+    runtime.attach_bus_peer(peer_shared, endpoint_b).unwrap();
+    runtime.attach_bus_peer(peer_other, endpoint_b).unwrap();
+
+    assert_eq!(
+        runtime
+            .bus_publish(peer_shared, endpoint_a, b"a-1")
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        runtime
+            .bus_publish(peer_shared, endpoint_b, b"b-1")
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        runtime.bus_publish(peer_other, endpoint_b, b"b-2").unwrap(),
+        3
+    );
+
+    assert_eq!(
+        runtime.bus_receive(peer_shared, endpoint_a).unwrap(),
+        b"a-1"
+    );
+    assert_eq!(runtime.bus_receive(peer_shared, endpoint_a).unwrap(), b"");
+    assert_eq!(runtime.bus_receive(peer_other, endpoint_b).unwrap(), b"b-1");
+    assert_eq!(
+        runtime.bus_receive(peer_shared, endpoint_b).unwrap(),
+        b"b-2"
+    );
+
+    let endpoint_a_info = runtime.bus_endpoint_info(endpoint_a).unwrap();
+    assert_eq!(endpoint_a_info.queue_depth, 0);
+    assert_eq!(endpoint_a_info.publish_count, 1);
+    assert_eq!(endpoint_a_info.receive_count, 2);
+    assert_eq!(endpoint_a_info.last_peer, Some(peer_shared));
+
+    let endpoint_b_info = runtime.bus_endpoint_info(endpoint_b).unwrap();
+    assert_eq!(endpoint_b_info.queue_depth, 0);
+    assert_eq!(endpoint_b_info.publish_count, 2);
+    assert_eq!(endpoint_b_info.receive_count, 2);
+    assert_eq!(
+        endpoint_b_info.attached_peers,
+        vec![peer_shared, peer_other]
+    );
+    assert_eq!(endpoint_b_info.last_peer, Some(peer_shared));
+
+    let observe_domain = runtime.create_domain(observer, None, "obs").unwrap();
+    let observe_resource = runtime
+        .create_resource(
+            observer,
+            observe_domain,
+            ResourceKind::Namespace,
+            "inspect-bus",
+        )
+        .unwrap();
+    runtime
+        .set_resource_contract_policy(observe_resource, ResourceContractPolicy::Observe)
+        .unwrap();
+    let observe_contract = runtime
+        .create_contract(
+            observer,
+            observe_domain,
+            observe_resource,
+            ContractKind::Observe,
+            "observe-bus",
+        )
+        .unwrap();
+    runtime
+        .bind_process_contract(observer, observe_contract)
+        .unwrap();
+    let procfs = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, "/proc/system/bus")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(procfs.contains("path=/ipc/render-a"));
+    assert!(procfs.contains("path=/ipc/render-b"));
+}
+
+#[test]
 fn runtime_claims_resource_with_lifo_policy_and_skips_inactive_waiters() {
     let mut runtime = KernelRuntime::host_runtime_default();
     let owner = runtime
@@ -2482,8 +3488,60 @@ fn observe_contract_gates_cross_process_procfs_reads_and_exposes_policy() {
         .create_contract(observer, domain, resource, ContractKind::Observe, "observe")
         .unwrap();
 
+    let root = runtime
+        .grant_capability(
+            target,
+            ObjectHandle::new(Handle::new(2_601), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "root",
+        )
+        .unwrap();
+    let cap = runtime
+        .grant_capability(
+            target,
+            ObjectHandle::new(Handle::new(2_602), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE,
+            "inspect-cap",
+        )
+        .unwrap();
+    runtime
+        .create_vfs_node("/", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/tmp", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/tmp/observe.txt", ObjectKind::File, cap)
+        .unwrap();
+    let fd = runtime.open_path(target, "/tmp/observe.txt").unwrap();
+
     let denied = runtime
         .read_procfs_path_for(observer, &format!("/proc/{}/status", target.raw()))
+        .unwrap_err();
+    assert_eq!(
+        denied,
+        RuntimeError::NativeModel(NativeModelError::ProcessContractMissing {
+            kind: ContractKind::Observe
+        })
+    );
+    for path in [
+        "stat", "cmdline", "cwd", "environ", "exe", "auxv", "maps", "fd", "caps",
+    ] {
+        let denied = runtime
+            .read_procfs_path_for(observer, &format!("/proc/{}/{}", target.raw(), path))
+            .unwrap_err();
+        assert_eq!(
+            denied,
+            RuntimeError::NativeModel(NativeModelError::ProcessContractMissing {
+                kind: ContractKind::Observe
+            })
+        );
+    }
+    let denied = runtime
+        .read_procfs_path_for(
+            observer,
+            &format!("/proc/{}/fdinfo/{}", target.raw(), fd.raw()),
+        )
         .unwrap_err();
     assert_eq!(
         denied,
@@ -2501,6 +3559,74 @@ fn observe_contract_gates_cross_process_procfs_reads_and_exposes_policy() {
     .unwrap();
     assert!(status.contains("ObserveContract:\t0"));
 
+    let stat = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, &format!("/proc/{}/stat", target.raw()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(stat.contains(&format!("{} ({})", target.raw(), "target")));
+
+    let cmdline = runtime
+        .read_procfs_path_for(observer, &format!("/proc/{}/cmdline", target.raw()))
+        .unwrap();
+    assert!(!cmdline.is_empty());
+
+    let cwd = runtime
+        .read_procfs_path_for(observer, &format!("/proc/{}/cwd", target.raw()))
+        .unwrap();
+    assert!(!cwd.is_empty());
+
+    let _environ = runtime
+        .read_procfs_path_for(observer, &format!("/proc/{}/environ", target.raw()))
+        .unwrap();
+
+    let exe = runtime
+        .read_procfs_path_for(observer, &format!("/proc/{}/exe", target.raw()))
+        .unwrap();
+    assert!(!exe.is_empty());
+
+    let auxv = runtime
+        .read_procfs_path_for(observer, &format!("/proc/{}/auxv", target.raw()))
+        .unwrap();
+    assert!(!auxv.is_empty());
+
+    let maps = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, &format!("/proc/{}/maps", target.raw()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(!maps.is_empty());
+
+    let fd_view = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, &format!("/proc/{}/fd", target.raw()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(fd_view.contains("/tmp/observe.txt"));
+    assert!(fd_view.contains(&format!("{}\t", fd.raw())));
+
+    let fdinfo = String::from_utf8(
+        runtime
+            .read_procfs_path_for(
+                observer,
+                &format!("/proc/{}/fdinfo/{}", target.raw(), fd.raw()),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(fdinfo.contains("path:\t/tmp/observe.txt"));
+
+    let caps = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, &format!("/proc/{}/caps", target.raw()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(caps.contains("inspect-cap"));
+
     let self_status = String::from_utf8(
         runtime
             .read_procfs_path_for(observer, &format!("/proc/{}/status", observer.raw()))
@@ -2508,4 +3634,569 @@ fn observe_contract_gates_cross_process_procfs_reads_and_exposes_policy() {
     )
     .unwrap();
     assert!(self_status.contains(&format!("ObserveContract:\t{}", contract.raw())));
+}
+
+#[test]
+fn procfs_system_scheduler_renders_trace_and_queue_state() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let init = runtime
+        .spawn_process("init", None, SchedulerClass::BestEffort)
+        .unwrap();
+    let ui = runtime
+        .spawn_process("ui", Some(init), SchedulerClass::Interactive)
+        .unwrap();
+    let _ = runtime.tick().unwrap();
+
+    let scheduler =
+        String::from_utf8(runtime.read_procfs_path("/proc/system/scheduler").unwrap()).unwrap();
+    assert!(scheduler.contains("current-tick:"));
+    assert!(scheduler.contains("queued-total:"));
+    assert!(scheduler.contains("queue\tclass=interactive"));
+    assert!(scheduler.contains("policy\tclass=interactive"));
+    assert!(scheduler.contains("urgent="));
+    assert!(scheduler.contains("starved="));
+    assert!(scheduler.contains("starvation-guard="));
+    assert!(scheduler.contains("lag-debt="));
+    assert!(scheduler.contains("dispatches="));
+    assert!(scheduler.contains("runtime-ticks="));
+    assert!(scheduler.contains("fairness-dispatch-total:"));
+    assert!(scheduler.contains("fairness-runtime-total:"));
+    assert!(scheduler.contains("fairness-runtime-imbalance:"));
+    assert!(scheduler.contains("meaning="));
+    assert!(scheduler.contains("tokens="));
+    assert!(scheduler.contains("wait-ticks="));
+    assert!(scheduler.contains("decision\ttick="));
+    assert!(scheduler.contains(&format!("pid={}", ui.raw())));
+}
+
+#[test]
+fn procfs_system_scheduler_renders_urgent_policy_after_wake() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let a = runtime
+        .spawn_process("wake-a", None, SchedulerClass::Interactive)
+        .unwrap();
+    let b = runtime
+        .spawn_process("wake-b", None, SchedulerClass::Interactive)
+        .unwrap();
+    let _ = runtime.tick().unwrap();
+    assert_eq!(runtime.block_running().unwrap(), a);
+    runtime
+        .wake_process(b, SchedulerClass::Interactive)
+        .unwrap_err();
+    runtime
+        .wake_process(a, SchedulerClass::Interactive)
+        .unwrap();
+
+    let scheduler =
+        String::from_utf8(runtime.read_procfs_path("/proc/system/scheduler").unwrap()).unwrap();
+    assert!(scheduler.contains("policy\tclass=interactive\turgent=1"));
+    assert!(scheduler.contains("starved=false"));
+    assert!(scheduler.contains("starvation-guard=8"));
+    assert!(scheduler.contains("lag-debt="));
+    assert!(scheduler.contains("meaning=wake urgent-requeue=true"));
+
+    let snapshot = runtime.snapshot();
+    assert_eq!(snapshot.queued_interactive, 2);
+    assert_eq!(snapshot.queued_urgent_interactive, 1);
+    assert_ne!(snapshot.lag_debt_interactive, 0);
+    assert!(snapshot.dispatch_count_interactive >= 1);
+    assert_eq!(snapshot.runtime_ticks_interactive, 0);
+    assert!(snapshot.scheduler_dispatch_total >= 1);
+    assert_eq!(snapshot.scheduler_runtime_ticks_total, 0);
+    assert!(!snapshot.starved_interactive);
+}
+
+#[test]
+fn procfs_system_scheduler_renders_cpu_placement_and_balancing() {
+    let mut policy = RuntimePolicy::host_runtime_default();
+    policy.scheduler_logical_cpu_count = 2;
+    let mut runtime = KernelRuntime::new(policy);
+    let a = runtime
+        .spawn_process("cpu-a", None, SchedulerClass::BestEffort)
+        .unwrap();
+    let b = runtime
+        .spawn_process("cpu-b", None, SchedulerClass::BestEffort)
+        .unwrap();
+    runtime
+        .scheduler
+        .set_thread_affinity(
+            runtime.processes.get(a).unwrap().main_thread().unwrap(),
+            0b01,
+        )
+        .unwrap();
+    runtime
+        .scheduler
+        .set_thread_affinity(
+            runtime.processes.get(b).unwrap().main_thread().unwrap(),
+            0b10,
+        )
+        .unwrap();
+    let c = runtime
+        .spawn_process("cpu-c", None, SchedulerClass::BestEffort)
+        .unwrap();
+    let d = runtime
+        .spawn_process("cpu-d", None, SchedulerClass::BestEffort)
+        .unwrap();
+    runtime
+        .scheduler
+        .set_thread_affinity(
+            runtime.processes.get(c).unwrap().main_thread().unwrap(),
+            0b01,
+        )
+        .unwrap();
+    runtime
+        .scheduler
+        .set_thread_affinity(
+            runtime.processes.get(d).unwrap().main_thread().unwrap(),
+            0b10,
+        )
+        .unwrap();
+    let _ = runtime.tick().unwrap();
+
+    let scheduler =
+        String::from_utf8(runtime.read_procfs_path("/proc/system/scheduler").unwrap()).unwrap();
+    assert!(scheduler.contains("cpu-summary:\tcount=2"));
+    assert!(scheduler.contains("rebalance-ops="));
+    assert!(scheduler.contains("rebalance-migrations="));
+    assert!(scheduler.contains("last-rebalance="));
+    assert!(scheduler.contains(
+        "cpu\tindex=0\tapic-id=0\tpackage=0\tcore-group=0\tsibling-group=0\tinferred-topology=true\tqueued-load="
+    ));
+    assert!(scheduler.contains(
+        "cpu\tindex=1\tapic-id=1\tpackage=0\tcore-group=0\tsibling-group=1\tinferred-topology=true\tqueued-load="
+    ));
+    assert!(scheduler.contains("cpu-queue\tindex=0\tclass=best-effort"));
+    assert!(scheduler.contains("cpu-queue\tindex=1\tclass=best-effort"));
+    assert!(scheduler.contains("tids=["));
+
+    let snapshot = runtime.snapshot();
+    assert_eq!(snapshot.scheduler_cpu_count, 2);
+    assert!(snapshot.scheduler_cpu_load_imbalance <= 1);
+}
+
+#[test]
+fn procfs_system_scheduler_renders_runtime_policy_topology_handoff() {
+    let mut policy = RuntimePolicy::host_runtime_default();
+    policy.apply_scheduler_cpu_topology(vec![
+        SchedulerCpuTopologyEntry {
+            apic_id: 17,
+            package_id: 2,
+            core_group: 8,
+            sibling_group: 0,
+            inferred: false,
+        },
+        SchedulerCpuTopologyEntry {
+            apic_id: 29,
+            package_id: 2,
+            core_group: 8,
+            sibling_group: 1,
+            inferred: false,
+        },
+    ]);
+    let mut runtime = KernelRuntime::new(policy);
+    let _ = runtime
+        .spawn_process("topology-a", None, SchedulerClass::BestEffort)
+        .unwrap();
+    let _ = runtime.tick().unwrap();
+
+    let scheduler =
+        String::from_utf8(runtime.read_procfs_path("/proc/system/scheduler").unwrap()).unwrap();
+    assert!(scheduler.contains(
+        "cpu\tindex=0\tapic-id=17\tpackage=2\tcore-group=8\tsibling-group=0\tinferred-topology=false\tqueued-load="
+    ));
+    assert!(scheduler.contains(
+        "cpu\tindex=1\tapic-id=29\tpackage=2\tcore-group=8\tsibling-group=1\tinferred-topology=false\tqueued-load="
+    ));
+}
+
+#[test]
+fn procfs_system_schedulerepisodes_renders_causal_scheduler_flow() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let a = runtime
+        .spawn_process("episode-a", None, SchedulerClass::BestEffort)
+        .unwrap();
+    let b = runtime
+        .spawn_process("episode-b", None, SchedulerClass::Interactive)
+        .unwrap();
+    let _ = runtime.tick().unwrap();
+    runtime
+        .wake_process(b, SchedulerClass::Interactive)
+        .unwrap_err();
+    runtime
+        .renice_process(a, SchedulerClass::LatencyCritical, 2)
+        .unwrap();
+    runtime.set_process_affinity(a, 0b1).unwrap();
+    let blocked = runtime.block_running().unwrap();
+    runtime
+        .wake_process(blocked, SchedulerClass::Interactive)
+        .unwrap();
+    let _ = runtime.tick().unwrap();
+
+    let episodes = String::from_utf8(
+        runtime
+            .read_procfs_path("/proc/system/schedulerepisodes")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(episodes.contains("episodes:\t"));
+    assert!(episodes.contains("episode\tkind=block"));
+    assert!(episodes.contains("causal=running-blocked"));
+    assert!(episodes.contains("episode\tkind=wake"));
+    assert!(episodes.contains("causal=urgent-requeue"));
+    assert!(episodes.contains("episode\tkind=rebind"));
+    assert!(
+        episodes.contains("causal=running-updated") || episodes.contains("causal=queued-moved")
+    );
+    assert!(episodes.contains("episode\tkind=affinity"));
+    assert!(episodes.contains("causal=cpu-mask-updated"));
+    assert!(episodes.contains("episode\tkind=dispatch"));
+    assert!(episodes.contains("causal=selected-next-runnable"));
+}
+
+#[test]
+fn observe_contract_gates_system_scheduler_procfs_reads() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let target = runtime
+        .spawn_process("target", None, SchedulerClass::Interactive)
+        .unwrap();
+    let observer = runtime
+        .spawn_process("observer", None, SchedulerClass::Interactive)
+        .unwrap();
+    let denied = runtime
+        .read_procfs_path_for(observer, "/proc/system/scheduler")
+        .unwrap_err();
+    assert_eq!(
+        denied,
+        RuntimeError::NativeModel(NativeModelError::ProcessContractMissing {
+            kind: ContractKind::Observe
+        })
+    );
+
+    let domain = runtime.create_domain(observer, None, "obs").unwrap();
+    let resource = runtime
+        .create_resource(observer, domain, ResourceKind::Namespace, "inspect")
+        .unwrap();
+    runtime
+        .set_resource_contract_policy(resource, ResourceContractPolicy::Observe)
+        .unwrap();
+    let contract = runtime
+        .create_contract(observer, domain, resource, ContractKind::Observe, "observe")
+        .unwrap();
+    runtime.bind_process_contract(observer, contract).unwrap();
+
+    let scheduler = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, "/proc/system/scheduler")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(scheduler.contains("decision-tracing:"));
+    assert!(scheduler.contains("running:"));
+    assert!(scheduler.contains("tokens="));
+    assert!(scheduler.contains(&format!("pid={}", target.raw())));
+}
+
+#[test]
+fn procfs_system_cpu_renders_extended_state_and_observe_contract_gates_reads() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    runtime.apply_cpu_extended_state_handoff(CpuExtendedStateHandoff {
+        xsave_managed: true,
+        save_area_bytes: 4096,
+        xcr0_mask: 0xe7,
+        boot_probed: true,
+        boot_seed_marker: 0xface_cafe,
+    });
+    let target = runtime
+        .spawn_process("target-cpu", None, SchedulerClass::Interactive)
+        .unwrap();
+    let target_tid = runtime
+        .processes()
+        .get(target)
+        .unwrap()
+        .main_thread()
+        .unwrap();
+    runtime
+        .processes
+        .mark_thread_cpu_extended_state_saved(target_tid, 12)
+        .unwrap();
+
+    let cpu = String::from_utf8(runtime.read_procfs_path("/proc/system/cpu").unwrap()).unwrap();
+    assert!(cpu.contains("current-tick:"));
+    assert!(cpu.contains("threads:"));
+    assert!(cpu.contains(&format!("pid={}", target.raw())));
+    assert!(cpu.contains("xsave-managed=true"));
+    assert!(cpu.contains("save-area=4096"));
+    assert!(cpu.contains("boot-seed=0xfacecafe"));
+
+    let observer = runtime
+        .spawn_process("observer-cpu", None, SchedulerClass::Interactive)
+        .unwrap();
+    let denied = runtime
+        .read_procfs_path_for(observer, "/proc/system/cpu")
+        .unwrap_err();
+    assert_eq!(
+        denied,
+        RuntimeError::NativeModel(NativeModelError::ProcessContractMissing {
+            kind: ContractKind::Observe
+        })
+    );
+
+    let domain = runtime.create_domain(observer, None, "obs-cpu").unwrap();
+    let resource = runtime
+        .create_resource(observer, domain, ResourceKind::Namespace, "inspect-cpu")
+        .unwrap();
+    runtime
+        .set_resource_contract_policy(resource, ResourceContractPolicy::Observe)
+        .unwrap();
+    let contract = runtime
+        .create_contract(
+            observer,
+            domain,
+            resource,
+            ContractKind::Observe,
+            "observe-cpu",
+        )
+        .unwrap();
+    runtime.bind_process_contract(observer, contract).unwrap();
+
+    let allowed = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, "/proc/system/cpu")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(allowed.contains("process\tpid="));
+    assert!(allowed.contains("thread\tpid="));
+    assert!(allowed.contains("xcr0=0xe7"));
+}
+
+#[test]
+fn procfs_signals_renders_delivery_and_recovery_state() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let target = runtime
+        .spawn_process("signaled", None, SchedulerClass::Interactive)
+        .unwrap();
+    runtime
+        .set_signal_disposition(target, 9, Some(SignalDisposition::Catch), 0, false)
+        .unwrap();
+    runtime
+        .set_signal_mask(target, SignalMaskHow::Block, 1u64 << (9 - 1))
+        .unwrap();
+    runtime
+        .send_signal(
+            PendingSignalSender {
+                pid: target,
+                tid: ThreadId::from_process_id(target),
+            },
+            target,
+            9,
+        )
+        .unwrap();
+
+    let signals = String::from_utf8(
+        runtime
+            .read_procfs_path(&format!("/proc/{}/signals", target.raw()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(signals.contains("blocked-pending:"));
+    assert!(signals.contains("pending:\t[9]"));
+    assert!(signals.contains("blocked:\t[9]"));
+    assert!(signals.contains("signal=9"));
+
+    assert_eq!(
+        runtime
+            .take_pending_signal(target, 1u64 << (9 - 1), true)
+            .unwrap(),
+        Some(9)
+    );
+    let cleared = String::from_utf8(
+        runtime
+            .read_procfs_path(&format!("/proc/{}/signals", target.raw()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(cleared.contains("pending:\t[]"));
+    assert!(cleared.contains("blocked-pending:\t[]"));
+}
+
+#[test]
+fn observe_contract_gates_system_signals_procfs_reads() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let target = runtime
+        .spawn_process("target", None, SchedulerClass::Interactive)
+        .unwrap();
+    let observer = runtime
+        .spawn_process("observer", None, SchedulerClass::Interactive)
+        .unwrap();
+    let denied = runtime
+        .read_procfs_path_for(observer, "/proc/system/signals")
+        .unwrap_err();
+    assert_eq!(
+        denied,
+        RuntimeError::NativeModel(NativeModelError::ProcessContractMissing {
+            kind: ContractKind::Observe
+        })
+    );
+
+    let domain = runtime.create_domain(observer, None, "obs").unwrap();
+    let resource = runtime
+        .create_resource(observer, domain, ResourceKind::Namespace, "inspect")
+        .unwrap();
+    runtime
+        .set_resource_contract_policy(resource, ResourceContractPolicy::Observe)
+        .unwrap();
+    let contract = runtime
+        .create_contract(observer, domain, resource, ContractKind::Observe, "observe")
+        .unwrap();
+    runtime.bind_process_contract(observer, contract).unwrap();
+
+    let signals = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, "/proc/system/signals")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(signals.contains("pid="));
+    assert!(signals.contains("wait-mask=0x"));
+    assert!(signals.contains("mask=0x"));
+    assert!(signals.contains(&format!("pid={}", target.raw())));
+}
+
+#[test]
+fn observe_contract_gates_process_signals_procfs_reads() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let target = runtime
+        .spawn_process("signaled", None, SchedulerClass::Interactive)
+        .unwrap();
+    runtime
+        .set_signal_disposition(target, 9, Some(SignalDisposition::Catch), 0, false)
+        .unwrap();
+    runtime
+        .set_signal_mask(target, SignalMaskHow::Block, 1u64 << (9 - 1))
+        .unwrap();
+    runtime
+        .send_signal(
+            PendingSignalSender {
+                pid: target,
+                tid: ThreadId::from_process_id(target),
+            },
+            target,
+            9,
+        )
+        .unwrap();
+
+    let observer = runtime
+        .spawn_process("observer", None, SchedulerClass::Interactive)
+        .unwrap();
+    let denied = runtime
+        .read_procfs_path_for(observer, &format!("/proc/{}/signals", target.raw()))
+        .unwrap_err();
+    assert_eq!(
+        denied,
+        RuntimeError::NativeModel(NativeModelError::ProcessContractMissing {
+            kind: ContractKind::Observe
+        })
+    );
+
+    let domain = runtime.create_domain(observer, None, "obs").unwrap();
+    let resource = runtime
+        .create_resource(observer, domain, ResourceKind::Namespace, "inspect")
+        .unwrap();
+    runtime
+        .set_resource_contract_policy(resource, ResourceContractPolicy::Observe)
+        .unwrap();
+    let contract = runtime
+        .create_contract(observer, domain, resource, ContractKind::Observe, "observe")
+        .unwrap();
+    runtime.bind_process_contract(observer, contract).unwrap();
+
+    let signals = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, &format!("/proc/{}/signals", target.raw()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(signals.contains(&format!("pid:\t{}", target.raw())));
+    assert!(signals.contains("pending:\t[9]"));
+    assert!(signals.contains("blocked:\t[9]"));
+    assert!(signals.contains("blocked-pending:"));
+}
+
+#[test]
+fn procfs_system_verified_core_renders_report_and_observe_contract_gates_reads() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let init = runtime
+        .spawn_process("verified-init", None, SchedulerClass::Interactive)
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            init,
+            ObjectHandle::new(Handle::new(8_200), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "root",
+        )
+        .unwrap();
+    runtime
+        .create_vfs_node("/", ObjectKind::Directory, root)
+        .unwrap();
+
+    let verified = String::from_utf8(
+        runtime
+            .read_procfs_path("/proc/system/verified-core")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(verified.contains("verified:\ttrue"));
+    assert!(verified.contains("capability-model:\ttrue"));
+    assert!(verified.contains("vfs-invariants:\ttrue"));
+    assert!(verified.contains("scheduler-state-machine:\ttrue"));
+    assert!(verified.contains("cpu-extended-state-lifecycle:\ttrue"));
+    assert!(verified.contains("bus-integrity:\ttrue"));
+
+    let observer = runtime
+        .spawn_process("verified-observer", None, SchedulerClass::Interactive)
+        .unwrap();
+    let denied = runtime
+        .read_procfs_path_for(observer, "/proc/system/verified-core")
+        .unwrap_err();
+    assert_eq!(
+        denied,
+        RuntimeError::NativeModel(NativeModelError::ProcessContractMissing {
+            kind: ContractKind::Observe
+        })
+    );
+
+    let domain = runtime
+        .create_domain(observer, None, "verified-obs")
+        .unwrap();
+    let resource = runtime
+        .create_resource(
+            observer,
+            domain,
+            ResourceKind::Namespace,
+            "verified-inspect",
+        )
+        .unwrap();
+    runtime
+        .set_resource_contract_policy(resource, ResourceContractPolicy::Observe)
+        .unwrap();
+    let contract = runtime
+        .create_contract(
+            observer,
+            domain,
+            resource,
+            ContractKind::Observe,
+            "verified-observe",
+        )
+        .unwrap();
+    runtime.bind_process_contract(observer, contract).unwrap();
+
+    let allowed = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, "/proc/system/verified-core")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(allowed.contains("violations:\t0"));
 }

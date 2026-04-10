@@ -6,12 +6,15 @@ build = "build.rs"
 
 [dependencies]
 limine = "0.5.0"
+kernel-core = { package = "ngos-kernel-core", path = "../kernel-core" }
 ngos-user-abi = { path = "../user-abi" }
+ngos-ui = { path = "../ui" }
+ngos-gfx-translate = { path = "../gfx-translate" }
 platform-hal = { package = "ngos-platform-hal", path = "../platform-hal" }
 platform-x86_64 = { package = "ngos-platform-x86_64", path = "../platform-x86_64" }
 
 [target.'cfg(not(target_os = "none"))'.dependencies]
-kernel-core = { package = "ngos-kernel-core", path = "../kernel-core" }
+ngos-ui = { path = "../ui", features = ["skia-preview"] }
 
 [[bin]]
 name = "ngos-boot-x86_64"

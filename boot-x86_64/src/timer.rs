@@ -1,3 +1,18 @@
+//! Canonical subsystem role:
+//! - subsystem: boot timer and clocksource discovery
+//! - owner layer: Layer 0
+//! - semantic owner: `boot-x86_64`
+//! - truth path role: boot-stage discovery and recording of timer facts for
+//!   the real x86 path
+//!
+//! Canonical contract families handled here:
+//! - clocksource discovery contracts
+//! - TSC/PIT fact contracts
+//! - boot timer status contracts
+//!
+//! This module may discover and record boot timer facts, but it must not
+//! redefine long-term scheduler or runtime timekeeping ownership.
+
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::{__cpuid, __cpuid_count, _rdtsc};
 use core::sync::atomic::{AtomicU64, Ordering};

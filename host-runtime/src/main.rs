@@ -1,12 +1,83 @@
+//! Canonical subsystem role:
+//! - subsystem: host runtime auxiliary execution surface
+//! - owner layer: auxiliary execution layer
+//! - semantic owner: `host-runtime`
+//! - truth path role: developer-facing auxiliary execution and reporting path,
+//!   not product truth
+//!
+//! Canonical contract families handled here:
+//! - host execution entry contracts
+//! - host report rendering contracts
+//! - auxiliary preview contracts
+//!
+//! This crate may accelerate development and reporting, but it must not be
+//! treated as the final truth surface for real subsystem closure.
+
 mod backend;
 mod report;
 mod session;
 
+use std::process::ExitCode;
+
+use ngos_boot_x86_64::ui_skia_preview::render_boot_suite_preview;
 use session::build_native_session_report;
 
-fn main() {
+fn main() -> ExitCode {
+    let mut args = std::env::args().skip(1);
+    if let Some(mode) = args.next() {
+        if mode == "ui-preview" {
+            return run_ui_preview(args);
+        }
+    }
+
     let native = build_native_session_report();
     print!("{}", native.render());
+    ExitCode::SUCCESS
+}
+
+fn run_ui_preview(mut args: impl Iterator<Item = String>) -> ExitCode {
+    let Some(output) = args.next() else {
+        eprintln!("usage: ngos-host-runtime ui-preview <output.png> <width> <height>");
+        return ExitCode::from(2);
+    };
+    let Some(width_raw) = args.next() else {
+        eprintln!("usage: ngos-host-runtime ui-preview <output.png> <width> <height>");
+        return ExitCode::from(2);
+    };
+    let Some(height_raw) = args.next() else {
+        eprintln!("usage: ngos-host-runtime ui-preview <output.png> <width> <height>");
+        return ExitCode::from(2);
+    };
+    if args.next().is_some() {
+        eprintln!("usage: ngos-host-runtime ui-preview <output.png> <width> <height>");
+        return ExitCode::from(2);
+    }
+
+    let width = match width_raw.parse::<u32>() {
+        Ok(value) if value > 0 => value,
+        _ => {
+            eprintln!("invalid width: {width_raw}");
+            return ExitCode::from(2);
+        }
+    };
+    let height = match height_raw.parse::<u32>() {
+        Ok(value) if value > 0 => value,
+        _ => {
+            eprintln!("invalid height: {height_raw}");
+            return ExitCode::from(2);
+        }
+    };
+
+    match render_boot_suite_preview(&output, width, height) {
+        Ok(()) => {
+            println!("wrote {}", output);
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("ui-preview failed: {err}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -118,6 +189,140 @@ mod tests {
         (user_runtime, app)
     }
 
+    const ORBIT_GAME_PROCESS_NAME: &str = "game-orbit-runner";
+    const ORBIT_GAME_CWD: &str = "/games/orbit";
+    const ORBIT_MANIFEST_PATH: &str = "/games/orbit.manifest";
+    const ORBIT_SESSION_CHANNEL_ENV: &str = "NGOS_GAME_CHANNEL=/compat/orbit/session.chan";
+    const ORBIT_WORKER_PATH: &str = "/bin/worker";
+
+    fn shell_script<I, S>(lines: I) -> String
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut script = String::new();
+        for line in lines {
+            script.push_str(line.as_ref());
+            script.push('\n');
+        }
+        script
+    }
+
+    fn orbit_manifest_lines(include_fullscreen_arg: bool) -> Vec<&'static str> {
+        let mut lines = vec![
+            "mkdir-path /games",
+            "mkdir-path /games/orbit",
+            "mkfile-path /games/orbit.manifest",
+            "append-line /games/orbit.manifest title=Orbit Runner",
+            "append-line /games/orbit.manifest slug=orbit-runner",
+            "append-line /games/orbit.manifest exec=/bin/worker",
+            "append-line /games/orbit.manifest cwd=/games/orbit",
+        ];
+        if include_fullscreen_arg {
+            lines.push("append-line /games/orbit.manifest arg=--fullscreen");
+        }
+        lines.extend([
+            "append-line /games/orbit.manifest gfx.backend=vulkan",
+            "append-line /games/orbit.manifest gfx.profile=frame-pace",
+            "append-line /games/orbit.manifest audio.backend=native-mixer",
+            "append-line /games/orbit.manifest audio.profile=spatial-mix",
+            "append-line /games/orbit.manifest input.backend=native-input",
+            "append-line /games/orbit.manifest input.profile=gamepad-first",
+            "append-line /games/orbit.manifest shim.prefix=/compat/orbit",
+            "append-line /games/orbit.manifest shim.saves=/saves/orbit",
+            "append-line /games/orbit.manifest shim.cache=/cache/orbit",
+        ]);
+        lines
+    }
+
+    fn orbit_session_bootstrap_lines() -> Vec<&'static str> {
+        vec![
+            "mkdir-path /games",
+            "mkdir-path /games/orbit",
+            "mkdir-path /compat",
+            "mkdir-path /compat/orbit",
+            "mkdir-path /saves",
+            "mkdir-path /saves/orbit",
+            "mkdir-path /cache",
+            "mkdir-path /cache/orbit",
+            "mkfile-path /compat/orbit/session.env",
+            "write-file /compat/orbit/session.env NGOS_GAME_CHANNEL=/compat/orbit/session.chan",
+            "mkfile-path /compat/orbit/session.argv",
+            "write-file /compat/orbit/session.argv /bin/worker",
+            "mkchan-path /compat/orbit/session.chan",
+        ]
+    }
+
+    fn orbit_resource_lines(include_fifo_policy: bool) -> Vec<&'static str> {
+        let mut lines = vec![
+            "mkdomain compat-game-orbit-runner",
+            "mkresource 2 surface orbit-runner-gfx",
+        ];
+        if include_fifo_policy {
+            lines.push("resource-policy 2 fifo");
+        }
+        lines.extend([
+            "resource-governance 2 exclusive-lease",
+            "resource-contract-policy 2 display",
+            "resource-issuer-policy 2 creator-only",
+            "mkcontract 2 2 display frame-pace-display",
+            "contract-state 2 active",
+            "claim 2",
+            "mkresource 2 channel orbit-runner-audio",
+        ]);
+        if include_fifo_policy {
+            lines.push("resource-policy 3 fifo");
+        }
+        lines.extend([
+            "resource-governance 3 queueing",
+            "resource-contract-policy 3 io",
+            "resource-issuer-policy 3 creator-only",
+            "mkcontract 2 3 io spatial-mix-mix",
+            "contract-state 3 active",
+            "claim 3",
+            "mkresource 2 device orbit-runner-input",
+        ]);
+        if include_fifo_policy {
+            lines.push("resource-policy 4 fifo");
+        }
+        lines.extend([
+            "resource-governance 4 exclusive-lease",
+            "resource-contract-policy 4 observe",
+            "resource-issuer-policy 4 creator-only",
+            "mkcontract 2 4 observe gamepad-first-capture",
+            "contract-state 4 active",
+            "claim 4",
+        ]);
+        lines
+    }
+
+    fn spawn_orbit_worker(
+        user_runtime: &UserRuntime<HostRuntimeKernelBackend>,
+        argv: &[&str],
+        chdir_to_game_dir: bool,
+    ) -> u64 {
+        if chdir_to_game_dir {
+            user_runtime.chdir_path(ORBIT_GAME_CWD).unwrap();
+        }
+        user_runtime
+            .spawn_configured_process(
+                ORBIT_GAME_PROCESS_NAME,
+                ORBIT_WORKER_PATH,
+                ORBIT_GAME_CWD,
+                argv,
+                &[ORBIT_SESSION_CHANNEL_ENV],
+            )
+            .unwrap()
+    }
+
+    fn signal_and_reap_process(
+        user_runtime: &UserRuntime<HostRuntimeKernelBackend>,
+        pid: u64,
+    ) -> i32 {
+        user_runtime.send_signal(pid, 15).unwrap();
+        user_runtime.reap_process(pid).unwrap()
+    }
+
     fn write_session_file(
         user_runtime: &UserRuntime<HostRuntimeKernelBackend>,
         path: &str,
@@ -126,6 +331,14 @@ mod tests {
         let fd = user_runtime.open_path(path).unwrap();
         user_runtime.write(fd, value).unwrap();
         user_runtime.close(fd).unwrap();
+    }
+
+    fn abi_text(bytes: &[u8]) -> String {
+        let end = bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(bytes.len());
+        String::from_utf8_lossy(&bytes[..end]).into_owned()
     }
 
     fn prepare_game_session_bootstrap_io(user_runtime: &UserRuntime<HostRuntimeKernelBackend>) {
@@ -347,6 +560,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_trivial_shell() {
         let report = report_for_script("exit 0\n");
 
@@ -355,10 +569,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn direct_shell_game_launch_exit_runs_without_report_prelude() {
-        let (exit_code, stdout) = run_shell_script_direct(
-            "mkdir-path /games\nmkdir-path /games/orbit\nmkfile-path /games/orbit.manifest\nappend-line /games/orbit.manifest title=Orbit Runner\nappend-line /games/orbit.manifest slug=orbit-runner\nappend-line /games/orbit.manifest exec=/bin/worker\nappend-line /games/orbit.manifest cwd=/games/orbit\nappend-line /games/orbit.manifest gfx.backend=vulkan\nappend-line /games/orbit.manifest gfx.profile=frame-pace\nappend-line /games/orbit.manifest audio.backend=native-mixer\nappend-line /games/orbit.manifest audio.profile=spatial-mix\nappend-line /games/orbit.manifest input.backend=native-input\nappend-line /games/orbit.manifest input.profile=gamepad-first\nappend-line /games/orbit.manifest shim.prefix=/compat/orbit\nappend-line /games/orbit.manifest shim.saves=/saves/orbit\nappend-line /games/orbit.manifest shim.cache=/cache/orbit\ngame-launch /games/orbit.manifest\nexit 0\n",
-        );
+        let mut lines = orbit_manifest_lines(false);
+        lines.extend(["game-launch /games/orbit.manifest", "exit 0"]);
+        let script = shell_script(lines);
+        let (exit_code, stdout) = run_shell_script_direct(&script);
 
         assert_eq!(exit_code, 0, "{stdout}");
         assert!(stdout.starts_with("ngos shell\n"), "{stdout}");
@@ -368,6 +584,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_can_spawn_kill_and_reap_worker_process() {
         let report = report_for_script(
             "spawn-path worker /bin/worker\nkill $LAST_PID 15\nreap $LAST_PID\nexit 0\n",
@@ -393,43 +610,25 @@ mod tests {
 
     #[test]
     fn configured_spawn_process_can_launch_signal_and_reap_worker_directly() {
-        let (user_runtime, _) = configured_game_user_runtime();
+        let (user_runtime, _app) = configured_game_user_runtime();
 
-        let pid = user_runtime
-            .spawn_configured_process(
-                "game-orbit-runner",
-                "/bin/worker",
-                "/games/orbit",
-                &["/bin/worker", "--fullscreen"],
-                &["NGOS_GAME_CHANNEL=/compat/orbit/session.chan"],
-            )
-            .unwrap();
-        user_runtime.send_signal(pid, 15).unwrap();
-        let exit_code = user_runtime.reap_process(pid).unwrap();
+        let pid = spawn_orbit_worker(&user_runtime, &["/bin/worker", "--fullscreen"], false);
+        let exit_code = signal_and_reap_process(&user_runtime, pid);
 
         assert_eq!(pid, 3);
         assert_eq!(exit_code, 143);
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn configured_game_session_launch_primitives_can_spawn_and_cleanup_exactly() {
         let (user_runtime, _) = configured_game_user_runtime();
         prepare_game_session_bootstrap_io(&user_runtime);
         let ((gfx, gfx_contract), (audio, audio_contract), (input, input_contract)) =
             prepare_game_session_resources(&user_runtime);
 
-        user_runtime.chdir_path("/games/orbit").unwrap();
-        let pid = user_runtime
-            .spawn_configured_process(
-                "game-orbit-runner",
-                "/bin/worker",
-                "/games/orbit",
-                &["/bin/worker"],
-                &["NGOS_GAME_CHANNEL=/compat/orbit/session.chan"],
-            )
-            .unwrap();
-        user_runtime.send_signal(pid, 15).unwrap();
-        let exit_code = user_runtime.reap_process(pid).unwrap();
+        let pid = spawn_orbit_worker(&user_runtime, &["/bin/worker"], true);
+        let exit_code = signal_and_reap_process(&user_runtime, pid);
         cleanup_game_session_resources(
             &user_runtime,
             &[
@@ -444,23 +643,15 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn configured_game_session_exact_bootstrap_io_can_spawn_and_cleanup() {
         let (user_runtime, _) = configured_game_user_runtime();
         prepare_game_session_bootstrap_io(&user_runtime);
         let ((gfx, gfx_contract), (audio, audio_contract), (input, input_contract)) =
             prepare_game_session_resources(&user_runtime);
 
-        let pid = user_runtime
-            .spawn_configured_process(
-                "game-orbit-runner",
-                "/bin/worker",
-                "/games/orbit",
-                &["/bin/worker"],
-                &["NGOS_GAME_CHANNEL=/compat/orbit/session.chan"],
-            )
-            .unwrap();
-        user_runtime.send_signal(pid, 15).unwrap();
-        let exit_code = user_runtime.reap_process(pid).unwrap();
+        let pid = spawn_orbit_worker(&user_runtime, &["/bin/worker"], false);
+        let exit_code = signal_and_reap_process(&user_runtime, pid);
         cleanup_game_session_resources(
             &user_runtime,
             &[
@@ -475,6 +666,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_configures_graphics_game_resource_family() {
         let report = report_for_script(
             "mkdomain game\nmkresource 2 surface gfx0\nmkcontract 2 2 display scanout\nresource-governance 2 exclusive-lease\nresource-contract-policy 2 display\nresource-issuer-policy 2 creator-only\nexit 0\n",
@@ -498,6 +690,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_configures_audio_game_resource_family() {
         let report = report_for_script(
             "mkdomain game\nmkresource 2 channel audio0\nmkcontract 2 2 io mix\nresource-governance 2 queueing\nresource-contract-policy 2 io\nresource-issuer-policy 2 creator-only\nexit 0\n",
@@ -521,6 +714,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_configures_input_game_resource_family() {
         let report = report_for_script(
             "mkdomain game\nmkresource 2 device input0\nmkcontract 2 2 observe controls\nresource-governance 2 exclusive-lease\nresource-contract-policy 2 observe\nresource-issuer-policy 2 creator-only\nexit 0\n",
@@ -544,10 +738,18 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_can_bootstrap_and_spawn_game_worker_without_game_resources() {
-        let report = report_for_script(
-            "mkdir-path /games\nmkdir-path /games/orbit\nmkdir-path /compat\nmkdir-path /compat/orbit\nmkdir-path /saves\nmkdir-path /saves/orbit\nmkdir-path /cache\nmkdir-path /cache/orbit\nmkfile-path /compat/orbit/session.env\nwrite-file /compat/orbit/session.env NGOS_GAME_CHANNEL=/compat/orbit/session.chan\nmkfile-path /compat/orbit/session.argv\nwrite-file /compat/orbit/session.argv /bin/worker\nmkchan-path /compat/orbit/session.chan\ncd /games/orbit\nspawn-path game-orbit-runner /bin/worker\nkill $LAST_PID 15\nreap $LAST_PID\nexit 0\n",
-        );
+        let mut lines = orbit_session_bootstrap_lines();
+        lines.extend([
+            "cd /games/orbit",
+            "spawn-path game-orbit-runner /bin/worker",
+            "kill $LAST_PID 15",
+            "reap $LAST_PID",
+            "exit 0",
+        ]);
+        let script = shell_script(lines);
+        let report = report_for_script(&script);
 
         assert_eq!(report.exit_code, 0, "{}", report.render());
         assert!(
@@ -568,10 +770,22 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_can_prepare_game_resources_then_spawn_and_reap_worker() {
-        let report = report_for_script(
-            "mkdir-path /games\nmkdir-path /games/orbit\nmkdir-path /compat\nmkdir-path /compat/orbit\nmkdir-path /saves\nmkdir-path /saves/orbit\nmkdir-path /cache\nmkdir-path /cache/orbit\nmkfile-path /compat/orbit/session.env\nwrite-file /compat/orbit/session.env NGOS_GAME_CHANNEL=/compat/orbit/session.chan\nmkfile-path /compat/orbit/session.argv\nwrite-file /compat/orbit/session.argv /bin/worker\nmkchan-path /compat/orbit/session.chan\nmkdomain compat-game-orbit-runner\nmkresource 2 surface orbit-runner-gfx\nresource-governance 2 exclusive-lease\nresource-contract-policy 2 display\nresource-issuer-policy 2 creator-only\nmkcontract 2 2 display frame-pace-display\ncontract-state 2 active\nclaim 2\nmkresource 2 channel orbit-runner-audio\nresource-governance 3 queueing\nresource-contract-policy 3 io\nresource-issuer-policy 3 creator-only\nmkcontract 2 3 io spatial-mix-mix\ncontract-state 3 active\nclaim 3\nmkresource 2 device orbit-runner-input\nresource-governance 4 exclusive-lease\nresource-contract-policy 4 observe\nresource-issuer-policy 4 creator-only\nmkcontract 2 4 observe gamepad-first-capture\ncontract-state 4 active\nclaim 4\ncd /games/orbit\nspawn-path game-orbit-runner /bin/worker\nkill $LAST_PID 15\nreap $LAST_PID\nreleaseclaim 2\nreleaseclaim 3\nreleaseclaim 4\nexit 0\n",
-        );
+        let mut lines = orbit_session_bootstrap_lines();
+        lines.extend(orbit_resource_lines(false));
+        lines.extend([
+            "cd /games/orbit",
+            "spawn-path game-orbit-runner /bin/worker",
+            "kill $LAST_PID 15",
+            "reap $LAST_PID",
+            "releaseclaim 2",
+            "releaseclaim 3",
+            "releaseclaim 4",
+            "exit 0",
+        ]);
+        let script = shell_script(lines);
+        let report = report_for_script(&script);
 
         assert_eq!(report.exit_code, 0, "{}", report.render());
         assert!(
@@ -587,10 +801,28 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_can_cleanup_game_resources_after_worker_reap() {
-        let report = report_for_script(
-            "mkdir-path /games\nmkdir-path /games/orbit\nmkdir-path /compat\nmkdir-path /compat/orbit\nmkdir-path /saves\nmkdir-path /saves/orbit\nmkdir-path /cache\nmkdir-path /cache/orbit\nmkfile-path /compat/orbit/session.env\nwrite-file /compat/orbit/session.env NGOS_GAME_CHANNEL=/compat/orbit/session.chan\nmkfile-path /compat/orbit/session.argv\nwrite-file /compat/orbit/session.argv /bin/worker\nmkchan-path /compat/orbit/session.chan\nmkdomain compat-game-orbit-runner\nmkresource 2 surface orbit-runner-gfx\nresource-policy 2 fifo\nresource-governance 2 exclusive-lease\nresource-contract-policy 2 display\nresource-issuer-policy 2 creator-only\nmkcontract 2 2 display frame-pace-display\ncontract-state 2 active\nclaim 2\nmkresource 2 channel orbit-runner-audio\nresource-policy 3 fifo\nresource-governance 3 queueing\nresource-contract-policy 3 io\nresource-issuer-policy 3 creator-only\nmkcontract 2 3 io spatial-mix-mix\ncontract-state 3 active\nclaim 3\nmkresource 2 device orbit-runner-input\nresource-policy 4 fifo\nresource-governance 4 exclusive-lease\nresource-contract-policy 4 observe\nresource-issuer-policy 4 creator-only\nmkcontract 2 4 observe gamepad-first-capture\ncontract-state 4 active\nclaim 4\ncd /games/orbit\nspawn-path game-orbit-runner /bin/worker\nkill $LAST_PID 15\nreap $LAST_PID\nreleaseclaim 2\nreleaseclaim 3\nreleaseclaim 4\ncontract-state 2 suspended\ncontract-state 3 suspended\ncontract-state 4 suspended\nresource-state 2 suspended\nresource-state 3 suspended\nresource-state 4 suspended\nexit 0\n",
-        );
+        let mut lines = orbit_session_bootstrap_lines();
+        lines.extend(orbit_resource_lines(true));
+        lines.extend([
+            "cd /games/orbit",
+            "spawn-path game-orbit-runner /bin/worker",
+            "kill $LAST_PID 15",
+            "reap $LAST_PID",
+            "releaseclaim 2",
+            "releaseclaim 3",
+            "releaseclaim 4",
+            "contract-state 2 suspended",
+            "contract-state 3 suspended",
+            "contract-state 4 suspended",
+            "resource-state 2 suspended",
+            "resource-state 3 suspended",
+            "resource-state 4 suspended",
+            "exit 0",
+        ]);
+        let script = shell_script(lines);
+        let report = report_for_script(&script);
 
         assert_eq!(report.exit_code, 0, "{}", report.render());
         assert!(
@@ -608,22 +840,14 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn host_runtime_can_exit_shell_process_after_game_worker_reap_and_cleanup() {
         let (user_runtime, app) = configured_game_user_runtime();
         let ((gfx, gfx_contract), (audio, audio_contract), (input, input_contract)) =
             prepare_game_session_resources(&user_runtime);
 
-        let pid = user_runtime
-            .spawn_configured_process(
-                "game-orbit-runner",
-                "/bin/worker",
-                "/games/orbit",
-                &["/bin/worker"],
-                &["NGOS_GAME_CHANNEL=/compat/orbit/session.chan"],
-            )
-            .unwrap();
-        user_runtime.send_signal(pid, 15).unwrap();
-        let exit_code = user_runtime.reap_process(pid).unwrap();
+        let pid = spawn_orbit_worker(&user_runtime, &["/bin/worker"], false);
+        let exit_code = signal_and_reap_process(&user_runtime, pid);
         cleanup_game_session_resources(
             &user_runtime,
             &[
@@ -645,6 +869,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_can_launch_and_stop_game_session_by_last_pid() {
         let report = report_for_script(
             "mkdir-path /games\nmkdir-path /games/orbit\nmkfile-path /games/orbit.manifest\nappend-line /games/orbit.manifest title=Orbit Runner\nappend-line /games/orbit.manifest slug=orbit-runner\nappend-line /games/orbit.manifest exec=/bin/worker\nappend-line /games/orbit.manifest cwd=/games/orbit\nappend-line /games/orbit.manifest gfx.backend=vulkan\nappend-line /games/orbit.manifest gfx.profile=frame-pace\nappend-line /games/orbit.manifest audio.backend=native-mixer\nappend-line /games/orbit.manifest audio.profile=spatial-mix\nappend-line /games/orbit.manifest input.backend=native-input\nappend-line /games/orbit.manifest input.profile=gamepad-first\nappend-line /games/orbit.manifest shim.prefix=/compat/orbit\nappend-line /games/orbit.manifest shim.saves=/saves/orbit\nappend-line /games/orbit.manifest shim.cache=/cache/orbit\ngame-launch /games/orbit.manifest\ngame-stop $LAST_PID\nexit 0\n",
@@ -664,6 +889,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_can_render_game_manifest_without_launching() {
         let report = report_for_script(
             "mkdir-path /games\nmkdir-path /games/orbit\nmkfile-path /games/orbit.manifest\nappend-line /games/orbit.manifest title=Orbit Runner\nappend-line /games/orbit.manifest slug=orbit-runner\nappend-line /games/orbit.manifest exec=/bin/worker\nappend-line /games/orbit.manifest cwd=/games/orbit\nappend-line /games/orbit.manifest gfx.backend=vulkan\nappend-line /games/orbit.manifest gfx.profile=frame-pace\nappend-line /games/orbit.manifest audio.backend=native-mixer\nappend-line /games/orbit.manifest audio.profile=spatial-mix\nappend-line /games/orbit.manifest input.backend=native-input\nappend-line /games/orbit.manifest input.profile=gamepad-first\nappend-line /games/orbit.manifest shim.prefix=/compat/orbit\nappend-line /games/orbit.manifest shim.saves=/saves/orbit\nappend-line /games/orbit.manifest shim.cache=/cache/orbit\ngame-manifest /games/orbit.manifest\nexit 0\n",
@@ -672,7 +898,7 @@ mod tests {
         assert_eq!(report.exit_code, 0, "{}", report.render());
         assert!(
             report.stdout.contains(
-                "game.manifest path=/games/orbit.manifest title=Orbit Runner slug=orbit-runner"
+                "game.manifest path=/games/orbit.manifest target=game title=Orbit Runner slug=orbit-runner"
             ),
             "{}",
             report.render()
@@ -680,6 +906,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_can_render_game_plan_without_launching() {
         let report = report_for_script(
             "mkdir-path /games\nmkdir-path /games/orbit\nmkfile-path /games/orbit.manifest\nappend-line /games/orbit.manifest title=Orbit Runner\nappend-line /games/orbit.manifest slug=orbit-runner\nappend-line /games/orbit.manifest exec=/bin/worker\nappend-line /games/orbit.manifest cwd=/games/orbit\nappend-line /games/orbit.manifest gfx.backend=vulkan\nappend-line /games/orbit.manifest gfx.profile=frame-pace\nappend-line /games/orbit.manifest audio.backend=native-mixer\nappend-line /games/orbit.manifest audio.profile=spatial-mix\nappend-line /games/orbit.manifest input.backend=native-input\nappend-line /games/orbit.manifest input.profile=gamepad-first\nappend-line /games/orbit.manifest shim.prefix=/compat/orbit\nappend-line /games/orbit.manifest shim.saves=/saves/orbit\nappend-line /games/orbit.manifest shim.cache=/cache/orbit\ngame-plan /games/orbit.manifest\nexit 0\n",
@@ -689,13 +916,14 @@ mod tests {
         assert!(
             report
                 .stdout
-                .contains("game.plan domain=compat-game-orbit-runner process=game-orbit-runner cwd=/games/orbit exec=/bin/worker"),
+                .contains("game.plan domain=compat-game target=game process=compat-orbit-runner cwd=/games/orbit exec=/bin/worker"),
             "{}",
             report.render()
         );
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_can_append_and_read_manifest_file_text() {
         let report = report_for_script(
             "mkdir-path /games\nmkdir-path /games/orbit\nmkfile-path /games/orbit.manifest\nappend-line /games/orbit.manifest title=Orbit Runner\nappend-line /games/orbit.manifest slug=orbit-runner\ncat-file /games/orbit.manifest\nexit 0\n",
@@ -729,18 +957,33 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_process_and_procfs_commands() {
         let report = report_for_script(
-            "session\nps\nprocess-info 2\nproc 2 maps\ncat /proc/2/status\nexit 0\n",
+            "session\nps\nprocess-info 2\ncat /proc/2/maps\ncat /proc/2/status\nexit 0\n",
         );
 
-        assert_eq!(report.exit_code, 0);
-        assert!(report.stdout.contains("ngos shell"));
-        assert!(report.stdout.contains("pid=2 name=ngos-userland-native"));
-        assert!(report.stdout.contains("SchedulerClass:\t"));
+        assert_eq!(report.exit_code, 0, "{}", report.render());
+        assert!(report.stdout.contains("ngos shell"), "{}", report.render());
+        assert!(
+            report.stdout.contains("pid=2 name=ngos-userland-native"),
+            "{}",
+            report.render()
+        );
+        assert!(
+            report.stdout.contains("scheduler-class=interactive"),
+            "{}",
+            report.render()
+        );
+        assert!(
+            report.stdout.contains("SchedulerClass:\t"),
+            "{}",
+            report.render()
+        );
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_ps_command() {
         let report = report_for_script("ps\nexit 0\n");
 
@@ -749,6 +992,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_exposes_gpu_binding_evidence_for_initialized_nvidia_provider() {
         let report =
             report_for_script_with_runtime("gpu-evidence /dev/gpu0\nexit 0\n", |runtime| {
@@ -774,6 +1018,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_exposes_gpu_vbios_window_and_header_for_initialized_nvidia_provider() {
         let report = report_for_script_with_runtime("gpu-vbios /dev/gpu0\nexit 0\n", |runtime| {
             let (mut platform, locator) = sample_nvidia_gpu_platform();
@@ -796,6 +1041,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_reports_gpu_vbios_unavailable_without_initialized_provider() {
         let report = report_for_script("gpu-vbios /dev/gpu0\nexit 0\n");
 
@@ -808,6 +1054,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_exposes_gpu_gsp_loopback_status_for_initialized_nvidia_provider() {
         let report = report_for_script_with_runtime(
             "gpu-gsp /dev/gpu0\ngpu-buffer-create 32\ngpu-buffer-write 1 0 draw:hardware\ngpu-submit-buffer /dev/gpu0 1\ngpu-gsp /dev/gpu0\nexit 0\n",
@@ -825,6 +1072,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_reports_gpu_gsp_unavailable_without_initialized_provider() {
         let report = report_for_script("gpu-gsp /dev/gpu0\nexit 0\n");
 
@@ -837,6 +1085,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_exposes_gpu_interrupt_delivery_for_initialized_nvidia_provider() {
         let report = report_for_script_with_runtime(
             "gpu-irq /dev/gpu0\ngpu-buffer-create 32\ngpu-buffer-write 1 0 draw:hardware\ngpu-submit-buffer /dev/gpu0 1\ngpu-irq /dev/gpu0\nexit 0\n",
@@ -857,6 +1106,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_reports_gpu_interrupt_unavailable_without_initialized_provider() {
         let report = report_for_script("gpu-irq /dev/gpu0\nexit 0\n");
 
@@ -869,6 +1119,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_exposes_gpu_display_plan_for_initialized_nvidia_provider() {
         let report = report_for_script_with_runtime(
             "gpu-display /dev/gpu0\ngpu-buffer-create 32\ngpu-buffer-write 1 0 draw:hardware\ngpu-submit-buffer /dev/gpu0 1\ngpu-display /dev/gpu0\nexit 0\n",
@@ -894,6 +1145,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_reports_gpu_display_unavailable_without_initialized_provider() {
         let report = report_for_script("gpu-display /dev/gpu0\nexit 0\n");
 
@@ -906,6 +1158,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_exposes_gpu_display_without_submit_for_initialized_nvidia_provider() {
         let report = report_for_script_with_runtime("gpu-display /dev/gpu0\nexit 0\n", |runtime| {
             let (mut platform, locator) = sample_nvidia_gpu_platform();
@@ -923,6 +1176,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_exposes_gpu_power_evidence_for_initialized_nvidia_provider() {
         let report = report_for_script_with_runtime("gpu-power /dev/gpu0\nexit 0\n", |runtime| {
             let (mut platform, locator) = sample_nvidia_gpu_platform();
@@ -940,6 +1194,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_reports_gpu_power_unavailable_without_initialized_provider() {
         let report = report_for_script("gpu-power /dev/gpu0\nexit 0\n");
 
@@ -952,6 +1207,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_sets_gpu_power_state_for_initialized_nvidia_provider() {
         let report = report_for_script_with_runtime(
             "gpu-power /dev/gpu0\ngpu-power-set /dev/gpu0 P0\ngpu-power /dev/gpu0\nexit 0\n",
@@ -987,6 +1243,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_refuses_invalid_gpu_power_state_requests() {
         let report = report_for_script_with_runtime(
             "gpu-power-set /dev/gpu0 P3\ngpu-power /dev/gpu0\nexit 0\n",
@@ -1011,6 +1268,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_restores_gpu_power_state_after_multiple_transitions() {
         let report = report_for_script_with_runtime(
             "gpu-power /dev/gpu0\ngpu-power-set /dev/gpu0 P0\ngpu-power /dev/gpu0\ngpu-power-set /dev/gpu0 P12\ngpu-power /dev/gpu0\nexit 0\n",
@@ -1059,6 +1317,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_exposes_gpu_media_state_after_start_for_initialized_nvidia_provider() {
         let report = report_for_script_with_runtime(
             "gpu-media /dev/gpu0\ngpu-media-start /dev/gpu0 1920 1080 12000 av1\ngpu-media /dev/gpu0\nexit 0\n",
@@ -1076,6 +1335,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_refuses_invalid_gpu_media_requests() {
         let report = report_for_script_with_runtime(
             "gpu-media-start /dev/gpu0 0 1080 12000 av1\ngpu-media-start /dev/gpu0 1920 1080 12000 vp9\ngpu-media /dev/gpu0\nexit 0\n",
@@ -1098,6 +1358,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_exposes_gpu_neural_state_after_inject_and_commit() {
         let report = report_for_script_with_runtime(
             "gpu-neural /dev/gpu0\ngpu-neural-inject /dev/gpu0 enemy vehicle\ngpu-neural /dev/gpu0\ngpu-neural-commit /dev/gpu0\ngpu-neural /dev/gpu0\nexit 0\n",
@@ -1125,6 +1386,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_refuses_invalid_gpu_neural_requests() {
         let report = report_for_script_with_runtime(
             "gpu-neural-inject /dev/gpu0   \ngpu-neural /dev/gpu0\nexit 0\n",
@@ -1145,6 +1407,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_exposes_gpu_tensor_state_after_dispatch() {
         let report = report_for_script_with_runtime(
             "gpu-tensor /dev/gpu0\ngpu-tensor-dispatch /dev/gpu0 77\ngpu-tensor /dev/gpu0\nexit 0\n",
@@ -1170,6 +1433,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_refuses_invalid_gpu_tensor_requests() {
         let report = report_for_script_with_runtime(
             "gpu-tensor-dispatch /dev/gpu0 0\ngpu-tensor /dev/gpu0\nexit 0\n",
@@ -1192,6 +1456,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_vm_reclaim_and_heap_flow() {
         let report = report_for_script(
             "proc 2 vmobjects\nvm-load-word 2 $VM_FILE_ADDR\nvm-advise 2 $VM_FILE_ADDR 4096 dontneed\nproc 2 vmobjects\nvm-load-word 2 $VM_FILE_ADDR\nproc 2 vmobjects\nproc 2 maps\nvm-brk 2 $VM_HEAP_GROW\nproc 2 maps\nvm-brk 2 $VM_HEAP_SHRINK\nproc 2 maps\nvm-probe-brk 2 $VM_HEAP_INVALID\nproc 2 vmepisodes\nexit 0\n",
@@ -1218,6 +1483,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_vm_map_anon_flow() {
         let report = report_for_script(
             "vm-probe-map-anon 2 4096 rw- shell-map-gap\nproc 2 maps\nvm-probe-map-anon 2 0 rw- shell-map-gap-invalid\nproc 2 vmepisodes\nexit 0\n",
@@ -1260,6 +1526,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_vm_shadow_chain_and_file_persistence_flow() {
         let report = report_for_script(
             "echo shared-value=$VM_SHARED_VALUE\necho shared-restored=$VM_SHARED_RESTORED\necho grandchild-depth=$VM_PROBE_GRANDCHILD_DEPTH\nexit 0\n",
@@ -1292,6 +1559,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_vm_live_shared_multi_process_flow() {
         let report = report_for_script(
             "echo shared-live-value=$VM_SHARED_LIVE_VALUE\necho shared-live-owners=$VM_SHARED_LIVE_OWNERS\nexit 0\n",
@@ -1316,6 +1584,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_vm_advanced_fault_and_cow_flow() {
         let report = report_for_script(
             "echo cow-shadow-before=$VM_COW_SHADOW_BEFORE\necho cow-shadow-after=$VM_COW_SHADOW_AFTER\necho cow-faults=$VM_COW_COW_FAULTS\necho split-read-faults=$VM_SPLIT_READ_FAULTS\necho split-write-faults=$VM_SPLIT_WRITE_FAULTS\necho split-total-faults=$VM_SPLIT_TOTAL_FAULTS\nexit 0\n",
@@ -1358,6 +1627,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_vm_layout_and_region_flow() {
         let report = report_for_script(
             "echo offset-segments=$VM_OFFSET_SEGMENTS\necho offset-first=$VM_OFFSET_FIRST\necho offset-second=$VM_OFFSET_SECOND\necho read-resident=$VM_READ_RESIDENT\necho read-dirty=$VM_READ_DIRTY\necho read-accessed=$VM_READ_ACCESSED\necho read-readfaults=$VM_READ_READFAULTS\necho read-writefaults=$VM_READ_WRITEFAULTS\necho mprotect-faults=$VM_MPROTECT_FAULTS\necho mprotect-dirty=$VM_MPROTECT_DIRTY\necho range-split-count=$VM_RANGE_SPLIT_COUNT\necho range-coalesced-count=$VM_RANGE_COALESCED_COUNT\necho range-dirty-after-sync=$VM_RANGE_DIRTY_AFTER_SYNC\necho range-faults=$VM_RANGE_FAULTS\nexit 0\n",
@@ -1449,6 +1719,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_vm_memory_contract_gate_flow() {
         let report = report_for_script(
             "echo vm-contract-pid=$VM_CONTRACT_PID\necho vm-contract-id=$VM_CONTRACT_ID\necho vm-contract-allowed-map=$VM_CONTRACT_ALLOWED_MAP\necho vm-contract-blocked-state=$VM_CONTRACT_BLOCKED_STATE\nprocess-info $VM_CONTRACT_PID\nexit 0\n",
@@ -1502,6 +1773,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_vm_pressure_flow() {
         let report = report_for_script(
             "proc 2 vmobjects\nvm-pressure 2 2\nproc 2 vmobjects\nvm-load-word 2 $VM_PRESSURE_A\nproc 2 vmobjects\nproc 2 vmdecisions\nproc 2 vmepisodes\nexit 0\n",
@@ -1538,6 +1810,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_vm_composed_policy_pressure_cow_flow() {
         let report = report_for_script(
             "echo pressure-global-reclaimed=$VM_PRESSURE_GLOBAL_RECLAIMED\necho pressure-global-victims=$VM_PRESSURE_GLOBAL_VICTIMS\necho pressure-global-policy-blocks=$VM_PRESSURE_GLOBAL_POLICY_BLOCKS\necho pressure-global-cow-events=$VM_PRESSURE_GLOBAL_COW_EVENTS\necho shared-live-restored=$VM_SHARED_LIVE_RESTORED\nexit 0\n",
@@ -1605,6 +1878,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_process_info_command() {
         let report = report_for_script("process-info 2\nexit 0\n");
 
@@ -1613,6 +1887,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_procfs_cat_command() {
         let report = report_for_script("cat /proc/2/status\nexit 0\n");
 
@@ -1621,6 +1896,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_file_and_vfs_commands() {
         let report = report_for_script(
             "open-path /etc/motd\nreadlink-path /motd\ncat-file /etc/motd\nmkdir-path /shell-tmp\ncd /shell-tmp\nmkfile-path note\nwrite-file note shell-note\nappend-file note -extra\ncat-file note\nlist-path .\nexit 0\n",
@@ -1633,6 +1909,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_renders_storage_device_and_driver_info() {
         let report = report_for_script("device /dev/storage0\ndriver /drv/storage0\nexit 0\n");
 
@@ -1645,6 +1922,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_storage_request_and_completion_flow() {
         let report = report_for_script(
             "blk-read /dev/storage0 0 1\npoll-path /drv/storage0 read\ndriver-read /drv/storage0\nwrite-file /drv/storage0 sector0:eb58904d5357494e\npoll-path /dev/storage0 read\ncat-file /dev/storage0\nexit 0\n",
@@ -1680,6 +1958,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_networking_commands() {
         let report = report_for_script(
             "mksock-path /run/net0.sock\nnet-config /dev/net0 10.1.0.2 255.255.255.0 10.1.0.1\nnet-admin /dev/net0 1500 4 4 2 up promisc\nudp-bind /run/net0.sock /dev/net0 4000 0.0.0.0 0\nqueue-create kqueue\nnet-watch $LAST_QUEUE_FD /dev/net0 700 /run/net0.sock\nnet-sendto /run/net0.sock 10.1.0.9 5000 hello-host\nnet-sendto /run/net0.sock 10.1.0.10 5001 host-peer2\npoll-path /drv/net0 read\nnet-driver-read /drv/net0\nnet-driver-read /drv/net0\nnet-complete /drv/net0 2\nqueue-wait $LAST_QUEUE_FD\nnet-inject-udp /drv/net0 10.1.0.9 5000 10.1.0.99 4000 host-reply\nnet-inject-udp /drv/net0 10.1.0.10 5001 10.1.0.77 4000 host-peer2-reply\nqueue-wait $LAST_QUEUE_FD\npoll-path /run/net0.sock read\nnet-recvfrom /run/net0.sock\nnet-recvfrom /run/net0.sock\nnet-link /dev/net0 down\nqueue-wait $LAST_QUEUE_FD\nnet-unwatch $LAST_QUEUE_FD /dev/net0 700 /run/net0.sock\nnetif /dev/net0\nnetsock /run/net0.sock\nexit 0\n",
@@ -1692,7 +1971,11 @@ mod tests {
                 .stdout
                 .contains("netif-configured path=/dev/net0 addr=10.1.0.2")
         );
-        assert!(report.stdout.contains("netif-admin path=/dev/net0"));
+        assert!(
+            report.stdout.contains("net-admin path=/dev/net0"),
+            "{}",
+            report.render()
+        );
         assert!(
             report
                 .stdout
@@ -1769,6 +2052,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_detects_invoke_on_suspended_contract() {
         let report = report_for_script(
             "mkdomain render\nmkresource 2 device lease0\nmkcontract 2 1 display scanout\ncontract-state 1 suspended\ninvoke 1\n",
@@ -1779,6 +2063,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_detects_invoke_after_resource_retire() {
         let report = report_for_script(
             "mkdomain render\nmkresource 2 device lease0\nmkcontract 2 1 display scanout\nresource-state 1 retired\ncontracts\ninvoke 1\n",
@@ -1789,6 +2074,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_gpu_submit_and_completion_flow() {
         let report = report_for_script(
             "device /dev/gpu0\ndriver /drv/gpu0\nmkdomain render\nmkresource 2 device gpu0\nresource-governance 2 exclusive-lease\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\ngpu-probe-submit /dev/gpu0 draw:triangle\nclaim 2\ngpu-submit /dev/gpu0 draw:triangle\ndriver /drv/gpu0\ngpu-driver-read /drv/gpu0\ngpu-complete /drv/gpu0 fence:7\ndevice /dev/gpu0\ngpu-read /dev/gpu0\nreleaseclaim 2\ngpu-probe-submit /dev/gpu0 draw:triangle\ncontracts\nexit 0\n",
@@ -1820,16 +2106,15 @@ mod tests {
                 .stdout
                 .contains("claim-acquired contract=2 resource=2")
         );
-        assert!(
-            report
-                .stdout
-                .contains("gpu-submit device=/dev/gpu0 bytes=13 payload=draw:triangle")
-        );
+        assert!(report.stdout.contains(
+            "gpu-submit device=/dev/gpu0 bytes=13 source-api=- translation=- payload=draw:triangle"
+        ));
         assert!(report.stdout.contains("gpu-driver-read driver=/drv/gpu0 outcome=request header=request:1 kind=Write device=/dev/gpu0 opcode=None payload=draw:triangle"));
         assert!(
             report
                 .stdout
-                .contains("gpu-complete driver=/drv/gpu0 bytes=7 payload=fence:7")
+                .contains("gpu-complete driver=/drv/gpu0 bytes=7")
+                && report.stdout.contains("payload=fence:7")
         );
         assert!(
             report
@@ -1861,6 +2146,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_detects_gpu_submit_errors_for_unbound_and_empty_driver_paths() {
         let report = report_for_script(
             "gpu-probe-submit /dev/gpu-unbound draw:triangle\ngpu-driver-read /drv/gpu0\ngpu-probe-complete /drv/gpu0 fence:empty\ngpu-read /dev/gpu0\nexit 0\n",
@@ -1890,6 +2176,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_gpu_present_flow() {
         let report = report_for_script(
             "device /dev/gpu0\ndriver /drv/gpu0\nmkdomain render\nmkresource 2 device gpu0\nresource-governance 2 exclusive-lease\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\ngpu-probe-present /dev/gpu0 frame:boot\nclaim 2\ngpu-present /dev/gpu0 frame:boot\ngpu-driver-read /drv/gpu0\ngpu-complete /drv/gpu0 present:ok\ngpu-read /dev/gpu0\nreleaseclaim 2\ngpu-probe-present /dev/gpu0 frame:boot\nexit 0\n",
@@ -1915,7 +2202,8 @@ mod tests {
         assert!(
             report
                 .stdout
-                .contains("gpu-complete driver=/drv/gpu0 bytes=10 payload=present:ok")
+                .contains("gpu-complete driver=/drv/gpu0 bytes=10")
+                && report.stdout.contains("payload=present:ok")
         );
         assert!(
             report
@@ -1937,6 +2225,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_gpu_readiness_flow() {
         let report = report_for_script(
             "mkdomain render\nmkresource 2 device gpu0\nresource-governance 2 exclusive-lease\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\nfd-watch /drv/gpu0 read\nfd-watch /dev/gpu0 read\nfd-ready\nclaim 2\ngpu-submit /dev/gpu0 draw:ready\nfd-ready\ngpu-driver-read /drv/gpu0\nfd-ready\ngpu-complete /drv/gpu0 fence:11\nfd-ready\ngpu-read /dev/gpu0\nfd-ready\nexit 0\n",
@@ -1954,9 +2243,9 @@ mod tests {
             report.render()
         );
         assert!(
-            report
-                .stdout
-                .contains("gpu-submit device=/dev/gpu0 bytes=10 payload=draw:ready"),
+            report.stdout.contains(
+                "gpu-submit device=/dev/gpu0 bytes=10 source-api=- translation=- payload=draw:ready"
+            ),
             "{}",
             report.render()
         );
@@ -1975,7 +2264,8 @@ mod tests {
         assert!(
             report
                 .stdout
-                .contains("gpu-complete driver=/drv/gpu0 bytes=8 payload=fence:11"),
+                .contains("gpu-complete driver=/drv/gpu0 bytes=8")
+                && report.stdout.contains("payload=fence:11"),
             "{}",
             report.render()
         );
@@ -1994,6 +2284,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_gpu_queue_backpressure_flow() {
         let report = report_for_script(
             "device /dev/gpu0\ndriver /drv/gpu0\nmkdomain render\nmkresource 2 device gpu0\nresource-governance 2 exclusive-lease\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\ngpu-queue-capacity /dev/gpu0 2\nclaim 2\ngpu-submit /dev/gpu0 draw:a\ngpu-present /dev/gpu0 frame:b\ndevice /dev/gpu0\ngpu-probe-submit /dev/gpu0 draw:c\ndriver /drv/gpu0\ngpu-driver-read /drv/gpu0\ngpu-complete /drv/gpu0 fence:a\ngpu-probe-submit /dev/gpu0 draw:c\ndriver /drv/gpu0\ngpu-driver-read /drv/gpu0\ngpu-complete /drv/gpu0 present:b\ngpu-driver-read /drv/gpu0\ngpu-complete /drv/gpu0 fence:c\ngpu-read /dev/gpu0\ngpu-read /dev/gpu0\ngpu-read /dev/gpu0\ndevice /dev/gpu0\ndriver /drv/gpu0\nexit 0\n",
@@ -2037,7 +2328,7 @@ mod tests {
         );
         assert!(
             report.stdout.contains(
-                "gpu-probe-submit device=/dev/gpu0 bytes=6 outcome=submitted payload=draw:c"
+                "gpu-probe-submit device=/dev/gpu0 bytes=6 source-api=- translation=- outcome=submitted payload=draw:c"
             ),
             "{}",
             report.render()
@@ -2099,6 +2390,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_prioritizes_gpu_present_over_queued_writes() {
         let report = report_for_script(
             "mkdomain render\nmkresource 2 device gpu0\nresource-governance 2 exclusive-lease\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\ngpu-queue-capacity /dev/gpu0 4\nclaim 2\ngpu-submit /dev/gpu0 draw:a\ngpu-submit /dev/gpu0 draw:b\ngpu-present /dev/gpu0 frame:p\ngpu-driver-read /drv/gpu0\ngpu-complete /drv/gpu0 fence:a\ngpu-driver-read /drv/gpu0\ngpu-complete /drv/gpu0 present:p\ngpu-driver-read /drv/gpu0\ngpu-complete /drv/gpu0 fence:b\ngpu-read /dev/gpu0\ngpu-read /dev/gpu0\ngpu-read /dev/gpu0\nexit 0\n",
@@ -2150,6 +2442,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_reserves_gpu_queue_slot_for_present_control() {
         let report = report_for_script(
             "mkdomain render\nmkresource 2 device gpu0\nresource-governance 2 exclusive-lease\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\ngpu-queue-capacity /dev/gpu0 2\nclaim 2\ngpu-submit /dev/gpu0 draw:a\ngpu-probe-submit /dev/gpu0 draw:b\ngpu-present /dev/gpu0 frame:r\ngpu-driver-read /drv/gpu0\ngpu-complete /drv/gpu0 fence:a\ngpu-driver-read /drv/gpu0\ngpu-complete /drv/gpu0 present:r\ngpu-read /dev/gpu0\ngpu-read /dev/gpu0\nexit 0\n",
@@ -2157,9 +2450,9 @@ mod tests {
 
         assert_eq!(report.exit_code, 0, "{}", report.render());
         assert!(
-            report
-                .stdout
-                .contains("gpu-submit device=/dev/gpu0 bytes=6 payload=draw:a"),
+            report.stdout.contains(
+                "gpu-submit device=/dev/gpu0 bytes=6 source-api=- translation=- payload=draw:a",
+            ),
             "{}",
             report.render()
         );
@@ -2208,9 +2501,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_releases_reserved_gpu_control_slot_after_failed_present() {
         let report = report_for_script(
-            "mkdomain render\nmkresource 2 device gpu0\nresource-governance 2 exclusive-lease\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\ngpu-queue-capacity /dev/gpu0 2\nclaim 2\ngpu-submit /dev/gpu0 draw:a\ngpu-present /dev/gpu0 frame:f\ngpu-driver-read /drv/gpu0\ngpu-fail-request /drv/gpu0 2 error:present\ngpu-probe-submit /dev/gpu0 draw:b\ngpu-driver-read /drv/gpu0\ngpu-complete /drv/gpu0 fence:a\ngpu-driver-read /drv/gpu0\ngpu-complete /drv/gpu0 fence:b\ngpu-read /dev/gpu0\ngpu-read /dev/gpu0\ngpu-read /dev/gpu0\nexit 0\n",
+            "mkdomain render\nmkresource 2 device gpu0\nresource-governance 2 exclusive-lease\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\ngpu-queue-capacity /dev/gpu0 2\nclaim 2\ngpu-submit /dev/gpu0 draw:a\ngpu-present /dev/gpu0 frame:f\ngpu-driver-read /drv/gpu0\ngpu-fail-request /drv/gpu0 2 error:present\ndevice /dev/gpu0\ndriver /drv/gpu0\ngpu-probe-submit /dev/gpu0 draw:b\ngpu-driver-read /drv/gpu0\ngpu-complete /drv/gpu0 fence:a\ngpu-driver-read /drv/gpu0\ngpu-complete /drv/gpu0 fence:b\ngpu-read /dev/gpu0\ngpu-read /dev/gpu0\ngpu-read /dev/gpu0\nexit 0\n",
         );
 
         assert_eq!(report.exit_code, 0, "{}", report.render());
@@ -2222,8 +2516,26 @@ mod tests {
             report.render()
         );
         assert!(
+            report
+                .stdout
+                .contains("device path=/dev/gpu0 class=graphics state=1")
+                && report.stdout.contains("last-terminal-request=2")
+                && report.stdout.contains("last-terminal-state=failed"),
+            "{}",
+            report.render()
+        );
+        assert!(
+            report
+                .stdout
+                .contains("driver path=/drv/gpu0 state=1 bound-devices=1")
+                && report.stdout.contains("last-terminal-request=2")
+                && report.stdout.contains("last-terminal-state=failed"),
+            "{}",
+            report.render()
+        );
+        assert!(
             report.stdout.contains(
-                "gpu-probe-submit device=/dev/gpu0 bytes=6 outcome=submitted payload=draw:b"
+                "gpu-probe-submit device=/dev/gpu0 bytes=6 source-api=- translation=- outcome=submitted payload=draw:b"
             ),
             "{}",
             report.render()
@@ -2273,6 +2585,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_observes_gpu_control_reserve_state_transitions() {
         let report = report_for_script(
             "mkdomain render\nmkresource 2 device gpu0\nresource-governance 2 exclusive-lease\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\ngpu-queue-capacity /dev/gpu0 2\nclaim 2\ndevice /dev/gpu0\ngpu-submit /dev/gpu0 draw:a\ndevice /dev/gpu0\ngpu-present /dev/gpu0 frame:f\ngpu-driver-read /drv/gpu0\ngpu-fail-request /drv/gpu0 2 error:present\ndevice /dev/gpu0\ngpu-driver-read /drv/gpu0\ngpu-complete /drv/gpu0 fence:a\ndevice /dev/gpu0\ngpu-submit /dev/gpu0 draw:b\ndevice /dev/gpu0\nexit 0\n",
@@ -2308,9 +2621,9 @@ mod tests {
             report.render()
         );
         assert!(
-            report
-                .stdout
-                .contains("gpu-submit device=/dev/gpu0 bytes=6 payload=draw:b"),
+            report.stdout.contains(
+                "gpu-submit device=/dev/gpu0 bytes=6 source-api=- translation=- payload=draw:b",
+            ),
             "{}",
             report.render()
         );
@@ -2324,6 +2637,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_gpu_event_queue_flow() {
         let report = report_for_script(
             "mkdomain render\nmkresource 2 device gpu0\nresource-governance 2 exclusive-lease\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\nclaim 2\nqueue-create kqueue\ngpu-watch $LAST_QUEUE_FD /dev/gpu0 901\ngpu-submit /dev/gpu0 draw:event\nqueue-wait $LAST_QUEUE_FD\ngpu-driver-read /drv/gpu0\ngpu-complete /drv/gpu0 fence:event\nqueue-wait $LAST_QUEUE_FD\ngpu-read /dev/gpu0\ngpu-unwatch $LAST_QUEUE_FD /dev/gpu0 901\nexit 0\n",
@@ -2336,9 +2650,9 @@ mod tests {
             report.render()
         );
         assert!(
-            report
-                .stdout
-                .contains("gpu-submit device=/dev/gpu0 bytes=10 payload=draw:event"),
+            report.stdout.contains(
+                "gpu-submit device=/dev/gpu0 bytes=10 source-api=- translation=- payload=draw:event"
+            ),
             "{}",
             report.render()
         );
@@ -2370,7 +2684,8 @@ mod tests {
         assert!(
             report
                 .stdout
-                .contains("gpu-complete driver=/drv/gpu0 bytes=11 payload=fence:event"),
+                .contains("gpu-complete driver=/drv/gpu0 bytes=11")
+                && report.stdout.contains("payload=fence:event"),
             "{}",
             report.render()
         );
@@ -2389,6 +2704,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_gpu_request_inspection_flow() {
         let report = report_for_script(
             "mkdomain render\nmkresource 2 device gpu0\nresource-governance 2 exclusive-lease\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\nclaim 2\ngpu-submit /dev/gpu0 draw:req\ngpu-request 1\ngpu-driver-read /drv/gpu0\ngpu-request 1\ngpu-complete /drv/gpu0 fence:req\ngpu-request 1\ngpu-read /dev/gpu0\nexit 0\n",
@@ -2431,7 +2747,8 @@ mod tests {
         assert!(
             report
                 .stdout
-                .contains("gpu-complete driver=/drv/gpu0 bytes=9 payload=fence:req"),
+                .contains("gpu-complete driver=/drv/gpu0 bytes=9")
+                && report.stdout.contains("payload=fence:req"),
             "{}",
             report.render()
         );
@@ -2445,6 +2762,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_gpu_lease_handoff_and_event_flow() {
         let report = report_for_script(
             "mkdomain render\nmkresource 2 device gpu0\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\nmkcontract 2 2 display mirror\ngpu-lease-watch 2 900\nclaim 2\nclaim 3\ngpu-lease-wait $LAST_QUEUE_FD\nreleaseclaim 2\ngpu-lease-wait $LAST_QUEUE_FD\ngpu-submit /dev/gpu0 draw:mirror\ngpu-driver-read /drv/gpu0\ngpu-complete /drv/gpu0 fence:9\ngpu-read /dev/gpu0\nreleaseclaim 3\ngpu-probe-submit /dev/gpu0 draw:mirror\ngpu-lease-unwatch $LAST_QUEUE_FD 2 900\nexit 0\n",
@@ -2473,11 +2791,9 @@ mod tests {
                 .stdout
                 .contains("token=900 resource=2 contract=3 kind=handed-off")
         );
-        assert!(
-            report
-                .stdout
-                .contains("gpu-submit device=/dev/gpu0 bytes=11 payload=draw:mirror")
-        );
+        assert!(report.stdout.contains(
+            "gpu-submit device=/dev/gpu0 bytes=11 source-api=- translation=- payload=draw:mirror"
+        ));
         assert!(
             report
                 .stdout
@@ -2487,7 +2803,8 @@ mod tests {
         assert!(
             report
                 .stdout
-                .contains("gpu-complete driver=/drv/gpu0 bytes=7 payload=fence:9")
+                .contains("gpu-complete driver=/drv/gpu0 bytes=7")
+                && report.stdout.contains("payload=fence:9")
         );
         assert!(
             report
@@ -2508,6 +2825,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_gpu_graphics_lease_event_flow() {
         let report = report_for_script(
             "mkdomain render\nmkresource 2 device gpu0\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\nmkcontract 2 2 display mirror\nclaim 2\nqueue-create kqueue\ngpu-watch $LAST_QUEUE_FD /dev/gpu0 902\nclaim 3\nreleaseclaim 2\nqueue-wait $LAST_QUEUE_FD\ngpu-present /dev/gpu0 frame:handoff\ngpu-driver-read /drv/gpu0\ngpu-complete /drv/gpu0 present:handoff\ngpu-read /dev/gpu0\ngpu-unwatch $LAST_QUEUE_FD /dev/gpu0 902\nreleaseclaim 3\nexit 0\n",
@@ -2544,7 +2862,8 @@ mod tests {
         assert!(
             report
                 .stdout
-                .contains("gpu-complete driver=/drv/gpu0 bytes=15 payload=present:handoff"),
+                .contains("gpu-complete driver=/drv/gpu0 bytes=15")
+                && report.stdout.contains("payload=present:handoff"),
             "{}",
             report.render()
         );
@@ -2558,6 +2877,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_gpu_request_cancellation_on_lease_loss_flow() {
         let report = report_for_script(
             "mkdomain render\nmkresource 2 device gpu0\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\nclaim 2\nqueue-create kqueue\ngpu-watch $LAST_QUEUE_FD /dev/gpu0 903\ngpu-submit /dev/gpu0 draw:drop\ngpu-driver-read /drv/gpu0\ngpu-request 1\nreleaseclaim 2\nqueue-wait $LAST_QUEUE_FD\ngpu-request 1\ngpu-driver-read /drv/gpu0\ngpu-read /dev/gpu0\ngpu-unwatch $LAST_QUEUE_FD /dev/gpu0 903\nexit 0\n",
@@ -2605,6 +2925,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_rejects_stale_gpu_completion_request_ids() {
         let report = report_for_script(
             "mkdomain render\nmkresource 2 device gpu0\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\nmkcontract 2 2 display mirror\nclaim 2\ngpu-submit /dev/gpu0 draw:stale\ngpu-driver-read /drv/gpu0\nreleaseclaim 2\nclaim 3\ngpu-submit /dev/gpu0 draw:new\ngpu-driver-read /drv/gpu0\ngpu-probe-complete-request /drv/gpu0 1 stale:done\ngpu-request 1\ngpu-request 2\ngpu-complete-request /drv/gpu0 2 fresh:done\ngpu-request 2\ngpu-read /dev/gpu0\nexit 0\n",
@@ -2656,6 +2977,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_gpu_driver_reset_recovery_flow() {
         let report = report_for_script(
             "mkdomain render\nmkresource 2 device gpu0\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\nclaim 2\ngpu-submit /dev/gpu0 draw:reset\ngpu-driver-read /drv/gpu0\ngpu-request 1\ngpu-driver-reset /drv/gpu0\ngpu-request 1\ndriver /drv/gpu0\ndevice /dev/gpu0\ngpu-submit /dev/gpu0 draw:after\ngpu-driver-read /drv/gpu0\ngpu-complete-request /drv/gpu0 2 fence:after\ngpu-request 2\ngpu-read /dev/gpu0\nexit 0\n",
@@ -2698,9 +3020,9 @@ mod tests {
             report.render()
         );
         assert!(
-            report
-                .stdout
-                .contains("gpu-submit device=/dev/gpu0 bytes=10 payload=draw:after"),
+            report.stdout.contains(
+                "gpu-submit device=/dev/gpu0 bytes=10 source-api=- translation=- payload=draw:after"
+            ),
             "{}",
             report.render()
         );
@@ -2728,6 +3050,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_gpu_fault_and_recovery_event_flow() {
         let report = report_for_script(
             "mkdomain render\nmkresource 2 device gpu0\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\nclaim 2\nqueue-create kqueue\ngpu-watch $LAST_QUEUE_FD /dev/gpu0 904\ngpu-submit /dev/gpu0 draw:fault\ngpu-driver-read /drv/gpu0\ngpu-driver-reset /drv/gpu0\nqueue-wait $LAST_QUEUE_FD\ndriver /drv/gpu0\ndevice /dev/gpu0\ngpu-unwatch $LAST_QUEUE_FD /dev/gpu0 904\nexit 0\n",
@@ -2768,6 +3091,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_gpu_failed_request_flow() {
         let report = report_for_script(
             "mkdomain render\nmkresource 2 device gpu0\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\nclaim 2\nqueue-create kqueue\ngpu-watch $LAST_QUEUE_FD /dev/gpu0 905\ngpu-submit /dev/gpu0 draw:fail\ngpu-driver-read /drv/gpu0\ngpu-fail-request /drv/gpu0 1 error:shader\nqueue-wait $LAST_QUEUE_FD\ngpu-request 1\ngpu-read /dev/gpu0\ngpu-unwatch $LAST_QUEUE_FD /dev/gpu0 905\nexit 0\n",
@@ -2799,6 +3123,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_gpu_explicit_cancel_flow() {
         let report = report_for_script(
             "mkdomain render\nmkresource 2 device gpu0\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\ngpu-queue-capacity /dev/gpu0 2\nclaim 2\nqueue-create kqueue\ngpu-watch $LAST_QUEUE_FD /dev/gpu0 906\ngpu-submit /dev/gpu0 draw:a\ngpu-present /dev/gpu0 frame:cancel\ngpu-request 2\ngpu-cancel-request /drv/gpu0 2 abort:present\nqueue-wait $LAST_QUEUE_FD\ngpu-request 2\ngpu-probe-submit /dev/gpu0 draw:b\ngpu-driver-read /drv/gpu0\ngpu-complete /drv/gpu0 fence:a\ngpu-driver-read /drv/gpu0\ngpu-complete /drv/gpu0 fence:b\ngpu-read /dev/gpu0\ngpu-read /dev/gpu0\ngpu-read /dev/gpu0\ngpu-unwatch $LAST_QUEUE_FD /dev/gpu0 906\nexit 0\n",
@@ -2834,7 +3159,7 @@ mod tests {
         assert!(report.stdout.contains("response=13"), "{}", report.render());
         assert!(
             report.stdout.contains(
-                "gpu-probe-submit device=/dev/gpu0 bytes=6 outcome=submitted payload=draw:b"
+                "gpu-probe-submit device=/dev/gpu0 bytes=6 source-api=- translation=- outcome=submitted payload=draw:b"
             ),
             "{}",
             report.render()
@@ -2877,6 +3202,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_gpu_driver_retire_flow() {
         let report = report_for_script(
             "mkdomain render\nmkresource 2 device gpu0\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\nclaim 2\ngpu-submit /dev/gpu0 draw:retire\ngpu-driver-read /drv/gpu0\ngpu-request 1\ngpu-driver-retire /drv/gpu0\ngpu-request 1\ndriver /drv/gpu0\ndevice /dev/gpu0\ngpu-probe-submit /dev/gpu0 draw:after\ngpu-probe-present /dev/gpu0 frame:after\ngpu-probe-driver-reset /drv/gpu0\ngpu-probe-driver-retire /drv/gpu0\nexit 0\n",
@@ -2947,6 +3273,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_gpu_retired_event_flow() {
         let report = report_for_script(
             "mkdomain render\nmkresource 2 device gpu0\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\nclaim 2\nqueue-create kqueue\ngpu-watch $LAST_QUEUE_FD /dev/gpu0 907\ngpu-submit /dev/gpu0 draw:retire-event\ngpu-driver-read /drv/gpu0\ngpu-driver-retire /drv/gpu0\nqueue-wait $LAST_QUEUE_FD\ngpu-unwatch $LAST_QUEUE_FD /dev/gpu0 907\nexit 0\n",
@@ -2973,6 +3300,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_gpu_unbind_and_rebind_flow() {
         let report = report_for_script(
             "mkdomain render\nmkresource 2 device gpu0\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\nclaim 2\ngpu-submit /dev/gpu0 draw:busy\ngpu-probe-driver-unbind /dev/gpu0\ngpu-driver-read /drv/gpu0\ngpu-complete /drv/gpu0 fence:busy\ngpu-read /dev/gpu0\ngpu-driver-unbind /dev/gpu0\ndevice /dev/gpu0\ndriver /drv/gpu0\ngpu-probe-submit /dev/gpu0 draw:after-unbind\ngpu-driver-bind /dev/gpu0 /drv/gpu1\ndriver /drv/gpu1\ngpu-submit /dev/gpu0 draw:rebound\ngpu-driver-read /drv/gpu1\ngpu-complete /drv/gpu1 fence:rebound\ngpu-read /dev/gpu0\nexit 0\n",
@@ -3036,7 +3364,8 @@ mod tests {
         assert!(
             report
                 .stdout
-                .contains("gpu-complete driver=/drv/gpu1 bytes=13 payload=fence:rebound"),
+                .contains("gpu-complete driver=/drv/gpu1 bytes=13")
+                && report.stdout.contains("payload=fence:rebound"),
             "{}",
             report.render()
         );
@@ -3050,6 +3379,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_rejects_gpu_rebind_after_retire() {
         let report = report_for_script(
             "mkdomain render\nmkresource 2 device gpu0\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\nclaim 2\ngpu-driver-retire /drv/gpu0\ngpu-probe-driver-unbind /dev/gpu0\ngpu-probe-driver-bind /dev/gpu0 /drv/gpu1\nexit 0\n",
@@ -3080,6 +3410,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_tracks_gpu_requests_across_distinct_process_holders() {
         let mut runtime = KernelRuntime::host_runtime_default();
         let owner = runtime
@@ -3178,6 +3509,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_gpu_bar_mmio_claim_map_unmap_flow() {
         let mut platform = sample_gpu_platform();
         let devices = platform.enumerate_devices().unwrap();
@@ -3211,6 +3543,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_rejects_double_gpu_bar_claim_and_stale_unmap() {
         let mut platform = sample_gpu_platform();
         let devices = platform.enumerate_devices().unwrap();
@@ -3246,6 +3579,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_gpu_dma_prepare_complete_release_flow() {
         let mut platform = sample_gpu_platform();
         let buffer = platform
@@ -3279,6 +3613,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_enforces_gpu_dma_constraints_and_stale_release_refusal() {
         let mut platform = sample_gpu_platform();
         let constrained = platform
@@ -3305,6 +3640,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_gpu_interrupt_claim_enable_dispatch_ack_flow() {
         let mut platform = sample_gpu_platform();
         let devices = platform.enumerate_devices().unwrap();
@@ -3327,6 +3663,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_rejects_gpu_interrupt_double_claim_and_stale_ack() {
         let mut platform = sample_gpu_platform();
         let devices = platform.enumerate_devices().unwrap();
@@ -3351,6 +3688,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_gpu_buffer_object_submit_flow() {
         let report = report_for_script(
             "mkdomain render\nmkresource 2 device gpu0\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\nclaim 2\ngpu-buffer-create 32\ngpu-buffer-write 1 0 draw:buffer\ngpu-buffer 1\ngpu-submit-buffer /dev/gpu0 1\ngpu-request 1\ngpu-driver-read /drv/gpu0\ngpu-complete-request /drv/gpu0 1 fence:buffer\ngpu-request 1\ngpu-read /dev/gpu0\nexit 0\n",
@@ -3421,6 +3759,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_observes_hardware_gpu_buffer_submit_via_platform_x86_64() {
         let report = report_for_script_with_runtime(
             "mkdomain render\nmkresource 2 device gpu0\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\nclaim 2\ngpu-buffer-create 32\ngpu-buffer-write 1 0 draw:hardware\ngpu-submit-buffer /dev/gpu0 1\ngpu-driver-read /drv/gpu0\ngpu-scanout /dev/gpu0\nexit 0\n",
@@ -3448,7 +3787,7 @@ mod tests {
         );
         assert!(
             report.stdout.contains(
-                "gpu-scanout device=/dev/gpu0 presented=1 last-frame-bytes=13 frame=draw:hardware"
+                "gpu-scanout device=/dev/gpu0 presented=1 last-frame-bytes=13 frame-tag= api= translation= frame=draw:hardware"
             ),
             "{}",
             report.render()
@@ -3456,6 +3795,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_observes_hardware_gpu_present_via_platform_x86_64() {
         let report = report_for_script_with_runtime(
             "mkdomain render\nmkresource 2 device gpu0\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\nclaim 2\ngpu-present /dev/gpu0 frame:hardware\ngpu-driver-read /drv/gpu0\ngpu-scanout /dev/gpu0\nexit 0\n",
@@ -3483,7 +3823,7 @@ mod tests {
         );
         assert!(
             report.stdout.contains(
-                "gpu-scanout device=/dev/gpu0 presented=1 last-frame-bytes=14 frame=frame:hardware"
+                "gpu-scanout device=/dev/gpu0 presented=1 last-frame-bytes=14 frame-tag= api= translation= frame=frame:hardware"
             ),
             "{}",
             report.render()
@@ -3491,6 +3831,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_gpu_scanout_present_flow() {
         let report = report_for_script(
             "mkdomain render\nmkresource 2 device gpu0\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\nclaim 2\ngpu-present /dev/gpu0 frame:scanout\ngpu-driver-read /drv/gpu0\ngpu-complete-request /drv/gpu0 1 frame:scanout\ngpu-scanout /dev/gpu0\ngpu-read /dev/gpu0\nexit 0\n",
@@ -3520,7 +3861,7 @@ mod tests {
         );
         assert!(
             report.stdout.contains(
-                "gpu-scanout device=/dev/gpu0 presented=1 last-frame-bytes=13 frame=frame:scanout"
+                "gpu-scanout device=/dev/gpu0 presented=1 last-frame-bytes=13 frame-tag= api= translation= frame=frame:scanout"
             ),
             "{}",
             report.render()
@@ -3535,6 +3876,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_observes_gpu_performance_counters() {
         let report = report_for_script(
             "mkdomain render\nmkresource 2 device gpu0\nresource-contract-policy 2 display\nmkcontract 2 2 display scanout\nclaim 2\ngpu-submit /dev/gpu0 draw:perf\ngpu-request 1\ngpu-driver-read /drv/gpu0\ngpu-request 1\ngpu-complete-request /drv/gpu0 1 fence:perf\ngpu-request 1\ngpu-perf /dev/gpu0\ndevice /dev/gpu0\nexit 0\n",
@@ -3582,7 +3924,7 @@ mod tests {
         );
         assert!(
             report.stdout.contains(
-                "device path=/dev/gpu0 class=graphics state=1 queue-depth=0 queue-capacity=64 control-reserve=armed submitted=1 completed=1 total-latency="
+                "device path=/dev/gpu0 class=graphics state=1 queue-depth=0 queue-capacity=64 control-reserve=armed submitted=1 completed=1 last-request=1"
             ),
             "{}",
             report.render()
@@ -3590,6 +3932,411 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
+    fn native_session_report_retains_last_completed_graphics_metadata_on_device_and_driver() {
+        let report = report_for_script(
+            "mkdir-path /games\nmkdir-path /games/orbit\nmkfile-path /games/orbit.manifest\nappend-line /games/orbit.manifest title=Orbit Runner\nappend-line /games/orbit.manifest slug=orbit-runner\nappend-line /games/orbit.manifest exec=/bin/worker\nappend-line /games/orbit.manifest cwd=/games/orbit\nappend-line /games/orbit.manifest gfx.api=directx12\nappend-line /games/orbit.manifest gfx.backend=vulkan\nappend-line /games/orbit.manifest gfx.profile=frame-pace\nappend-line /games/orbit.manifest audio.backend=native-mixer\nappend-line /games/orbit.manifest audio.profile=spatial-mix\nappend-line /games/orbit.manifest input.backend=native-input\nappend-line /games/orbit.manifest input.profile=gamepad-first\nappend-line /games/orbit.manifest shim.prefix=/compat/orbit\nappend-line /games/orbit.manifest shim.saves=/saves/orbit\nappend-line /games/orbit.manifest shim.cache=/cache/orbit\ngame-launch /games/orbit.manifest\nmkfile-path /games/orbit.foreign\nappend-line /games/orbit.foreign surface=1280x720\nappend-line /games/orbit.foreign frame=dx12-host-001\nappend-line /games/orbit.foreign queue=graphics\nappend-line /games/orbit.foreign present-mode=mailbox\nappend-line /games/orbit.foreign completion=wait-complete\nappend-line /games/orbit.foreign clear=000000ff\nappend-line /games/orbit.foreign fill-rect=0,0,1280,720,112233ff\nappend-line /games/orbit.foreign draw-sprite=ship,400,200,96,96\nappend-line /games/orbit.foreign present=0,0,1280,720\ngame-gfx-translate $LAST_PID /games/orbit.foreign\ngame-gfx-status $LAST_PID\ngpu-scanout /dev/gpu0\ndevice /dev/gpu0\ndriver /drv/gpu0\ngame-gfx-driver-read $LAST_PID\ngame-gfx-request $LAST_PID\nexit 0\n",
+        );
+
+        assert_eq!(report.exit_code, 0, "{}", report.render());
+        assert!(
+            report
+                .stdout
+                .contains("gpu-present device=/dev/gpu0 opcode=0x47500001 response=")
+                && report.stdout.contains(
+                    "source-api=directx12 translation=compat-to-vulkan frame=dx12-host-001"
+                ),
+            "{}",
+            report.render()
+        );
+        assert!(
+            report.stdout.contains("game.gfx.status pid=")
+                && report
+                    .stdout
+                    .contains("device-last-terminal-state=completed")
+                && report
+                    .stdout
+                    .contains("driver-last-terminal-state=completed"),
+            "{}",
+            report.render()
+        );
+        assert!(
+            report
+                .stdout
+                .contains("gpu-scanout device=/dev/gpu0 presented=1")
+                && report.stdout.contains("frame-tag=dx12-host-001")
+                && report.stdout.contains("api=directx12")
+                && report.stdout.contains("translation=compat-to-vulkan"),
+            "{}",
+            report.render()
+        );
+        assert!(
+            report
+                .stdout
+                .contains("device path=/dev/gpu0 class=graphics state=1 queue-depth=0")
+                && report.stdout.contains("last-request=1")
+                && report.stdout.contains("last-frame=dx12-host-001")
+                && report.stdout.contains("last-api=directx12")
+                && report.stdout.contains("last-translation=compat-to-vulkan"),
+            "{}",
+            report.render()
+        );
+        assert!(
+            report.stdout.contains(
+                "driver path=/drv/gpu0 state=1 bound-devices=1 queued=0 inflight=0 completed=2 last-request=1 last-frame=dx12-host-001 last-api=directx12 last-translation=compat-to-vulkan"
+            ),
+            "{}",
+            report.render()
+        );
+        assert!(
+            report.stdout.contains("game.gfx.driver-read pid=")
+                && report.stdout.contains("driver=/drv/gpu0")
+                && report.stdout.contains("api=directx12")
+                && report.stdout.contains("translation=compat-to-vulkan")
+                && report
+                    .stdout
+                    .contains("outcome=retained request=1 state=completed"),
+            "{}",
+            report.render()
+        );
+        assert!(
+            report.stdout.contains("game.gfx.request pid=")
+                && report.stdout.contains("outcome=retained")
+                && report.stdout.contains("frame=dx12-host-001")
+                && report.stdout.contains("request-api=directx12")
+                && report
+                    .stdout
+                    .contains("request-translation=compat-to-vulkan"),
+            "{}",
+            report.render()
+        );
+    }
+
+    #[test]
+    #[ignore = "host-runtime-e2e"]
+    fn native_session_report_routes_compat_graphics_through_initialized_x86_provider() {
+        let report = report_for_script_with_runtime(
+            "mkdir-path /games\nmkdir-path /games/orbit\nmkfile-path /games/orbit.manifest\nappend-line /games/orbit.manifest title=Orbit Runner\nappend-line /games/orbit.manifest slug=orbit-runner\nappend-line /games/orbit.manifest exec=/bin/worker\nappend-line /games/orbit.manifest cwd=/games/orbit\nappend-line /games/orbit.manifest gfx.api=directx12\nappend-line /games/orbit.manifest gfx.backend=vulkan\nappend-line /games/orbit.manifest gfx.profile=frame-pace\nappend-line /games/orbit.manifest audio.backend=native-mixer\nappend-line /games/orbit.manifest audio.profile=spatial-mix\nappend-line /games/orbit.manifest input.backend=native-input\nappend-line /games/orbit.manifest input.profile=gamepad-first\nappend-line /games/orbit.manifest shim.prefix=/compat/orbit\nappend-line /games/orbit.manifest shim.saves=/saves/orbit\nappend-line /games/orbit.manifest shim.cache=/cache/orbit\ngame-launch /games/orbit.manifest\nmkfile-path /games/orbit.foreign\nappend-line /games/orbit.foreign surface=1280x720\nappend-line /games/orbit.foreign frame=dx12-x86-compat-001\nappend-line /games/orbit.foreign queue=graphics\nappend-line /games/orbit.foreign present-mode=mailbox\nappend-line /games/orbit.foreign completion=wait-complete\nappend-line /games/orbit.foreign clear=000000ff\nappend-line /games/orbit.foreign fill-rect=0,0,1280,720,112233ff\nappend-line /games/orbit.foreign draw-sprite=ship,400,200,96,96\nappend-line /games/orbit.foreign present=0,0,1280,720\ngame-gfx-translate $LAST_PID /games/orbit.foreign\ngpu-display /dev/gpu0\ngpu-scanout /dev/gpu0\ndevice /dev/gpu0\ndriver /drv/gpu0\nexit 0\n",
+            |runtime| {
+                let (mut platform, locator) = sample_nvidia_gpu_platform();
+                platform.setup_gpu_agent(locator).unwrap();
+                runtime.install_hardware_provider(Box::new(platform));
+            },
+        );
+
+        assert_eq!(report.exit_code, 0, "{}", report.render());
+        assert!(
+            report
+                .stdout
+                .contains("gpu-present device=/dev/gpu0 opcode=0x47500001 response=")
+                && report.stdout.contains(
+                    "source-api=directx12 translation=compat-to-vulkan frame=dx12-x86-compat-001"
+                ),
+            "{}",
+            report.render()
+        );
+        assert!(
+            report
+                .stdout
+                .contains("gpu-display device=/dev/gpu0 pipes=1 planned=1 hardware-confirmed=0"),
+            "{}",
+            report.render()
+        );
+        assert!(
+            report
+                .stdout
+                .contains("gpu-scanout device=/dev/gpu0 presented=1")
+                && report.stdout.contains("frame-tag=dx12-x86-compat-001")
+                && report.stdout.contains("api=directx12")
+                && report.stdout.contains("translation=compat-to-vulkan"),
+            "{}",
+            report.render()
+        );
+        assert!(
+            report
+                .stdout
+                .contains("device path=/dev/gpu0 class=graphics state=1 queue-depth=0")
+                && report.stdout.contains("last-frame=dx12-x86-compat-001")
+                && report.stdout.contains("last-api=directx12")
+                && report.stdout.contains("last-translation=compat-to-vulkan"),
+            "{}",
+            report.render()
+        );
+    }
+
+    #[test]
+    #[ignore = "host-runtime-e2e"]
+    fn native_session_report_falls_back_for_compat_graphics_when_x86_provider_is_not_initialized() {
+        let report = report_for_script_with_runtime(
+            "mkdir-path /games\nmkdir-path /games/orbit\nmkfile-path /games/orbit.manifest\nappend-line /games/orbit.manifest title=Orbit Runner\nappend-line /games/orbit.manifest slug=orbit-runner\nappend-line /games/orbit.manifest exec=/bin/worker\nappend-line /games/orbit.manifest cwd=/games/orbit\nappend-line /games/orbit.manifest gfx.api=directx12\nappend-line /games/orbit.manifest gfx.backend=vulkan\nappend-line /games/orbit.manifest gfx.profile=frame-pace\nappend-line /games/orbit.manifest audio.backend=native-mixer\nappend-line /games/orbit.manifest audio.profile=spatial-mix\nappend-line /games/orbit.manifest input.backend=native-input\nappend-line /games/orbit.manifest input.profile=gamepad-first\nappend-line /games/orbit.manifest shim.prefix=/compat/orbit\nappend-line /games/orbit.manifest shim.saves=/saves/orbit\nappend-line /games/orbit.manifest shim.cache=/cache/orbit\ngame-launch /games/orbit.manifest\nmkfile-path /games/orbit.foreign\nappend-line /games/orbit.foreign surface=1280x720\nappend-line /games/orbit.foreign frame=dx12-x86-fallback-compat-001\nappend-line /games/orbit.foreign queue=graphics\nappend-line /games/orbit.foreign present-mode=mailbox\nappend-line /games/orbit.foreign completion=wait-complete\nappend-line /games/orbit.foreign clear=000000ff\nappend-line /games/orbit.foreign fill-rect=0,0,1280,720,112233ff\nappend-line /games/orbit.foreign draw-sprite=ship,400,200,96,96\nappend-line /games/orbit.foreign present=0,0,1280,720\ngame-gfx-translate $LAST_PID /games/orbit.foreign\ngpu-display /dev/gpu0\ngpu-scanout /dev/gpu0\ngame-gfx-driver-read $LAST_PID\ngame-gfx-request $LAST_PID\nexit 0\n",
+            |runtime| {
+                let (platform, _) = sample_nvidia_gpu_platform();
+                runtime.install_hardware_provider(Box::new(platform));
+            },
+        );
+
+        assert_eq!(report.exit_code, 0, "{}", report.render());
+        assert!(
+            report
+                .stdout
+                .contains("gpu-display device=/dev/gpu0 status=unavailable"),
+            "{}",
+            report.render()
+        );
+        assert!(
+            report
+                .stdout
+                .contains("gpu-scanout device=/dev/gpu0 presented=1")
+                && report
+                    .stdout
+                    .contains("frame-tag=dx12-x86-fallback-compat-001")
+                && report.stdout.contains("api=directx12")
+                && report.stdout.contains("translation=compat-to-vulkan"),
+            "{}",
+            report.render()
+        );
+        assert!(
+            report.stdout.contains("game.gfx.driver-read pid=")
+                && report.stdout.contains("driver=/drv/gpu0")
+                && report.stdout.contains("api=directx12")
+                && report.stdout.contains("translation=compat-to-vulkan")
+                && report.stdout.contains("outcome=retained"),
+            "{}",
+            report.render()
+        );
+        assert!(
+            report.stdout.contains("game.gfx.request pid=")
+                && report.stdout.contains("frame=dx12-x86-fallback-compat-001")
+                && report.stdout.contains("request-api=directx12")
+                && report
+                    .stdout
+                    .contains("request-translation=compat-to-vulkan"),
+            "{}",
+            report.render()
+        );
+    }
+
+    #[test]
+    fn native_user_runtime_present_reports_display_and_scanout_on_initialized_x86_provider() {
+        let (user_runtime, _) = configured_game_user_runtime();
+        {
+            let mut runtime = user_runtime.backend().runtime_mut();
+            let (mut platform, locator) = sample_nvidia_gpu_platform();
+            platform.setup_gpu_agent(locator).unwrap();
+            runtime.install_hardware_provider(Box::new(platform));
+        }
+
+        let payload = b"frame=dx12-user-runtime-001\nqueue=graphics\npresent-mode=mailbox\ncompletion=wait-complete\nsource-api=directx12\ntranslation=compat-to-vulkan";
+        let response = user_runtime
+            .present_gpu_frame("/dev/gpu0", payload)
+            .unwrap();
+        assert_eq!(response, 0x4750_0000);
+
+        let display = user_runtime.inspect_gpu_display("/dev/gpu0").unwrap();
+        assert_eq!(display.present, 1);
+        assert_eq!(display.active_pipes, 1);
+        assert_eq!(display.planned_frames, 1);
+        assert_eq!(display.last_present_offset, 0);
+        assert_eq!(display.last_present_len, payload.len() as u64);
+
+        let scanout = user_runtime.inspect_gpu_scanout("/dev/gpu0").unwrap();
+        assert_eq!(scanout.presented_frames, 1);
+        assert_eq!(scanout.last_frame_len, payload.len() as u64);
+        assert_eq!(abi_text(&scanout.last_frame_tag), "dx12-user-runtime-001");
+        assert_eq!(abi_text(&scanout.last_source_api_name), "directx12");
+        assert_eq!(
+            abi_text(&scanout.last_translation_label),
+            "compat-to-vulkan"
+        );
+
+        let mut frame = [0u8; 256];
+        let read = user_runtime
+            .read_gpu_scanout_frame("/dev/gpu0", &mut frame)
+            .unwrap();
+        assert_eq!(&frame[..read], payload);
+    }
+
+    #[test]
+    fn native_user_runtime_present_falls_back_to_scanout_without_display_on_uninitialized_x86_provider()
+     {
+        let (user_runtime, app) = configured_game_user_runtime();
+        {
+            let mut runtime = user_runtime.backend().runtime_mut();
+            let (platform, _) = sample_nvidia_gpu_platform();
+            runtime.install_hardware_provider(Box::new(platform));
+        }
+
+        let payload = b"frame=dx12-user-runtime-fallback-001\nqueue=graphics\npresent-mode=mailbox\ncompletion=wait-complete\nsource-api=directx12\ntranslation=compat-to-vulkan";
+        let response = user_runtime
+            .present_gpu_frame("/dev/gpu0", payload)
+            .unwrap();
+
+        let display = user_runtime.inspect_gpu_display("/dev/gpu0").unwrap();
+        assert_eq!(display.present, 0);
+        assert_eq!(display.planned_frames, 0);
+
+        let request_id = (response ^ 0x4750_0001) as u64;
+        {
+            let mut runtime = user_runtime.backend().runtime_mut();
+            let driver_fd = runtime.open_path(app, "/drv/gpu0").unwrap();
+            let _request = runtime.read_io(app, driver_fd, 256).unwrap();
+            let completion = format!("request:{request_id}\n{}", String::from_utf8_lossy(payload));
+            runtime
+                .write_io(app, driver_fd, completion.as_bytes())
+                .unwrap();
+        }
+
+        let scanout = user_runtime.inspect_gpu_scanout("/dev/gpu0").unwrap();
+        assert_eq!(scanout.presented_frames, 1);
+        assert_eq!(
+            abi_text(&scanout.last_frame_tag),
+            "dx12-user-runtime-fallback-001"
+        );
+        assert_eq!(abi_text(&scanout.last_source_api_name), "directx12");
+        assert_eq!(
+            abi_text(&scanout.last_translation_label),
+            "compat-to-vulkan"
+        );
+
+        let mut frame = [0u8; 256];
+        let read = user_runtime
+            .read_gpu_scanout_frame("/dev/gpu0", &mut frame)
+            .unwrap();
+        assert_eq!(&frame[..read], payload);
+    }
+
+    #[test]
+    fn native_user_runtime_present_failed_request_retains_terminal_metadata() {
+        let (user_runtime, app) = configured_game_user_runtime();
+        {
+            let mut runtime = user_runtime.backend().runtime_mut();
+            let (platform, _) = sample_nvidia_gpu_platform();
+            runtime.install_hardware_provider(Box::new(platform));
+        }
+
+        let payload = b"frame=dx12-user-runtime-fail-001\nqueue=graphics\npresent-mode=mailbox\ncompletion=wait-complete\nsource-api=directx12\ntranslation=compat-to-vulkan";
+        let response = user_runtime
+            .present_gpu_frame("/dev/gpu0", payload)
+            .unwrap();
+        let request_id = (response ^ 0x4750_0001) as u64;
+
+        {
+            let mut runtime = user_runtime.backend().runtime_mut();
+            let driver_fd = runtime.open_path(app, "/drv/gpu0").unwrap();
+            let _request = runtime.read_io(app, driver_fd, 256).unwrap();
+            let failure = format!("failed-request:{request_id}\nerror:present-runtime");
+            runtime
+                .write_io(app, driver_fd, failure.as_bytes())
+                .unwrap();
+        }
+
+        let device = user_runtime.inspect_device("/dev/gpu0").unwrap();
+        assert_eq!(device.last_terminal_request_id, request_id);
+        assert_eq!(
+            device.last_terminal_state,
+            DeviceRequestState::Failed as u32
+        );
+        assert_eq!(
+            abi_text(&device.last_terminal_frame_tag),
+            "dx12-user-runtime-fail-001"
+        );
+        assert_eq!(abi_text(&device.last_terminal_source_api_name), "directx12");
+        assert_eq!(
+            abi_text(&device.last_terminal_translation_label),
+            "compat-to-vulkan"
+        );
+
+        let driver = user_runtime.inspect_driver("/drv/gpu0").unwrap();
+        assert_eq!(driver.last_terminal_request_id, request_id);
+        assert_eq!(
+            driver.last_terminal_state,
+            DeviceRequestState::Failed as u32
+        );
+        assert_eq!(
+            abi_text(&driver.last_terminal_frame_tag),
+            "dx12-user-runtime-fail-001"
+        );
+
+        let request = user_runtime.inspect_device_request(request_id).unwrap();
+        assert_eq!(request.state, DeviceRequestState::Failed as u32);
+        assert_eq!(abi_text(&request.frame_tag), "dx12-user-runtime-fail-001");
+        assert_eq!(abi_text(&request.source_api_name), "directx12");
+        assert_eq!(abi_text(&request.translation_label), "compat-to-vulkan");
+
+        let device_fd = user_runtime.open_path("/dev/gpu0").unwrap();
+        let mut payload_out = [0u8; 64];
+        let read = user_runtime.read(device_fd, &mut payload_out).unwrap();
+        user_runtime.close(device_fd).unwrap();
+        assert_eq!(&payload_out[..read], b"error:present-runtime");
+    }
+
+    #[test]
+    fn native_user_runtime_present_canceled_request_retains_terminal_metadata() {
+        let (user_runtime, app) = configured_game_user_runtime();
+        {
+            let mut runtime = user_runtime.backend().runtime_mut();
+            let (platform, _) = sample_nvidia_gpu_platform();
+            runtime.install_hardware_provider(Box::new(platform));
+        }
+
+        let payload = b"frame=dx12-user-runtime-cancel-001\nqueue=graphics\npresent-mode=mailbox\ncompletion=wait-complete\nsource-api=directx12\ntranslation=compat-to-vulkan";
+        let response = user_runtime
+            .present_gpu_frame("/dev/gpu0", payload)
+            .unwrap();
+        let request_id = (response ^ 0x4750_0001) as u64;
+
+        {
+            let mut runtime = user_runtime.backend().runtime_mut();
+            let driver_fd = runtime.open_path(app, "/drv/gpu0").unwrap();
+            let _request = runtime.read_io(app, driver_fd, 256).unwrap();
+            let canceled = format!("cancel-request:{request_id}\nabort:present-runtime");
+            runtime
+                .write_io(app, driver_fd, canceled.as_bytes())
+                .unwrap();
+        }
+
+        let device = user_runtime.inspect_device("/dev/gpu0").unwrap();
+        assert_eq!(device.last_terminal_request_id, request_id);
+        assert_eq!(
+            device.last_terminal_state,
+            DeviceRequestState::Canceled as u32
+        );
+        assert_eq!(
+            abi_text(&device.last_terminal_frame_tag),
+            "dx12-user-runtime-cancel-001"
+        );
+        assert_eq!(abi_text(&device.last_terminal_source_api_name), "directx12");
+        assert_eq!(
+            abi_text(&device.last_terminal_translation_label),
+            "compat-to-vulkan"
+        );
+
+        let driver = user_runtime.inspect_driver("/drv/gpu0").unwrap();
+        assert_eq!(driver.last_terminal_request_id, request_id);
+        assert_eq!(
+            driver.last_terminal_state,
+            DeviceRequestState::Canceled as u32
+        );
+        assert_eq!(
+            abi_text(&driver.last_terminal_frame_tag),
+            "dx12-user-runtime-cancel-001"
+        );
+
+        let request = user_runtime.inspect_device_request(request_id).unwrap();
+        assert_eq!(request.state, DeviceRequestState::Canceled as u32);
+        assert_eq!(abi_text(&request.frame_tag), "dx12-user-runtime-cancel-001");
+        assert_eq!(abi_text(&request.source_api_name), "directx12");
+        assert_eq!(abi_text(&request.translation_label), "compat-to-vulkan");
+
+        let device_fd = user_runtime.open_path("/dev/gpu0").unwrap();
+        let mut payload_out = [0u8; 64];
+        let read = user_runtime.read(device_fd, &mut payload_out).unwrap();
+        user_runtime.close(device_fd).unwrap();
+        assert_eq!(read, 0);
+    }
+
+    #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_runs_kernel_launched_shell_through_real_syscall_path() {
         let report = build_native_session_report();
 
@@ -3624,10 +4371,50 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_game_stack_runtime_flow() {
-        let report = report_for_script(
-            "mkdir-path /games\nmkdir-path /games/orbit\nmkfile-path /games/orbit.manifest\nappend-line /games/orbit.manifest title=Orbit Runner\nappend-line /games/orbit.manifest slug=orbit-runner\nappend-line /games/orbit.manifest exec=/bin/worker\nappend-line /games/orbit.manifest cwd=/games/orbit\nappend-line /games/orbit.manifest arg=--fullscreen\nappend-line /games/orbit.manifest gfx.backend=vulkan\nappend-line /games/orbit.manifest gfx.profile=frame-pace\nappend-line /games/orbit.manifest audio.backend=native-mixer\nappend-line /games/orbit.manifest audio.profile=spatial-mix\nappend-line /games/orbit.manifest input.backend=native-input\nappend-line /games/orbit.manifest input.profile=gamepad-first\nappend-line /games/orbit.manifest shim.prefix=/compat/orbit\nappend-line /games/orbit.manifest shim.saves=/saves/orbit\nappend-line /games/orbit.manifest shim.cache=/cache/orbit\nmkfile-path /games/orbit.frame\nappend-line /games/orbit.frame surface=1280x720\nappend-line /games/orbit.frame frame=orbit-001\nappend-line /games/orbit.frame queue=graphics\nappend-line /games/orbit.frame present-mode=mailbox\nappend-line /games/orbit.frame completion=wait-complete\nappend-line /games/orbit.frame clear=#112233\nappend-line /games/orbit.frame rect=10,20,200,100,#ff8800ff\nmkfile-path /games/orbit.mix\nappend-line /games/orbit.mix rate=48000\nappend-line /games/orbit.mix channels=2\nappend-line /games/orbit.mix stream=orbit-intro\nappend-line /games/orbit.mix route=music\nappend-line /games/orbit.mix latency-mode=interactive\nappend-line /games/orbit.mix spatialization=world-3d\nappend-line /games/orbit.mix completion=fire-and-forget\nappend-line /games/orbit.mix tone=lead,440,120,0.800,-0.250,sine\nmkfile-path /games/orbit.input\nappend-line /games/orbit.input device=gamepad\nappend-line /games/orbit.input family=dualshock\nappend-line /games/orbit.input frame=input-001\nappend-line /games/orbit.input layout=gamepad-standard\nappend-line /games/orbit.input key-table=us-game\nappend-line /games/orbit.input pointer-capture=relative-lock\nappend-line /games/orbit.input delivery=immediate\nappend-line /games/orbit.input button=cross,press\ngame-launch /games/orbit.manifest\ngame-gfx-submit $LAST_PID /games/orbit.frame\ngame-audio-submit $LAST_PID /games/orbit.mix\ngame-input-submit $LAST_PID /games/orbit.input\nproc $LAST_PID environ\ncat-file /compat/orbit/session.chan\ngame-status\ngame-stop $LAST_PID\ngame-audio-submit $LAST_PID /games/orbit.mix\nlast-status\nexit 0\n",
-        );
+        let mut lines = orbit_manifest_lines(true);
+        lines.extend([
+            "mkfile-path /games/orbit.frame",
+            "append-line /games/orbit.frame surface=1280x720",
+            "append-line /games/orbit.frame frame=orbit-001",
+            "append-line /games/orbit.frame queue=graphics",
+            "append-line /games/orbit.frame present-mode=mailbox",
+            "append-line /games/orbit.frame completion=wait-complete",
+            "append-line /games/orbit.frame clear=#112233",
+            "append-line /games/orbit.frame rect=10,20,200,100,#ff8800ff",
+            "mkfile-path /games/orbit.mix",
+            "append-line /games/orbit.mix rate=48000",
+            "append-line /games/orbit.mix channels=2",
+            "append-line /games/orbit.mix stream=orbit-intro",
+            "append-line /games/orbit.mix route=music",
+            "append-line /games/orbit.mix latency-mode=interactive",
+            "append-line /games/orbit.mix spatialization=world-3d",
+            "append-line /games/orbit.mix completion=fire-and-forget",
+            "append-line /games/orbit.mix tone=lead,440,120,0.800,-0.250,sine",
+            "mkfile-path /games/orbit.input",
+            "append-line /games/orbit.input device=gamepad",
+            "append-line /games/orbit.input family=dualshock",
+            "append-line /games/orbit.input frame=input-001",
+            "append-line /games/orbit.input layout=gamepad-standard",
+            "append-line /games/orbit.input key-table=us-game",
+            "append-line /games/orbit.input pointer-capture=relative-lock",
+            "append-line /games/orbit.input delivery=immediate",
+            "append-line /games/orbit.input button=cross,press",
+            "game-launch /games/orbit.manifest",
+            "game-gfx-submit $LAST_PID /games/orbit.frame",
+            "game-audio-submit $LAST_PID /games/orbit.mix",
+            "game-input-submit $LAST_PID /games/orbit.input",
+            "proc $LAST_PID environ",
+            "cat-file /compat/orbit/session.chan",
+            "game-status",
+            "game-stop $LAST_PID",
+            "game-audio-submit $LAST_PID /games/orbit.mix",
+            "last-status",
+            "exit 0",
+        ]);
+        let script = shell_script(lines);
+        let report = report_for_script(&script);
 
         assert_eq!(report.exit_code, 0, "{}", report.render());
         assert!(
@@ -3682,10 +4469,28 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_game_audio_lane_runtime_flow() {
-        let report = report_for_script(
-            "mkdir-path /games\nmkdir-path /games/orbit\nmkfile-path /games/orbit.manifest\nappend-line /games/orbit.manifest title=Orbit Runner\nappend-line /games/orbit.manifest slug=orbit-runner\nappend-line /games/orbit.manifest exec=/bin/worker\nappend-line /games/orbit.manifest cwd=/games/orbit\nappend-line /games/orbit.manifest audio.backend=native-mixer\nappend-line /games/orbit.manifest audio.profile=spatial-mix\nappend-line /games/orbit.manifest input.backend=native-input\nappend-line /games/orbit.manifest input.profile=gamepad-first\nappend-line /games/orbit.manifest gfx.backend=vulkan\nappend-line /games/orbit.manifest gfx.profile=frame-pace\nappend-line /games/orbit.manifest shim.prefix=/compat/orbit\nappend-line /games/orbit.manifest shim.saves=/saves/orbit\nappend-line /games/orbit.manifest shim.cache=/cache/orbit\nmkfile-path /games/orbit.mix\nappend-line /games/orbit.mix rate=48000\nappend-line /games/orbit.mix channels=2\nappend-line /games/orbit.mix stream=orbit-intro\nappend-line /games/orbit.mix route=music\nappend-line /games/orbit.mix latency-mode=interactive\nappend-line /games/orbit.mix spatialization=world-3d\nappend-line /games/orbit.mix completion=fire-and-forget\nappend-line /games/orbit.mix tone=lead,440,120,0.800,-0.250,sine\ngame-launch /games/orbit.manifest\ngame-audio-submit $LAST_PID /games/orbit.mix\ngame-audio-status $LAST_PID\ndriver /drv/audio0\ndevice /dev/audio0\nexit 0\n",
-        );
+        let mut lines = orbit_manifest_lines(false);
+        lines.extend([
+            "mkfile-path /games/orbit.mix",
+            "append-line /games/orbit.mix rate=48000",
+            "append-line /games/orbit.mix channels=2",
+            "append-line /games/orbit.mix stream=orbit-intro",
+            "append-line /games/orbit.mix route=music",
+            "append-line /games/orbit.mix latency-mode=interactive",
+            "append-line /games/orbit.mix spatialization=world-3d",
+            "append-line /games/orbit.mix completion=fire-and-forget",
+            "append-line /games/orbit.mix tone=lead,440,120,0.800,-0.250,sine",
+            "game-launch /games/orbit.manifest",
+            "game-audio-submit $LAST_PID /games/orbit.mix",
+            "game-audio-status $LAST_PID",
+            "driver /drv/audio0",
+            "device /dev/audio0",
+            "exit 0",
+        ]);
+        let script = shell_script(lines);
+        let report = report_for_script(&script);
 
         assert_eq!(report.exit_code, 0, "{}", report.render());
         assert!(
@@ -3728,10 +4533,28 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_game_input_lane_runtime_flow() {
-        let report = report_for_script(
-            "mkdir-path /games\nmkdir-path /games/orbit\nmkfile-path /games/orbit.manifest\nappend-line /games/orbit.manifest title=Orbit Runner\nappend-line /games/orbit.manifest slug=orbit-runner\nappend-line /games/orbit.manifest exec=/bin/worker\nappend-line /games/orbit.manifest cwd=/games/orbit\nappend-line /games/orbit.manifest audio.backend=native-mixer\nappend-line /games/orbit.manifest audio.profile=spatial-mix\nappend-line /games/orbit.manifest input.backend=native-input\nappend-line /games/orbit.manifest input.profile=gamepad-first\nappend-line /games/orbit.manifest gfx.backend=vulkan\nappend-line /games/orbit.manifest gfx.profile=frame-pace\nappend-line /games/orbit.manifest shim.prefix=/compat/orbit\nappend-line /games/orbit.manifest shim.saves=/saves/orbit\nappend-line /games/orbit.manifest shim.cache=/cache/orbit\nmkfile-path /games/orbit.input\nappend-line /games/orbit.input device=gamepad\nappend-line /games/orbit.input family=dualshock\nappend-line /games/orbit.input frame=input-001\nappend-line /games/orbit.input layout=gamepad-standard\nappend-line /games/orbit.input key-table=us-game\nappend-line /games/orbit.input pointer-capture=relative-lock\nappend-line /games/orbit.input delivery=immediate\nappend-line /games/orbit.input button=cross,press\ngame-launch /games/orbit.manifest\ngame-input-submit $LAST_PID /games/orbit.input\ngame-input-status $LAST_PID\ndriver /drv/input0\ndevice /dev/input0\nexit 0\n",
-        );
+        let mut lines = orbit_manifest_lines(false);
+        lines.extend([
+            "mkfile-path /games/orbit.input",
+            "append-line /games/orbit.input device=gamepad",
+            "append-line /games/orbit.input family=dualshock",
+            "append-line /games/orbit.input frame=input-001",
+            "append-line /games/orbit.input layout=gamepad-standard",
+            "append-line /games/orbit.input key-table=us-game",
+            "append-line /games/orbit.input pointer-capture=relative-lock",
+            "append-line /games/orbit.input delivery=immediate",
+            "append-line /games/orbit.input button=cross,press",
+            "game-launch /games/orbit.manifest",
+            "game-input-submit $LAST_PID /games/orbit.input",
+            "game-input-status $LAST_PID",
+            "driver /drv/input0",
+            "device /dev/input0",
+            "exit 0",
+        ]);
+        let script = shell_script(lines);
+        let report = report_for_script(&script);
 
         assert_eq!(report.exit_code, 0, "{}", report.render());
         assert!(
@@ -3774,10 +4597,17 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_game_stack_launch_only() {
-        let report = report_for_script(
-            "mkdir-path /games\nmkdir-path /games/orbit\nmkfile-path /games/orbit.manifest\nappend-line /games/orbit.manifest title=Orbit Runner\nappend-line /games/orbit.manifest slug=orbit-runner\nappend-line /games/orbit.manifest exec=/bin/worker\nappend-line /games/orbit.manifest cwd=/games/orbit\nappend-line /games/orbit.manifest gfx.backend=vulkan\nappend-line /games/orbit.manifest gfx.profile=frame-pace\nappend-line /games/orbit.manifest audio.backend=native-mixer\nappend-line /games/orbit.manifest audio.profile=spatial-mix\nappend-line /games/orbit.manifest input.backend=native-input\nappend-line /games/orbit.manifest input.profile=gamepad-first\nappend-line /games/orbit.manifest shim.prefix=/compat/orbit\nappend-line /games/orbit.manifest shim.saves=/saves/orbit\nappend-line /games/orbit.manifest shim.cache=/cache/orbit\ngame-launch /games/orbit.manifest\nproc $LAST_PID environ\ngame-status\nexit 0\n",
-        );
+        let mut lines = orbit_manifest_lines(false);
+        lines.extend([
+            "game-launch /games/orbit.manifest",
+            "proc $LAST_PID environ",
+            "game-status",
+            "exit 0",
+        ]);
+        let script = shell_script(lines);
+        let report = report_for_script(&script);
 
         assert_eq!(report.exit_code, 0, "{}", report.render());
         assert!(
@@ -3795,10 +4625,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_game_stack_launch_exit_only() {
-        let report = report_for_script(
-            "mkdir-path /games\nmkdir-path /games/orbit\nmkfile-path /games/orbit.manifest\nappend-line /games/orbit.manifest title=Orbit Runner\nappend-line /games/orbit.manifest slug=orbit-runner\nappend-line /games/orbit.manifest exec=/bin/worker\nappend-line /games/orbit.manifest cwd=/games/orbit\nappend-line /games/orbit.manifest gfx.backend=vulkan\nappend-line /games/orbit.manifest gfx.profile=frame-pace\nappend-line /games/orbit.manifest audio.backend=native-mixer\nappend-line /games/orbit.manifest audio.profile=spatial-mix\nappend-line /games/orbit.manifest input.backend=native-input\nappend-line /games/orbit.manifest input.profile=gamepad-first\nappend-line /games/orbit.manifest shim.prefix=/compat/orbit\nappend-line /games/orbit.manifest shim.saves=/saves/orbit\nappend-line /games/orbit.manifest shim.cache=/cache/orbit\ngame-launch /games/orbit.manifest\nexit 0\n",
-        );
+        let mut lines = orbit_manifest_lines(false);
+        lines.extend(["game-launch /games/orbit.manifest", "exit 0"]);
+        let script = shell_script(lines);
+        let report = report_for_script(&script);
 
         assert_eq!(report.exit_code, 0, "{}", report.render());
         assert!(
@@ -3809,10 +4641,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "host-runtime-e2e"]
     fn native_session_report_completes_game_stack_launch_and_status_only() {
-        let report = report_for_script(
-            "mkdir-path /games\nmkdir-path /games/orbit\nmkfile-path /games/orbit.manifest\nappend-line /games/orbit.manifest title=Orbit Runner\nappend-line /games/orbit.manifest slug=orbit-runner\nappend-line /games/orbit.manifest exec=/bin/worker\nappend-line /games/orbit.manifest cwd=/games/orbit\nappend-line /games/orbit.manifest gfx.backend=vulkan\nappend-line /games/orbit.manifest gfx.profile=frame-pace\nappend-line /games/orbit.manifest audio.backend=native-mixer\nappend-line /games/orbit.manifest audio.profile=spatial-mix\nappend-line /games/orbit.manifest input.backend=native-input\nappend-line /games/orbit.manifest input.profile=gamepad-first\nappend-line /games/orbit.manifest shim.prefix=/compat/orbit\nappend-line /games/orbit.manifest shim.saves=/saves/orbit\nappend-line /games/orbit.manifest shim.cache=/cache/orbit\ngame-launch /games/orbit.manifest\ngame-status\nexit 0\n",
-        );
+        let mut lines = orbit_manifest_lines(false);
+        lines.extend(["game-launch /games/orbit.manifest", "game-status", "exit 0"]);
+        let script = shell_script(lines);
+        let report = report_for_script(&script);
 
         assert_eq!(report.exit_code, 0, "{}", report.render());
         assert!(

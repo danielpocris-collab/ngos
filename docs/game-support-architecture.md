@@ -431,7 +431,7 @@ GPU subsystem is done when:
 6. ✅ Game waits on event queue for frame completion
 7. ✅ VRAM mapping works for texture data
 8. ✅ introspect_gpu() returns accurate state
-9. ✅ host-runtime reports GPU activity
+9. ✅ suprafețele auxiliare pot raporta activitatea GPU fără a redefini truth path-ul real
 10. ✅ Tests cover PCI → driver → game pipeline
 11. ✅ Tests cover error cases (invalid commands, out of VRAM, etc.)
 12. ✅ Godot/Unreal can use GPU to render frames

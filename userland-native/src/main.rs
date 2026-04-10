@@ -29,38 +29,67 @@ use ngos_user_abi::{USER_DEBUG_MARKER_EXIT, USER_DEBUG_MARKER_START};
 use ngos_user_runtime::{Amd64SyscallBackend, Runtime};
 
 #[cfg(target_os = "none")]
-struct NullAllocator;
+struct UserAllocator;
 
 #[cfg(target_os = "none")]
-const USER_HEAP_SIZE: usize = 1024 * 1024;
+const USER_HEAP_SIZE: usize = 256 * 1024 * 1024;
 #[cfg(target_os = "none")]
 #[repr(align(16))]
 struct UserHeap([u8; USER_HEAP_SIZE]);
 #[cfg(target_os = "none")]
 static mut USER_HEAP: UserHeap = UserHeap([0; USER_HEAP_SIZE]);
 #[cfg(target_os = "none")]
+static USER_HEAP_START: AtomicUsize = AtomicUsize::new(0);
+#[cfg(target_os = "none")]
 static USER_HEAP_NEXT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(target_os = "none")]
+static USER_HEAP_END: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(target_os = "none")]
-unsafe impl GlobalAlloc for NullAllocator {
+unsafe impl Sync for UserAllocator {}
+
+#[cfg(target_os = "none")]
+impl UserAllocator {
+    const fn new() -> Self {
+        Self
+    }
+
+    unsafe fn initialize_if_needed(&self) {
+        if USER_HEAP_START.load(Ordering::Acquire) != 0 {
+            return;
+        }
+        let heap_base = ptr::addr_of_mut!(USER_HEAP.0).cast::<u8>() as usize;
+        let heap_end = heap_base.saturating_add(USER_HEAP_SIZE);
+        USER_HEAP_START.store(heap_base, Ordering::Release);
+        USER_HEAP_NEXT.store(heap_base, Ordering::Release);
+        USER_HEAP_END.store(heap_end, Ordering::Release);
+    }
+}
+
+#[cfg(target_os = "none")]
+unsafe impl GlobalAlloc for UserAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        self.initialize_if_needed();
+        let heap_start = USER_HEAP_START.load(Ordering::Acquire);
+        let heap_end = USER_HEAP_END.load(Ordering::Acquire);
+        if heap_start == 0 || heap_end <= heap_start {
+            return ptr::null_mut();
+        }
         let align = layout.align().max(1);
         let size = layout.size().max(1);
-        let heap_base = unsafe { ptr::addr_of_mut!(USER_HEAP.0).cast::<u8>() as usize };
-        let heap_end = heap_base + USER_HEAP_SIZE;
         let mut current = USER_HEAP_NEXT.load(Ordering::Acquire);
-        loop {
-            let aligned = align_up_usize(heap_base + current, align);
-            let Some(next) = aligned.checked_add(size) else {
-                return ptr::null_mut();
+        while current != 0 {
+            let aligned = align_up_usize(current.max(heap_start), align);
+            let next = match aligned.checked_add(size) {
+                Some(end) => end,
+                None => return ptr::null_mut(),
             };
             if next > heap_end {
                 return ptr::null_mut();
             }
-            let next_offset = next - heap_base;
             match USER_HEAP_NEXT.compare_exchange(
                 current,
-                next_offset,
+                next,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
@@ -68,14 +97,17 @@ unsafe impl GlobalAlloc for NullAllocator {
                 Err(observed) => current = observed,
             }
         }
+        ptr::null_mut()
     }
 
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
+    unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
+        let _ = ptr;
+    }
 }
 
 #[cfg(target_os = "none")]
 #[global_allocator]
-static GLOBAL_ALLOCATOR: NullAllocator = NullAllocator;
+static GLOBAL_ALLOCATOR: UserAllocator = UserAllocator::new();
 
 #[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
@@ -83,8 +115,9 @@ pub extern "C" fn _start(
     argc: usize,
     argv: *const *const u8,
     envp: *const *const u8,
-    auxv: *const AuxvEntry,
+    _sysret_reserved: usize,
     _stack_alignment: usize,
+    auxv: *const AuxvEntry,
 ) -> ! {
     debug_break(USER_DEBUG_MARKER_START, argc as u64);
     debug_break(0x4e47_4f53_5553_5041, argv as u64);
@@ -143,7 +176,7 @@ pub extern "C" fn _start(
 #[cfg(any(target_os = "none", test))]
 const MAX_BOOTSTRAP_ARGS: usize = 16;
 #[cfg(any(target_os = "none", test))]
-const MAX_BOOTSTRAP_ENVP: usize = 32;
+const MAX_BOOTSTRAP_ENVP: usize = 64;
 #[cfg(any(target_os = "none", test))]
 const MAX_BOOTSTRAP_AUXV: usize = 32;
 

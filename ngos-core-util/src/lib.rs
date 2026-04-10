@@ -1,3 +1,24 @@
+#![cfg_attr(target_os = "none", no_std)]
+
+//! Canonical subsystem role:
+//! - subsystem: shared core utility support
+//! - owner layer: shared support layer
+//! - semantic owner: `ngos-core-util`
+//! - truth path role: common utility support used by canonical crates without
+//!   owning subsystem semantics
+//!
+//! Canonical contract families defined here:
+//! - shared utility contracts
+//! - range and helper support contracts
+//!
+//! This crate may define reusable utility behavior, but it must not redefine
+//! kernel, runtime, or subsystem truth.
+
+extern crate alloc;
+
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1237,7 +1258,7 @@ fn pctrie_branch<V>(left: u64, right: u64) -> PctrieInternal<V> {
         owner: left & pctrie_mask(shift + PCTRIE_WIDTH),
         shift,
         popmap: 0,
-        children: std::array::from_fn(|_| None),
+        children: core::array::from_fn(|_| None),
     }
 }
 

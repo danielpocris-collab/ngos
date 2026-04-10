@@ -152,6 +152,10 @@ impl KernelRuntime {
             .map_err(Into::into)
     }
 
+    pub fn revoke_capability(&mut self, id: CapabilityId) -> Result<Capability, RuntimeError> {
+        self.capabilities.revoke(id).map_err(Into::into)
+    }
+
     pub fn set_process_args(
         &mut self,
         pid: ProcessId,
@@ -181,6 +185,23 @@ impl KernelRuntime {
             return Err(RuntimeError::Vfs(VfsError::NotDirectory));
         }
         self.processes.set_cwd(pid, status.path)?;
+        Ok(())
+    }
+
+    pub fn set_process_root(
+        &mut self,
+        pid: ProcessId,
+        root: impl Into<String>,
+    ) -> Result<(), RuntimeError> {
+        let root = root.into();
+        let status = self.stat_path(&root)?;
+        if status.kind != ObjectKind::Directory {
+            return Err(RuntimeError::Vfs(VfsError::NotDirectory));
+        }
+        self.processes.set_root(pid, status.path.clone())?;
+        if !self.processes.get(pid)?.cwd().starts_with(&status.path) {
+            self.processes.set_cwd(pid, status.path)?;
+        }
         Ok(())
     }
 
