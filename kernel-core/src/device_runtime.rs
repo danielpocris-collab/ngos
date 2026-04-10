@@ -1,10 +1,47 @@
+//! Canonical subsystem role:
+//! - subsystem: device and driver runtime
+//! - owner layer: Layer 1
+//! - semantic owner: `kernel-core`
+//! - truth path role: canonical device/runtime state and request handling model
+//!   for `ngos`
+//!
+//! Canonical contract families defined here:
+//! - device registry contracts
+//! - driver binding contracts
+//! - network/device runtime contracts
+//! - device request and completion contracts
+//!
+//! This module may define and mutate canonical device runtime truth. Higher
+//! layers may inspect or operate it through contracts, but they must not
+//! redefine it.
+
 use super::*;
 use crate::device_model::{
     DeviceEndpoint, DeviceRegistry, DeviceRequest, DriverEndpoint, GpuBufferObject, NetworkBuffer,
-    NetworkBufferState, NetworkInterface, NetworkSocket, SocketRxPacket,
+    NetworkBufferState, NetworkInterface, NetworkSocket, SocketRxPacket, SocketType, TcpControlBlock,
+    TcpFlags, TcpSegment, TcpState,
 };
 use crate::eventing_model::GraphicsEventKind;
 use crate::runtime_core::RuntimeChannel;
+
+fn parse_graphics_payload_metadata(bytes: &[u8]) -> (String, String, String) {
+    let Ok(text) = core::str::from_utf8(bytes) else {
+        return (String::new(), String::new(), String::new());
+    };
+    let mut frame_tag = String::new();
+    let mut source_api_name = String::new();
+    let mut translation_label = String::new();
+    for line in text.lines() {
+        if let Some(value) = line.strip_prefix("frame=") {
+            frame_tag = value.to_string();
+        } else if let Some(value) = line.strip_prefix("source-api=") {
+            source_api_name = value.to_string();
+        } else if let Some(value) = line.strip_prefix("translation=") {
+            translation_label = value.to_string();
+        }
+    }
+    (frame_tag, source_api_name, translation_label)
+}
 
 fn device_class_for_path(path: &str) -> DeviceClass {
     if path.starts_with("/net/") || path.starts_with("/dev/net") {
@@ -137,6 +174,70 @@ fn build_udp_ipv4_frame(
     let udp_checksum = checksum16(&pseudo);
     udp[6..8].copy_from_slice(&udp_checksum.to_be_bytes());
     frame.extend_from_slice(&udp);
+    frame
+}
+
+fn build_tcp_ipv4_frame(
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    segment: &TcpSegment,
+) -> Vec<u8> {
+    let tcp_header_len = 20;
+    let payload_len = segment.payload.len();
+    let tcp_len = tcp_header_len + payload_len;
+    let ip_len = 20 + tcp_len;
+    let mut frame = Vec::with_capacity(14 + ip_len);
+    frame.extend_from_slice(&dst_mac);
+    frame.extend_from_slice(&src_mac);
+    frame.extend_from_slice(&0x0800u16.to_be_bytes());
+
+    let mut ip_header = [0u8; 20];
+    ip_header[0] = 0x45;
+    ip_header[1] = 0;
+    ip_header[2..4].copy_from_slice(&(ip_len as u16).to_be_bytes());
+    ip_header[4..6].copy_from_slice(&0u16.to_be_bytes());
+    ip_header[6..8].copy_from_slice(&0x4000u16.to_be_bytes());
+    ip_header[8] = 64;
+    ip_header[9] = 6; // TCP protocol
+    ip_header[12..16].copy_from_slice(&src_ip);
+    ip_header[16..20].copy_from_slice(&dst_ip);
+    let ip_checksum = checksum16(&ip_header);
+    ip_header[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+    frame.extend_from_slice(&ip_header);
+
+    let mut tcp_header = Vec::with_capacity(tcp_header_len);
+    tcp_header.extend_from_slice(&src_port.to_be_bytes());
+    tcp_header.extend_from_slice(&dst_port.to_be_bytes());
+    tcp_header.extend_from_slice(&segment.seq.to_be_bytes());
+    tcp_header.extend_from_slice(&segment.ack.to_be_bytes());
+    
+    // Data offset (4 bits) + Reserved (4 bits) = 0x50 (5 words = 20 bytes)
+    tcp_header.push(0x50);
+    tcp_header.push(segment.flags.to_u8());
+    
+    tcp_header.extend_from_slice(&segment.window.to_be_bytes());
+    tcp_header.extend_from_slice(&0u16.to_be_bytes()); // Checksum (0 for now)
+    tcp_header.extend_from_slice(&0u16.to_be_bytes()); // Urgent pointer
+
+    frame.extend_from_slice(&tcp_header);
+    frame.extend_from_slice(&segment.payload);
+
+    // TCP pseudo-header for checksum
+    let mut pseudo = Vec::with_capacity(12 + tcp_len);
+    pseudo.extend_from_slice(&src_ip);
+    pseudo.extend_from_slice(&dst_ip);
+    pseudo.push(0);
+    pseudo.push(6); // TCP
+    pseudo.extend_from_slice(&(tcp_len as u16).to_be_bytes());
+    pseudo.extend_from_slice(&tcp_header);
+    pseudo.extend_from_slice(&segment.payload);
+    let tcp_checksum = checksum16(&pseudo);
+    frame[36..38].copy_from_slice(&tcp_checksum.to_be_bytes());
+
     frame
 }
 
@@ -352,6 +453,11 @@ fn complete_device_driver_request(
     let request_buffer_id = request.graphics_buffer_id;
     let request_submitted_tick = request.submitted_tick;
     let request_started_tick = request.started_tick;
+    let request_payload = request.payload.clone();
+    let request_state = request.state;
+    let request_frame_tag = request.frame_tag.clone();
+    let request_source_api_name = request.source_api_name.clone();
+    let request_translation_label = request.translation_label.clone();
     let device_path = request.device_path.clone();
     let queue_drained = {
         let device = device_mut(&mut runtime.device_registry, &device_path)?;
@@ -366,16 +472,36 @@ fn complete_device_driver_request(
             && request_kind == DeviceRequestKind::Control
             && request_opcode == Some(0x4750_0001)
         {
+            let (response_frame_tag, response_source_api_name, response_translation_label) =
+                parse_graphics_payload_metadata(payload);
+            let presented_payload = if response_frame_tag.is_empty()
+                && response_source_api_name.is_empty()
+                && response_translation_label.is_empty()
+                && !request_payload.is_empty()
+            {
+                request_payload.as_slice()
+            } else {
+                payload
+            };
             device.graphics_presented_frames = device.graphics_presented_frames.saturating_add(1);
             device.graphics_last_presented_frame.clear();
             device
                 .graphics_last_presented_frame
-                .extend_from_slice(payload);
+                .extend_from_slice(presented_payload);
         }
         if outcome != DriverRequestOutcome::Cancel {
             device.completion_queue.push(request_id);
             device.completed_requests = device.completed_requests.saturating_add(1);
+            device.last_completed_request_id = request_id;
+            device.last_completed_frame_tag = request_frame_tag.clone();
+            device.last_completed_source_api_name = request_source_api_name.clone();
+            device.last_completed_translation_label = request_translation_label.clone();
         }
+        device.last_terminal_request_id = request_id;
+        device.last_terminal_state = request_state;
+        device.last_terminal_frame_tag = request_frame_tag.clone();
+        device.last_terminal_source_api_name = request_source_api_name.clone();
+        device.last_terminal_translation_label = request_translation_label.clone();
         let latency_ticks = runtime.current_tick.saturating_sub(request_submitted_tick);
         device.total_latency_ticks = device.total_latency_ticks.saturating_add(latency_ticks);
         device.max_latency_ticks = device.max_latency_ticks.max(latency_ticks);
@@ -431,7 +557,16 @@ fn complete_device_driver_request(
             .retain(|candidate| *candidate != request_id);
         if outcome != DriverRequestOutcome::Cancel {
             driver.completed_requests = driver.completed_requests.saturating_add(1);
+            driver.last_completed_request_id = request_id;
+            driver.last_completed_frame_tag = request_frame_tag.clone();
+            driver.last_completed_source_api_name = request_source_api_name.clone();
+            driver.last_completed_translation_label = request_translation_label.clone();
         }
+        driver.last_terminal_request_id = request_id;
+        driver.last_terminal_state = request_state;
+        driver.last_terminal_frame_tag = request_frame_tag.clone();
+        driver.last_terminal_source_api_name = request_source_api_name.clone();
+        driver.last_terminal_translation_label = request_translation_label.clone();
     }
     let _ = refresh_and_notify_bindings_for_paths(runtime, &[&device_path, driver_path]);
     Ok(true)
@@ -584,6 +719,15 @@ fn retire_graphics_driver(
         driver.state = DriverState::Retired;
         driver.queued_requests.clear();
         driver.in_flight_requests.clear();
+        driver.last_completed_request_id = 0;
+        driver.last_completed_frame_tag.clear();
+        driver.last_completed_source_api_name.clear();
+        driver.last_completed_translation_label.clear();
+        driver.last_terminal_request_id = 0;
+        driver.last_terminal_state = DeviceRequestState::Queued;
+        driver.last_terminal_frame_tag.clear();
+        driver.last_terminal_source_api_name.clear();
+        driver.last_terminal_translation_label.clear();
     }
     for device_path in &bound_devices {
         if let Ok(device) = device_mut(&mut runtime.device_registry, device_path) {
@@ -591,6 +735,15 @@ fn retire_graphics_driver(
             device.pending_requests.clear();
             device.completion_queue.clear();
             device.graphics_control_reserve_armed = false;
+            device.last_completed_request_id = 0;
+            device.last_completed_frame_tag.clear();
+            device.last_completed_source_api_name.clear();
+            device.last_completed_translation_label.clear();
+            device.last_terminal_request_id = 0;
+            device.last_terminal_state = DeviceRequestState::Queued;
+            device.last_terminal_frame_tag.clear();
+            device.last_terminal_source_api_name.clear();
+            device.last_terminal_translation_label.clear();
             if let Some(device_inode) = graphics_event_device_inode(runtime, device_path) {
                 let _ = event_queue_runtime::emit_graphics_events(
                     runtime,
@@ -1112,6 +1265,15 @@ impl KernelRuntime {
                     queued_requests: Vec::new(),
                     in_flight_requests: Vec::new(),
                     completed_requests: 0,
+                    last_completed_request_id: 0,
+                    last_completed_frame_tag: String::new(),
+                    last_completed_source_api_name: String::new(),
+                    last_completed_translation_label: String::new(),
+                    last_terminal_request_id: 0,
+                    last_terminal_state: DeviceRequestState::Queued,
+                    last_terminal_frame_tag: String::new(),
+                    last_terminal_source_api_name: String::new(),
+                    last_terminal_translation_label: String::new(),
                 });
             }
             ObjectKind::Device => {
@@ -1139,6 +1301,15 @@ impl KernelRuntime {
                     graphics_last_presented_frame: Vec::new(),
                     submitted_requests: 0,
                     completed_requests: 0,
+                    last_completed_request_id: 0,
+                    last_completed_frame_tag: String::new(),
+                    last_completed_source_api_name: String::new(),
+                    last_completed_translation_label: String::new(),
+                    last_terminal_request_id: 0,
+                    last_terminal_state: DeviceRequestState::Queued,
+                    last_terminal_frame_tag: String::new(),
+                    last_terminal_source_api_name: String::new(),
+                    last_terminal_translation_label: String::new(),
                     total_latency_ticks: 0,
                     max_latency_ticks: 0,
                     total_queue_wait_ticks: 0,
@@ -1158,6 +1329,7 @@ impl KernelRuntime {
         socket_path: &str,
         owner: ProcessId,
         device_path: &str,
+        socket_type: SocketType,
     ) -> Result<(), RuntimeError> {
         let iface_index = self
             .network_ifaces
@@ -1184,6 +1356,8 @@ impl KernelRuntime {
                 tx_packets: 0,
                 rx_packets: 0,
                 dropped_packets: 0,
+                socket_type,
+                tcp_state: None,
             });
         }
         if !self.network_ifaces[iface_index]
@@ -1338,7 +1512,7 @@ impl KernelRuntime {
         remote_ipv4: [u8; 4],
         remote_port: u16,
     ) -> Result<(), RuntimeError> {
-        self.attach_socket_to_network_interface(socket_path, owner, device_path)?;
+        self.attach_socket_to_network_interface(socket_path, owner, device_path, SocketType::Udp)?;
         let socket = self
             .network_sockets
             .iter_mut()
@@ -1552,6 +1726,981 @@ impl KernelRuntime {
             .find(|socket| socket.path == socket_path)
             .map(NetworkSocket::info)
             .ok_or(DeviceModelError::InvalidDevice.into())
+    }
+
+    // ===== TCP Implementation =====
+
+    pub fn tcp_listen(
+        &mut self,
+        socket_path: &str,
+        owner: ProcessId,
+        device_path: &str,
+        local_port: u16,
+        backlog: usize,
+    ) -> Result<(), RuntimeError> {
+        self.attach_socket_to_network_interface(socket_path, owner, device_path, SocketType::Tcp)?;
+        let socket = self
+            .network_sockets
+            .iter_mut()
+            .find(|socket| socket.path == socket_path && socket.owner == owner)
+            .ok_or(DeviceModelError::InvalidDevice)?;
+        socket.local_port = local_port;
+        socket.tcp_state = Some(TcpControlBlock::new_listen(local_port, backlog));
+        socket.connected = false;
+        Ok(())
+    }
+
+    pub fn tcp_connect(
+        &mut self,
+        socket_path: &str,
+        owner: ProcessId,
+        remote_ipv4: [u8; 4],
+        remote_port: u16,
+        current_tick: u64,
+    ) -> Result<(), RuntimeError> {
+        let socket = self
+            .network_sockets
+            .iter_mut()
+            .find(|socket| socket.path == socket_path && socket.owner == owner)
+            .ok_or(DeviceModelError::InvalidDevice)?;
+
+        if socket.socket_type != SocketType::Tcp {
+            return Err(DeviceModelError::InvalidDevice.into());
+        }
+
+        let local_port = socket.local_port;
+        if local_port == 0 {
+            return Err(DeviceModelError::NotBound.into());
+        }
+
+        let iface_index = self
+            .network_ifaces
+            .iter()
+            .position(|iface| iface.device_path == socket.interface)
+            .ok_or(DeviceModelError::InvalidDevice)?;
+
+        if !network_effective_link_up(&self.network_ifaces[iface_index]) {
+            return Err(DeviceModelError::NotBound.into());
+        }
+
+        let mut tcb = TcpControlBlock::new_init(local_port, remote_port);
+        tcb.local_seq = ((current_tick as u32).wrapping_mul(256)).wrapping_add(local_port as u32);
+        tcb.state = TcpState::SynSent;
+        tcb.last_transmit_tick = Some(current_tick);
+
+        let syn_segment = TcpSegment {
+            seq: tcb.local_seq,
+            ack: 0,
+            window: tcb.local_window,
+            flags: TcpFlags {
+                syn: true,
+                ack: false,
+                fin: false,
+                rst: false,
+                psh: false,
+                urg: false,
+            },
+            payload: Vec::new(),
+            local_port,
+            remote_port,
+        };
+
+        tcb.unacked_segments.push(syn_segment.clone());
+
+        let socket = self
+            .network_sockets
+            .iter_mut()
+            .find(|socket| socket.path == socket_path && socket.owner == owner)
+            .ok_or(DeviceModelError::InvalidDevice)?;
+        socket.tcp_state = Some(tcb);
+        socket.remote_ipv4 = remote_ipv4;
+        socket.remote_port = remote_port;
+
+        let local_seq = socket.tcp_state.as_ref().unwrap().local_seq;
+        let iface_mac = self.network_ifaces[iface_index].mac;
+        let socket_local_ipv4 = socket.local_ipv4;
+        let socket_interface = socket.interface.clone();
+        let socket_tx_packets = socket.tx_packets;
+
+        let syn_frame = build_tcp_ipv4_frame(
+            iface_mac,
+            [0xff; 6],
+            socket_local_ipv4,
+            remote_ipv4,
+            local_port,
+            remote_port,
+            &syn_segment,
+        );
+
+        if syn_frame.len().saturating_sub(14) > self.network_ifaces[iface_index].mtu {
+            return Err(DeviceModelError::PacketTooLarge.into());
+        }
+
+        let buffer_id = self.alloc_network_buffer(
+            iface_index,
+            socket_path.to_string(),
+            syn_frame.clone(),
+            NetworkBufferState::TxQueued,
+        )?;
+        self.network_ifaces[iface_index].tx_ring.push(buffer_id);
+        self.network_ifaces[iface_index].tx_packets = self.network_ifaces[iface_index]
+            .tx_packets
+            .saturating_add(1);
+        let new_tx_packets = socket_tx_packets.saturating_add(1);
+
+        let socket = self
+            .network_sockets
+            .iter_mut()
+            .find(|socket| socket.path == socket_path && socket.owner == owner)
+            .ok_or(DeviceModelError::InvalidDevice)?;
+        socket.tx_packets = new_tx_packets;
+
+        let driver_path = self.network_ifaces[iface_index].driver_path.clone();
+        let tx_text = format!(
+            "tcp-tx iface={} socket={} flags=SYN seq={} sport={} dport={} buffer={}\n",
+            socket_interface,
+            socket_path,
+            local_seq,
+            local_port,
+            remote_port,
+            buffer_id,
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(syn_frame.iter().copied())
+        .collect::<Vec<_>>();
+
+        for (binding_owner, binding_fd) in self.descriptor_bindings_for_path(&driver_path)? {
+            self.io_registry
+                .replace_payload(binding_owner, binding_fd, &tx_text)
+                .map_err(map_runtime_io_error)?;
+            self.io_registry
+                .set_state(binding_owner, binding_fd, IoState::ReadWrite)
+                .map_err(map_runtime_io_error)?;
+            let _ = self.notify_descriptor_ready(binding_owner, binding_fd);
+        }
+
+        Ok(())
+    }
+
+    pub fn tcp_accept(
+        &mut self,
+        socket_path: &str,
+        owner: ProcessId,
+        _current_tick: u64,
+    ) -> Result<(String, [u8; 4], u16), RuntimeError> {
+        if self
+            .network_sockets
+            .iter()
+            .find(|socket| socket.path == socket_path && socket.owner == owner)
+            .map(|s| s.socket_type)
+            != Some(SocketType::Tcp)
+        {
+            return Err(DeviceModelError::InvalidDevice.into());
+        }
+
+        if self
+            .network_sockets
+            .iter()
+            .find(|socket| socket.path == socket_path && socket.owner == owner)
+            .and_then(|s| s.tcp_state.as_ref())
+            .map(|t| t.state)
+            != Some(TcpState::Listen)
+        {
+            return Err(DeviceModelError::InvalidDevice.into());
+        }
+
+        let accept_queue_empty = self
+            .network_sockets
+            .iter()
+            .find(|socket| socket.path == socket_path && socket.owner == owner)
+            .and_then(|s| s.tcp_state.as_ref())
+            .map(|t| t.accept_queue.is_empty())
+            .unwrap_or(true);
+
+        if accept_queue_empty {
+            return Err(DeviceModelError::QueueEmpty.into());
+        }
+
+        let first_accept_id = self
+            .network_sockets
+            .iter()
+            .find(|socket| socket.path == socket_path && socket.owner == owner)
+            .and_then(|s| s.tcp_state.as_ref())
+            .and_then(|t| t.accept_queue.first().copied());
+
+        let accepted_socket_index = self
+            .network_sockets
+            .iter()
+            .position(|s| {
+                s.tcp_state.as_ref().map(|t| {
+                    (t.local_port as u64) | ((t.remote_port as u64) << 16)
+                }) == first_accept_id
+            })
+            .ok_or(DeviceModelError::InvalidDevice)?;
+
+        let remote_ipv4 = self.network_sockets[accepted_socket_index].remote_ipv4;
+        let remote_port = self.network_sockets[accepted_socket_index].remote_port;
+        let accepted_path = self.network_sockets[accepted_socket_index].path.clone();
+
+        let socket = self
+            .network_sockets
+            .iter_mut()
+            .find(|socket| socket.path == socket_path && socket.owner == owner)
+            .ok_or(DeviceModelError::InvalidDevice)?;
+        
+        if let Some(ref mut tcb) = socket.tcp_state {
+            tcb.accept_queue.remove(0);
+        }
+
+        Ok((accepted_path, remote_ipv4, remote_port))
+    }
+
+    pub fn tcp_send(
+        &mut self,
+        socket_path: &str,
+        owner: ProcessId,
+        bytes: &[u8],
+        current_tick: u64,
+    ) -> Result<usize, RuntimeError> {
+        let socket_index = self
+            .network_sockets
+            .iter()
+            .position(|socket| socket.path == socket_path && socket.owner == owner)
+            .ok_or(DeviceModelError::InvalidDevice)?;
+
+        let socket = &self.network_sockets[socket_index];
+        if socket.socket_type != SocketType::Tcp {
+            return Err(DeviceModelError::InvalidDevice.into());
+        }
+
+        let tcb = socket.tcp_state.as_ref().ok_or(DeviceModelError::InvalidDevice)?;
+        if tcb.state != TcpState::Established {
+            return Err(DeviceModelError::InvalidDevice.into());
+        }
+
+        let local_seq = tcb.local_seq;
+        let remote_seq = tcb.remote_ack;
+        let local_port = tcb.local_port;
+        let remote_port = tcb.remote_port;
+        let remote_ipv4 = socket.remote_ipv4;
+        let interface = socket.interface.clone();
+
+        let data_segment = TcpSegment {
+            seq: local_seq,
+            ack: remote_seq,
+            window: tcb.local_window,
+            flags: TcpFlags {
+                syn: false,
+                ack: true,
+                fin: false,
+                rst: false,
+                psh: true,
+                urg: false,
+            },
+            payload: bytes.to_vec(),
+            local_port,
+            remote_port,
+        };
+
+        let iface_index = self
+            .network_ifaces
+            .iter()
+            .position(|iface| iface.device_path == interface)
+            .ok_or(DeviceModelError::InvalidDevice)?;
+
+        if !network_effective_link_up(&self.network_ifaces[iface_index]) {
+            return Err(DeviceModelError::NotBound.into());
+        }
+
+        if self.network_ifaces[iface_index].tx_ring.len()
+            >= self.network_ifaces[iface_index].tx_capacity
+            || self.network_ifaces[iface_index].tx_in_flight.len()
+                >= self.network_ifaces[iface_index].tx_inflight_limit
+        {
+            self.network_ifaces[iface_index].tx_dropped = self.network_ifaces[iface_index]
+                .tx_dropped
+                .saturating_add(1);
+            return Err(DeviceModelError::QueueFull.into());
+        }
+
+        let data_frame = build_tcp_ipv4_frame(
+            self.network_ifaces[iface_index].mac,
+            [0xff; 6],
+            self.network_sockets[socket_index].local_ipv4,
+            remote_ipv4,
+            local_port,
+            remote_port,
+            &data_segment,
+        );
+
+        if data_frame.len().saturating_sub(14) > self.network_ifaces[iface_index].mtu {
+            return Err(DeviceModelError::PacketTooLarge.into());
+        }
+
+        let buffer_id = self.alloc_network_buffer(
+            iface_index,
+            socket_path.to_string(),
+            data_frame.clone(),
+            NetworkBufferState::TxQueued,
+        )?;
+
+        self.network_ifaces[iface_index].tx_ring.push(buffer_id);
+        self.network_ifaces[iface_index].tx_in_flight.push(buffer_id);
+        self.network_ifaces[iface_index].tx_packets = self.network_ifaces[iface_index]
+            .tx_packets
+            .saturating_add(1);
+        self.network_sockets[socket_index].tx_packets = self.network_sockets[socket_index]
+            .tx_packets
+            .saturating_add(1);
+
+        let socket = &mut self.network_sockets[socket_index];
+        if let Some(ref mut tcb) = socket.tcp_state {
+            tcb.local_seq = tcb.local_seq.wrapping_add(bytes.len() as u32);
+            tcb.last_transmit_tick = Some(current_tick);
+            tcb.unacked_segments.push(data_segment.clone());
+        }
+
+        let driver_path = self.network_ifaces[iface_index].driver_path.clone();
+        let tx_text = format!(
+            "tcp-tx iface={} socket={} bytes={} seq={} ack={} sport={} dport={} buffer={} queued={} inflight={}\n",
+            interface,
+            socket_path,
+            bytes.len(),
+            local_seq,
+            remote_seq,
+            local_port,
+            remote_port,
+            buffer_id,
+            self.network_ifaces[iface_index].tx_ring.len(),
+            self.network_ifaces[iface_index].tx_in_flight.len()
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(data_frame.iter().copied())
+        .collect::<Vec<_>>();
+
+        for (binding_owner, binding_fd) in self.descriptor_bindings_for_path(&driver_path)? {
+            self.io_registry
+                .replace_payload(binding_owner, binding_fd, &tx_text)
+                .map_err(map_runtime_io_error)?;
+            self.io_registry
+                .set_state(binding_owner, binding_fd, IoState::ReadWrite)
+                .map_err(map_runtime_io_error)?;
+            let _ = self.notify_descriptor_ready(binding_owner, binding_fd);
+        }
+
+        Ok(bytes.len())
+    }
+
+    pub fn tcp_recv(
+        &mut self,
+        socket_path: &str,
+        owner: ProcessId,
+        max_len: usize,
+        _current_tick: u64,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        let socket_index = self
+            .network_sockets
+            .iter()
+            .position(|socket| socket.path == socket_path && socket.owner == owner)
+            .ok_or(DeviceModelError::InvalidDevice)?;
+
+        let socket_type = self.network_sockets[socket_index].socket_type;
+        if socket_type != SocketType::Tcp {
+            return Err(DeviceModelError::InvalidDevice.into());
+        }
+
+        let tcp_state = self.network_sockets[socket_index].tcp_state.as_ref().ok_or(DeviceModelError::InvalidDevice)?;
+        let state = tcp_state.state;
+        if state != TcpState::Established && state != TcpState::CloseWait {
+            return Err(DeviceModelError::InvalidDevice.into());
+        }
+
+        if self.network_sockets[socket_index].rx_queue.is_empty() {
+            return Err(DeviceModelError::QueueEmpty.into());
+        }
+
+        let iface_name = self.network_sockets[socket_index].interface.clone();
+        let packet = self.network_sockets[socket_index].rx_queue.remove(0);
+        
+        let iface_index = self
+            .network_ifaces
+            .iter()
+            .position(|iface| iface.device_path == iface_name)
+            .ok_or(DeviceModelError::InvalidDevice)?;
+
+        let mut payload =
+            network_buffer_payload(&self.network_ifaces[iface_index], packet.buffer_id)?.to_vec();
+        if payload.len() > max_len {
+            payload.truncate(max_len);
+        }
+
+        let payload_len = payload.len() as u32;
+        self.release_network_buffer(iface_index, packet.buffer_id)?;
+
+        let socket = &mut self.network_sockets[socket_index];
+        socket.rx_packets = socket.rx_packets.saturating_add(1);
+
+        if let Some(ref mut tcb) = socket.tcp_state {
+            tcb.remote_seq = tcb.remote_seq.wrapping_add(payload_len);
+            tcb.local_ack = tcb.remote_seq;
+        }
+
+        Ok(payload)
+    }
+
+    pub fn tcp_process_incoming_segment(
+        &mut self,
+        socket_path: &str,
+        owner: ProcessId,
+        segment: TcpSegment,
+        current_tick: u64,
+    ) -> Result<(), RuntimeError> {
+        let socket_index = self
+            .network_sockets
+            .iter()
+            .position(|socket| socket.path == socket_path && socket.owner == owner)
+            .ok_or(DeviceModelError::InvalidDevice)?;
+
+        let socket_type = self.network_sockets[socket_index].socket_type;
+        if socket_type != SocketType::Tcp {
+            return Err(DeviceModelError::InvalidDevice.into());
+        }
+
+        let state = self.network_sockets[socket_index].tcp_state.as_ref().map(|t| t.state);
+        let remote_ipv4 = self.network_sockets[socket_index].remote_ipv4;
+        let local_ipv4 = self.network_sockets[socket_index].local_ipv4;
+        let iface_name = self.network_sockets[socket_index].interface.clone();
+        let local_port = self.network_sockets[socket_index].local_port;
+        let rx_queue_len = self.network_sockets[socket_index].rx_queue.len();
+        let rx_queue_limit = self.network_sockets[socket_index].rx_queue_limit;
+
+        match state {
+            Some(TcpState::Listen) => {
+                if segment.flags.syn && !segment.flags.ack {
+                    let new_remote_seq = segment.seq.wrapping_add(1);
+                    let new_local_ack = new_remote_seq;
+                    
+                    let syn_ack_segment = TcpSegment {
+                        seq: self.network_sockets[socket_index].tcp_state.as_ref().unwrap().local_seq,
+                        ack: new_local_ack,
+                        window: 65535,
+                        flags: TcpFlags {
+                            syn: true,
+                            ack: true,
+                            fin: false,
+                            rst: false,
+                            psh: false,
+                            urg: false,
+                        },
+                        payload: Vec::new(),
+                        local_port,
+                        remote_port: segment.remote_port,
+                    };
+
+                    let iface_index = self
+                        .network_ifaces
+                        .iter()
+                        .position(|iface| iface.device_path == iface_name)
+                        .ok_or(DeviceModelError::InvalidDevice)?;
+
+                    let ack_frame = build_tcp_ipv4_frame(
+                        self.network_ifaces[iface_index].mac,
+                        [0xff; 6],
+                        local_ipv4,
+                        remote_ipv4,
+                        local_port,
+                        segment.remote_port,
+                        &syn_ack_segment,
+                    );
+
+                    let buffer_id = self.alloc_network_buffer(
+                        iface_index,
+                        socket_path.to_string(),
+                        ack_frame.clone(),
+                        NetworkBufferState::TxQueued,
+                    )?;
+                    self.network_ifaces[iface_index].tx_ring.push(buffer_id);
+                    self.network_ifaces[iface_index].tx_packets = self.network_ifaces[iface_index]
+                        .tx_packets
+                        .saturating_add(1);
+
+                    if let Some(ref mut tcb) = self.network_sockets[socket_index].tcp_state {
+                        tcb.remote_seq = new_remote_seq;
+                        tcb.local_ack = new_local_ack;
+                        tcb.state = TcpState::SynReceived;
+                    }
+
+                    let driver_path = self.network_ifaces[iface_index].driver_path.clone();
+                    let tx_text = format!(
+                        "tcp-tx iface={} socket={} flags=SYN+ACK seq={} ack={} sport={} dport={} buffer={}\n",
+                        iface_name,
+                        socket_path,
+                        new_local_ack.wrapping_sub(1),
+                        new_local_ack,
+                        local_port,
+                        segment.remote_port,
+                        buffer_id,
+                    )
+                    .into_bytes()
+                    .into_iter()
+                    .chain(ack_frame.iter().copied())
+                    .collect::<Vec<_>>();
+
+                    for (binding_owner, binding_fd) in self.descriptor_bindings_for_path(&driver_path)? {
+                        self.io_registry
+                            .replace_payload(binding_owner, binding_fd, &tx_text)
+                            .map_err(map_runtime_io_error)?;
+                        self.io_registry
+                            .set_state(binding_owner, binding_fd, IoState::ReadWrite)
+                            .map_err(map_runtime_io_error)?;
+                        let _ = self.notify_descriptor_ready(binding_owner, binding_fd);
+                    }
+                }
+            }
+            Some(TcpState::SynSent) => {
+                if segment.flags.syn && segment.flags.ack {
+                    let iface_index = self
+                        .network_ifaces
+                        .iter()
+                        .position(|iface| iface.device_path == iface_name)
+                        .ok_or(DeviceModelError::InvalidDevice)?;
+
+                    let new_remote_seq = segment.seq.wrapping_add(1);
+                    let new_local_ack = new_remote_seq;
+                    let remote_port = segment.remote_port;
+
+                    let ack_segment = TcpSegment {
+                        seq: self.network_sockets[socket_index].tcp_state.as_ref().unwrap().local_seq,
+                        ack: new_local_ack,
+                        window: 65535,
+                        flags: TcpFlags {
+                            syn: false,
+                            ack: true,
+                            fin: false,
+                            rst: false,
+                            psh: false,
+                            urg: false,
+                        },
+                        payload: Vec::new(),
+                        local_port,
+                        remote_port,
+                    };
+
+                    let ack_frame = build_tcp_ipv4_frame(
+                        self.network_ifaces[iface_index].mac,
+                        [0xff; 6],
+                        local_ipv4,
+                        remote_ipv4,
+                        local_port,
+                        remote_port,
+                        &ack_segment,
+                    );
+
+                    let buffer_id = self.alloc_network_buffer(
+                        iface_index,
+                        socket_path.to_string(),
+                        ack_frame.clone(),
+                        NetworkBufferState::TxQueued,
+                    )?;
+                    self.network_ifaces[iface_index].tx_ring.push(buffer_id);
+                    self.network_ifaces[iface_index].tx_packets = self.network_ifaces[iface_index]
+                        .tx_packets
+                        .saturating_add(1);
+
+                    if let Some(ref mut tcb) = self.network_sockets[socket_index].tcp_state {
+                        tcb.remote_seq = new_remote_seq;
+                        tcb.local_ack = new_local_ack;
+                        tcb.remote_ack = segment.ack;
+                        tcb.state = TcpState::Established;
+                        tcb.last_transmit_tick = Some(current_tick);
+                    }
+
+                    let driver_path = self.network_ifaces[iface_index].driver_path.clone();
+                    let tx_text = format!(
+                        "tcp-tx iface={} socket={} flags=ACK seq={} ack={} sport={} dport={} buffer={}\n",
+                        iface_name,
+                        socket_path,
+                        new_local_ack.wrapping_sub(1),
+                        new_local_ack,
+                        local_port,
+                        remote_port,
+                        buffer_id,
+                    )
+                    .into_bytes()
+                    .into_iter()
+                    .chain(ack_frame.iter().copied())
+                    .collect::<Vec<_>>();
+
+                    for (binding_owner, binding_fd) in self.descriptor_bindings_for_path(&driver_path)? {
+                        self.io_registry
+                            .replace_payload(binding_owner, binding_fd, &tx_text)
+                            .map_err(map_runtime_io_error)?;
+                        self.io_registry
+                            .set_state(binding_owner, binding_fd, IoState::ReadWrite)
+                            .map_err(map_runtime_io_error)?;
+                        let _ = self.notify_descriptor_ready(binding_owner, binding_fd);
+                    }
+                }
+            }
+            Some(TcpState::Established) | Some(TcpState::CloseWait) => {
+                if !segment.payload.is_empty() && rx_queue_len < rx_queue_limit {
+                    let iface_index = self
+                        .network_ifaces
+                        .iter()
+                        .position(|iface| iface.device_path == iface_name)
+                        .ok_or(DeviceModelError::InvalidDevice)?;
+                    
+                    let buffer_id = self.alloc_network_buffer(
+                        iface_index,
+                        socket_path.to_string(),
+                        segment.payload.clone(),
+                        NetworkBufferState::SocketQueued,
+                    )?;
+                    
+                    self.network_sockets[socket_index].rx_queue.push(SocketRxPacket {
+                        buffer_id,
+                        src_ipv4: remote_ipv4,
+                        dst_ipv4: local_ipv4,
+                        src_port: segment.remote_port,
+                        dst_port: segment.local_port,
+                    });
+                }
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    pub fn tcp_close(
+        &mut self,
+        socket_path: &str,
+        owner: ProcessId,
+        current_tick: u64,
+    ) -> Result<(), RuntimeError> {
+        let socket_index = self
+            .network_sockets
+            .iter()
+            .position(|socket| socket.path == socket_path && socket.owner == owner)
+            .ok_or(DeviceModelError::InvalidDevice)?;
+
+        let socket = &self.network_sockets[socket_index];
+        if socket.socket_type != SocketType::Tcp {
+            return Err(DeviceModelError::InvalidDevice.into());
+        }
+
+        let tcb = socket.tcp_state.as_ref().ok_or(DeviceModelError::InvalidDevice)?;
+        
+        let (new_state, send_fin) = match tcb.state {
+            TcpState::Established => (TcpState::FinWait1, true),
+            TcpState::CloseWait => (TcpState::LastAck, true),
+            TcpState::Listen | TcpState::SynSent | TcpState::SynReceived => {
+                (TcpState::Closed, false)
+            }
+            _ => return Err(DeviceModelError::InvalidDevice.into()),
+        };
+
+        if send_fin {
+            let local_seq = tcb.local_seq;
+            let remote_seq = tcb.remote_ack;
+            let local_port = tcb.local_port;
+            let remote_port = tcb.remote_port;
+            let remote_ipv4 = socket.remote_ipv4;
+            let interface = socket.interface.clone();
+
+            let fin_segment = TcpSegment {
+                seq: local_seq,
+                ack: remote_seq,
+                window: tcb.local_window,
+                flags: TcpFlags {
+                    syn: false,
+                    ack: true,
+                    fin: true,
+                    rst: false,
+                    psh: false,
+                    urg: false,
+                },
+                payload: Vec::new(),
+                local_port,
+                remote_port,
+            };
+
+            let iface_index = self
+                .network_ifaces
+                .iter()
+                .position(|iface| iface.device_path == interface)
+                .ok_or(DeviceModelError::InvalidDevice)?;
+
+            let fin_frame = build_tcp_ipv4_frame(
+                self.network_ifaces[iface_index].mac,
+                [0xff; 6],
+                socket.local_ipv4,
+                remote_ipv4,
+                local_port,
+                remote_port,
+                &fin_segment,
+            );
+
+            let buffer_id = self.alloc_network_buffer(
+                iface_index,
+                socket_path.to_string(),
+                fin_frame.clone(),
+                NetworkBufferState::TxQueued,
+            )?;
+
+            self.network_ifaces[iface_index].tx_ring.push(buffer_id);
+            self.network_ifaces[iface_index].tx_packets = self.network_ifaces[iface_index]
+                .tx_packets
+                .saturating_add(1);
+
+            let socket = &mut self.network_sockets[socket_index];
+            if let Some(ref mut tcb) = socket.tcp_state {
+                tcb.local_seq = tcb.local_seq.wrapping_add(1);
+                tcb.last_transmit_tick = Some(current_tick);
+                tcb.state = new_state;
+            }
+
+            let driver_path = self.network_ifaces[iface_index].driver_path.clone();
+            let tx_text = format!(
+                "tcp-tx iface={} socket={} flags=FIN+ACK seq={} ack={} sport={} dport={} buffer={}\n",
+                interface,
+                socket_path,
+                local_seq,
+                remote_seq,
+                local_port,
+                remote_port,
+                buffer_id,
+            )
+            .into_bytes()
+            .into_iter()
+            .chain(fin_frame.iter().copied())
+            .collect::<Vec<_>>();
+
+            for (binding_owner, binding_fd) in self.descriptor_bindings_for_path(&driver_path)? {
+                self.io_registry
+                    .replace_payload(binding_owner, binding_fd, &tx_text)
+                    .map_err(map_runtime_io_error)?;
+                self.io_registry
+                    .set_state(binding_owner, binding_fd, IoState::ReadWrite)
+                    .map_err(map_runtime_io_error)?;
+                let _ = self.notify_descriptor_ready(binding_owner, binding_fd);
+            }
+        } else {
+            let socket = &mut self.network_sockets[socket_index];
+            if let Some(ref mut tcb) = socket.tcp_state {
+                tcb.state = new_state;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn tcp_send_reset(
+        &mut self,
+        socket_path: &str,
+        owner: ProcessId,
+        current_tick: u64,
+    ) -> Result<(), RuntimeError> {
+        let socket_index = self
+            .network_sockets
+            .iter()
+            .position(|socket| socket.path == socket_path && socket.owner == owner)
+            .ok_or(DeviceModelError::InvalidDevice)?;
+
+        let socket_type = self.network_sockets[socket_index].socket_type;
+        if socket_type != SocketType::Tcp {
+            return Err(DeviceModelError::InvalidDevice.into());
+        }
+
+        let tcp_state = self.network_sockets[socket_index].tcp_state.clone().ok_or(DeviceModelError::InvalidDevice)?;
+        let local_port = tcp_state.local_port;
+        let remote_port = tcp_state.remote_port;
+        let remote_ipv4 = self.network_sockets[socket_index].remote_ipv4;
+        let local_ipv4 = self.network_sockets[socket_index].local_ipv4;
+        let iface_name = self.network_sockets[socket_index].interface.clone();
+        let local_seq = tcp_state.local_seq;
+        let remote_ack = tcp_state.remote_ack;
+        let local_window = tcp_state.local_window;
+
+        let rst_segment = TcpSegment {
+            seq: local_seq,
+            ack: remote_ack,
+            window: local_window,
+            flags: TcpFlags {
+                syn: false,
+                ack: false,
+                fin: false,
+                rst: true,
+                psh: false,
+                urg: false,
+            },
+            payload: Vec::new(),
+            local_port,
+            remote_port,
+        };
+
+        let iface_index = self
+            .network_ifaces
+            .iter()
+            .position(|iface| iface.device_path == iface_name)
+            .ok_or(DeviceModelError::InvalidDevice)?;
+
+        let rst_frame = build_tcp_ipv4_frame(
+            self.network_ifaces[iface_index].mac,
+            [0xff; 6],
+            local_ipv4,
+            remote_ipv4,
+            local_port,
+            remote_port,
+            &rst_segment,
+        );
+
+        let buffer_id = self.alloc_network_buffer(
+            iface_index,
+            socket_path.to_string(),
+            rst_frame.clone(),
+            NetworkBufferState::TxQueued,
+        )?;
+
+        self.network_ifaces[iface_index].tx_ring.push(buffer_id);
+        self.network_ifaces[iface_index].tx_packets = self.network_ifaces[iface_index]
+            .tx_packets
+            .saturating_add(1);
+
+        let socket = &mut self.network_sockets[socket_index];
+        if let Some(ref mut tcb) = socket.tcp_state {
+            tcb.last_transmit_tick = Some(current_tick);
+            tcb.state = TcpState::Closed;
+        }
+
+        let driver_path = self.network_ifaces[iface_index].driver_path.clone();
+        let tx_text = format!(
+            "tcp-tx iface={} socket={} flags=RST seq={} sport={} dport={} buffer={}\n",
+            iface_name,
+            socket_path,
+            local_seq,
+            local_port,
+            remote_port,
+            buffer_id,
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(rst_frame.iter().copied())
+        .collect::<Vec<_>>();
+
+        for (binding_owner, binding_fd) in self.descriptor_bindings_for_path(&driver_path)? {
+            self.io_registry
+                .replace_payload(binding_owner, binding_fd, &tx_text)
+                .map_err(map_runtime_io_error)?;
+            self.io_registry
+                .set_state(binding_owner, binding_fd, IoState::ReadWrite)
+                .map_err(map_runtime_io_error)?;
+            let _ = self.notify_descriptor_ready(binding_owner, binding_fd);
+        }
+
+        Ok(())
+    }
+
+    pub fn tcp_retransmit_check(
+        &mut self,
+        current_tick: u64,
+    ) -> Result<(), RuntimeError> {
+        for socket_index in 0..self.network_sockets.len() {
+            let socket_type = self.network_sockets[socket_index].socket_type;
+            if socket_type != SocketType::Tcp {
+                continue;
+            }
+
+            let needs_retransmit = self.network_sockets[socket_index].tcp_state.as_ref().map(|tcb| {
+                if tcb.state == TcpState::Established 
+                    || tcb.state == TcpState::FinWait1
+                    || tcb.state == TcpState::CloseWait
+                {
+                    if let Some(last_tick) = tcb.last_transmit_tick {
+                        if current_tick.saturating_sub(last_tick) >= tcb.retransmit_timeout_ticks {
+                            return !tcb.unacked_segments.is_empty();
+                        }
+                    }
+                }
+                false
+            }).unwrap_or(false);
+
+            if !needs_retransmit {
+                continue;
+            }
+
+            let segment = self.network_sockets[socket_index].tcp_state.as_ref().unwrap().unacked_segments[0].clone();
+            let iface_name = self.network_sockets[socket_index].interface.clone();
+            let local_ipv4 = self.network_sockets[socket_index].local_ipv4;
+            let remote_ipv4 = self.network_sockets[socket_index].remote_ipv4;
+            let local_port = self.network_sockets[socket_index].tcp_state.as_ref().unwrap().local_port;
+            let remote_port = self.network_sockets[socket_index].tcp_state.as_ref().unwrap().remote_port;
+            let socket_path = self.network_sockets[socket_index].path.clone();
+            let seq = segment.seq;
+
+            let iface_index = self
+                .network_ifaces
+                .iter()
+                .position(|iface| iface.device_path == iface_name)
+                .ok_or(DeviceModelError::InvalidDevice)?;
+
+            let frame = build_tcp_ipv4_frame(
+                self.network_ifaces[iface_index].mac,
+                [0xff; 6],
+                local_ipv4,
+                remote_ipv4,
+                local_port,
+                remote_port,
+                &segment,
+            );
+
+            let buffer_id = self.alloc_network_buffer(
+                iface_index,
+                socket_path.clone(),
+                frame.clone(),
+                NetworkBufferState::TxQueued,
+            )?;
+
+            self.network_ifaces[iface_index].tx_ring.push(buffer_id);
+            self.network_ifaces[iface_index].tx_packets = self.network_ifaces[iface_index]
+                .tx_packets
+                .saturating_add(1);
+
+            let socket = &mut self.network_sockets[socket_index];
+            if let Some(ref mut tcb) = socket.tcp_state {
+                tcb.last_transmit_tick = Some(current_tick);
+                tcb.congestion_window = 1;
+                tcb.slow_start_threshold = tcb.congestion_window / 2;
+            }
+
+            let driver_path = self.network_ifaces[iface_index].driver_path.clone();
+            let tx_text = format!(
+                "tcp-retransmit iface={} socket={} seq={} sport={} dport={} buffer={}\n",
+                iface_name,
+                socket_path,
+                seq,
+                local_port,
+                remote_port,
+                buffer_id,
+            )
+            .into_bytes()
+            .into_iter()
+            .chain(frame.iter().copied())
+            .collect::<Vec<_>>();
+
+            for (binding_owner, binding_fd) in self.descriptor_bindings_for_path(&driver_path)? {
+                self.io_registry
+                    .replace_payload(binding_owner, binding_fd, &tx_text)
+                    .map_err(map_runtime_io_error)?;
+                self.io_registry
+                    .set_state(binding_owner, binding_fd, IoState::ReadWrite)
+                    .map_err(map_runtime_io_error)?;
+                let _ = self.notify_descriptor_ready(binding_owner, binding_fd);
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn retire_endpoint_for_path(&mut self, path: &str) {
@@ -2065,10 +3214,15 @@ impl KernelRuntime {
         if device.class != DeviceClass::Graphics {
             return Err(DeviceModelError::InvalidDevice.into());
         }
+        let (last_frame_tag, last_source_api_name, last_translation_label) =
+            parse_graphics_payload_metadata(&device.graphics_last_presented_frame);
         Ok(GpuScanoutInfo {
             device_path: device.path.clone(),
             presented_frames: device.graphics_presented_frames,
             last_frame_len: device.graphics_last_presented_frame.len(),
+            last_frame_tag,
+            last_source_api_name,
+            last_translation_label,
         })
     }
 
@@ -2460,6 +3614,16 @@ impl KernelRuntime {
         // Try Hardware Path first (NVIDIA Blackwell)
         if let Some(hw) = self.hardware.as_mut() {
             if hw.submit_gpu_command(0x100, &payload_bytes).is_ok() {
+                let request_id = self.retain_completed_graphics_request(
+                    owner,
+                    device_path,
+                    DeviceRequestKind::Write,
+                    None,
+                    Some(buffer_id),
+                    Some(payload_len),
+                    &payload_bytes,
+                    &[],
+                )?;
                 {
                     let device = device_mut(&mut self.device_registry, device_path)?;
                     device.submitted_requests = device.submitted_requests.saturating_add(1);
@@ -2479,19 +3643,19 @@ impl KernelRuntime {
                     let _ = event_queue_runtime::emit_graphics_events(
                         self,
                         device_inode,
-                        0,
+                        request_id,
                         GraphicsEventKind::Submitted,
                     );
                     let _ = event_queue_runtime::emit_graphics_events(
                         self,
                         device_inode,
-                        0,
+                        request_id,
                         GraphicsEventKind::Completed,
                     );
                     let _ = event_queue_runtime::emit_graphics_events(
                         self,
                         device_inode,
-                        0,
+                        request_id,
                         GraphicsEventKind::Drained,
                     );
                 }
@@ -2524,6 +3688,16 @@ impl KernelRuntime {
         let payload = frame.to_vec();
         if let Some(hw) = self.hardware.as_mut() {
             if hw.submit_gpu_command(0x4750_0001, &payload).is_ok() {
+                let request_id = self.retain_completed_graphics_request(
+                    owner,
+                    device_path,
+                    DeviceRequestKind::Control,
+                    Some(0x4750_0001),
+                    None,
+                    None,
+                    &payload,
+                    &payload,
+                )?;
                 let device = device_mut(&mut self.device_registry, device_path)?;
                 if device.class != DeviceClass::Graphics || device.state != DeviceState::Bound {
                     return Err(DeviceModelError::InvalidDevice.into());
@@ -2537,19 +3711,19 @@ impl KernelRuntime {
                     let _ = event_queue_runtime::emit_graphics_events(
                         self,
                         device_inode,
-                        0,
+                        request_id,
                         GraphicsEventKind::Submitted,
                     );
                     let _ = event_queue_runtime::emit_graphics_events(
                         self,
                         device_inode,
-                        0,
+                        request_id,
                         GraphicsEventKind::Completed,
                     );
                     let _ = event_queue_runtime::emit_graphics_events(
                         self,
                         device_inode,
-                        0,
+                        request_id,
                         GraphicsEventKind::Drained,
                     );
                 }
@@ -2563,7 +3737,7 @@ impl KernelRuntime {
             Some(0x4750_0001),
             None,
             None,
-            Vec::new(),
+            payload,
         )?;
         Ok(0x4750_0001 ^ request_id as u32)
     }
@@ -2592,6 +3766,12 @@ impl KernelRuntime {
         let request_id = self.device_registry.next_request_id;
         self.device_registry.next_request_id =
             self.device_registry.next_request_id.saturating_add(1);
+        let (frame_tag, source_api_name, translation_label) = self
+            .graphics_request_metadata_from_payload(
+                graphics_buffer_id,
+                graphics_buffer_len,
+                &payload,
+            );
         self.device_registry.requests.push(DeviceRequest {
             id: request_id,
             device_path: device_path.to_string(),
@@ -2607,6 +3787,9 @@ impl KernelRuntime {
             submitted_tick: self.current_tick,
             started_tick: None,
             completed_tick: None,
+            frame_tag,
+            source_api_name,
+            translation_label,
         });
         if let Some(device_inode) = graphics_event_device_inode(self, device_path) {
             let _ = event_queue_runtime::emit_graphics_events(
@@ -2660,6 +3843,108 @@ impl KernelRuntime {
             }
         }
         Ok(request_id as usize)
+    }
+
+    fn graphics_request_metadata_from_payload(
+        &self,
+        graphics_buffer_id: Option<u64>,
+        graphics_buffer_len: Option<usize>,
+        payload: &[u8],
+    ) -> (String, String, String) {
+        let bytes: &[u8] = if !payload.is_empty() {
+            payload
+        } else if let Some(buffer_id) = graphics_buffer_id {
+            if let Some(buffer) = self
+                .device_registry
+                .gpu_buffers
+                .iter()
+                .find(|buffer| buffer.id == buffer_id)
+            {
+                let payload_len = graphics_buffer_len
+                    .unwrap_or(buffer.used_len)
+                    .min(buffer.used_len);
+                &buffer.bytes[..payload_len]
+            } else {
+                &[]
+            }
+        } else {
+            &[]
+        };
+        parse_graphics_payload_metadata(bytes)
+    }
+
+    fn retain_completed_graphics_request(
+        &mut self,
+        owner: ProcessId,
+        device_path: &str,
+        kind: DeviceRequestKind,
+        opcode: Option<u32>,
+        graphics_buffer_id: Option<u64>,
+        graphics_buffer_len: Option<usize>,
+        payload: &[u8],
+        response: &[u8],
+    ) -> Result<u64, RuntimeError> {
+        let driver_path = self
+            .device_registry
+            .devices
+            .iter()
+            .find(|device| device.path == device_path)
+            .and_then(|device| device.driver.clone())
+            .unwrap_or_default();
+        let request_id = self.device_registry.next_request_id;
+        self.device_registry.next_request_id =
+            self.device_registry.next_request_id.saturating_add(1);
+        let (frame_tag, source_api_name, translation_label) = self
+            .graphics_request_metadata_from_payload(
+                graphics_buffer_id,
+                graphics_buffer_len,
+                payload,
+            );
+        self.device_registry.requests.push(DeviceRequest {
+            id: request_id,
+            device_path: device_path.to_string(),
+            driver_path: driver_path.clone(),
+            issuer: owner,
+            kind,
+            state: DeviceRequestState::Completed,
+            opcode,
+            graphics_buffer_id,
+            graphics_buffer_len,
+            payload: payload.to_vec(),
+            response: response.to_vec(),
+            submitted_tick: self.current_tick,
+            started_tick: Some(self.current_tick),
+            completed_tick: Some(self.current_tick),
+            frame_tag: frame_tag.clone(),
+            source_api_name: source_api_name.clone(),
+            translation_label: translation_label.clone(),
+        });
+        {
+            let device = device_mut(&mut self.device_registry, device_path)?;
+            device.last_completed_request_id = request_id;
+            device.last_completed_frame_tag = frame_tag.clone();
+            device.last_completed_source_api_name = source_api_name.clone();
+            device.last_completed_translation_label = translation_label.clone();
+            device.last_terminal_request_id = request_id;
+            device.last_terminal_state = DeviceRequestState::Completed;
+            device.last_terminal_frame_tag = frame_tag.clone();
+            device.last_terminal_source_api_name = source_api_name.clone();
+            device.last_terminal_translation_label = translation_label.clone();
+        }
+        if !driver_path.is_empty() {
+            let driver = driver_mut(&mut self.device_registry, &driver_path)?;
+            driver.completed_requests = driver.completed_requests.saturating_add(1);
+            driver.last_completed_request_id = request_id;
+            driver.last_completed_frame_tag = frame_tag.clone();
+            driver.last_completed_source_api_name = source_api_name.clone();
+            driver.last_completed_translation_label = translation_label.clone();
+            driver.last_terminal_request_id = request_id;
+            driver.last_terminal_state = DeviceRequestState::Completed;
+            driver.last_terminal_frame_tag = frame_tag;
+            driver.last_terminal_source_api_name = source_api_name;
+            driver.last_terminal_translation_label = translation_label;
+        }
+        Ok(request_id)
     }
 
     fn complete_stream_device_write(

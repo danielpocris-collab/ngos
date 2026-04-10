@@ -1,9 +1,148 @@
 use super::*;
 use crate::device_model::{NetworkInterface, NetworkSocket};
 
+// Canonical subsystem role:
+// - subsystem: observability / procfs inspection
+// - owner layer: Layer 1
+// - semantic owner: `kernel-core`
+// - truth path role: exposes canonical runtime state to user/runtime/proofs
+//
+// Canonical contract families exposed here:
+// - procfs contracts
+// - process inspection contracts
+// - scheduler fairness contracts
+// - verified-core contracts
+//
+// This module is a truth surface. Higher layers may read and explain it, but
+// they must not replace it with shadow observability models.
+
+fn render_scheduler_decision_meaning(decision: SchedulerAgentDecisionRecord) -> String {
+    match decision.agent {
+        SchedulerAgentKind::EnqueueAgent => {
+            format!(
+                "enqueue budget={} prior-state={}",
+                decision.detail0, decision.detail1
+            )
+        }
+        SchedulerAgentKind::WakeAgent => String::from("wake urgent-requeue=true"),
+        SchedulerAgentKind::BlockAgent => {
+            format!("block previous-budget={}", decision.detail0)
+        }
+        SchedulerAgentKind::TickAgent => match decision.detail0 {
+            1 => format!(
+                "tick continue-running remaining-budget={}",
+                decision.detail1
+            ),
+            2 => format!(
+                "tick rotate-to-ready replenished-budget={}",
+                decision.detail1
+            ),
+            3 => format!("tick dispatch-selected budget={}", decision.detail1),
+            other => format!("tick code={other} detail1={}", decision.detail1),
+        },
+        SchedulerAgentKind::AffinityAgent => {
+            format!(
+                "affinity cpu-mask=0x{:x} assigned-cpu={}",
+                decision.detail0, decision.detail1
+            )
+        }
+        SchedulerAgentKind::RebindAgent => match decision.detail1 {
+            0 => format!("rebind deferred-not-ready budget={}", decision.detail0),
+            1 => format!("rebind running-updated budget={}", decision.detail0),
+            2 => format!("rebind queued-moved budget={}", decision.detail0),
+            other => format!("rebind code={other} budget={}", decision.detail0),
+        },
+        SchedulerAgentKind::RemoveAgent => String::from("remove detached-from-scheduler"),
+    }
+}
+
+fn env_value<'a>(envp: &'a [String], key: &str) -> Option<&'a str> {
+    let prefix = format!("{key}=");
+    envp.iter().find_map(|entry| entry.strip_prefix(&prefix))
+}
+
+fn process_abi_profile(process: &Process) -> ProcessAbiProfile {
+    let target = env_value(process.envp(), "NGOS_COMPAT_TARGET").unwrap_or("native");
+    let route_class =
+        env_value(process.envp(), "NGOS_COMPAT_ABI_ROUTE_CLASS").unwrap_or("native-process-abi");
+    let handle_profile =
+        env_value(process.envp(), "NGOS_COMPAT_ABI_HANDLE_PROFILE").unwrap_or("native-handles");
+    let path_profile =
+        env_value(process.envp(), "NGOS_COMPAT_ABI_PATH_PROFILE").unwrap_or("native-paths");
+    let scheduler_profile = env_value(process.envp(), "NGOS_COMPAT_ABI_SCHEDULER_PROFILE")
+        .unwrap_or("native-scheduler");
+    let sync_profile =
+        env_value(process.envp(), "NGOS_COMPAT_ABI_SYNC_PROFILE").unwrap_or("native-sync");
+    let timer_profile =
+        env_value(process.envp(), "NGOS_COMPAT_ABI_TIMER_PROFILE").unwrap_or("native-timer");
+    let module_profile =
+        env_value(process.envp(), "NGOS_COMPAT_ABI_MODULE_PROFILE").unwrap_or("native-module");
+    let event_profile =
+        env_value(process.envp(), "NGOS_COMPAT_ABI_EVENT_PROFILE").unwrap_or("native-event");
+    let requires_kernel_abi_shims = env_value(process.envp(), "NGOS_COMPAT_ABI_REQUIRES_SHIMS")
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    let prefix = env_value(process.envp(), "NGOS_COMPAT_PREFIX").unwrap_or("/");
+    let loader_route_class =
+        env_value(process.envp(), "NGOS_COMPAT_ROUTE_CLASS").unwrap_or("native-direct");
+    let loader_launch_mode =
+        env_value(process.envp(), "NGOS_COMPAT_LAUNCH_MODE").unwrap_or("native-direct");
+    let loader_entry_profile =
+        env_value(process.envp(), "NGOS_COMPAT_ENTRY_PROFILE").unwrap_or("native-entry");
+    let loader_requires_compat_shims = env_value(process.envp(), "NGOS_COMPAT_REQUIRES_SHIMS")
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    ProcessAbiProfile {
+        target: target.to_string(),
+        route_class: route_class.to_string(),
+        handle_profile: handle_profile.to_string(),
+        path_profile: path_profile.to_string(),
+        scheduler_profile: scheduler_profile.to_string(),
+        sync_profile: sync_profile.to_string(),
+        timer_profile: timer_profile.to_string(),
+        module_profile: module_profile.to_string(),
+        event_profile: event_profile.to_string(),
+        requires_kernel_abi_shims,
+        prefix: prefix.to_string(),
+        executable_path: process.image_path().to_string(),
+        working_dir: process.cwd().to_string(),
+        loader_route_class: loader_route_class.to_string(),
+        loader_launch_mode: loader_launch_mode.to_string(),
+        loader_entry_profile: loader_entry_profile.to_string(),
+        loader_requires_compat_shims,
+    }
+}
+
 impl KernelRuntime {
     pub fn snapshot(&self) -> RuntimeSnapshot {
+        let verified_core = self.verify_core();
         let queued_by_class = self.scheduler.queued_len_by_class();
+        let queued_urgent_by_class = self.scheduler.queued_urgent_len_by_class();
+        let lag_debt_by_class = self.scheduler.class_lag_debt();
+        let dispatch_counts = self.scheduler.class_dispatch_counts();
+        let runtime_ticks_by_class = self.scheduler.class_runtime_ticks();
+        let scheduler_dispatch_total = dispatch_counts.iter().copied().sum::<u64>();
+        let scheduler_runtime_ticks_total = runtime_ticks_by_class.iter().copied().sum::<u64>();
+        let cpu_queued_loads = self.scheduler.cpu_queued_loads();
+        let cpu_load_min = cpu_queued_loads.iter().copied().min().unwrap_or(0);
+        let cpu_load_max = cpu_queued_loads.iter().copied().max().unwrap_or(0);
+        let mut runtime_min = u64::MAX;
+        let mut runtime_max = 0u64;
+        let mut runtime_seen = false;
+        for value in runtime_ticks_by_class.iter().copied() {
+            if value == 0 {
+                continue;
+            }
+            runtime_seen = true;
+            runtime_min = runtime_min.min(value);
+            runtime_max = runtime_max.max(value);
+        }
+        let scheduler_runtime_imbalance = if runtime_seen {
+            runtime_max.saturating_sub(runtime_min)
+        } else {
+            0
+        };
+        let starved_classes = self.scheduler.starved_classes();
         let active_process_count = self
             .processes
             .objects
@@ -68,9 +207,35 @@ impl KernelRuntime {
             contract_count: self.contracts.objects.len(),
             queued_processes: self.scheduler.queued_len(),
             queued_latency_critical: queued_by_class[0],
+            queued_urgent_latency_critical: queued_urgent_by_class[0],
             queued_interactive: queued_by_class[1],
+            queued_urgent_interactive: queued_urgent_by_class[1],
             queued_normal: queued_by_class[2],
+            queued_urgent_normal: queued_urgent_by_class[2],
             queued_background: queued_by_class[3],
+            queued_urgent_background: queued_urgent_by_class[3],
+            lag_debt_latency_critical: lag_debt_by_class[0],
+            lag_debt_interactive: lag_debt_by_class[1],
+            lag_debt_normal: lag_debt_by_class[2],
+            lag_debt_background: lag_debt_by_class[3],
+            dispatch_count_latency_critical: dispatch_counts[0],
+            dispatch_count_interactive: dispatch_counts[1],
+            dispatch_count_normal: dispatch_counts[2],
+            dispatch_count_background: dispatch_counts[3],
+            runtime_ticks_latency_critical: runtime_ticks_by_class[0],
+            runtime_ticks_interactive: runtime_ticks_by_class[1],
+            runtime_ticks_normal: runtime_ticks_by_class[2],
+            runtime_ticks_background: runtime_ticks_by_class[3],
+            scheduler_dispatch_total,
+            scheduler_runtime_ticks_total,
+            scheduler_runtime_imbalance,
+            scheduler_cpu_count: self.scheduler.logical_cpu_count(),
+            scheduler_running_cpu: self.scheduler.running().map(|process| process.cpu),
+            scheduler_cpu_load_imbalance: cpu_load_max.saturating_sub(cpu_load_min),
+            starved_latency_critical: starved_classes[0],
+            starved_interactive: starved_classes[1],
+            starved_normal: starved_classes[2],
+            starved_background: starved_classes[3],
             deferred_task_count: self.deferred_tasks.total_pending(),
             sleeping_processes: self
                 .sleep_queues
@@ -98,6 +263,13 @@ impl KernelRuntime {
             max_socket_rx_depth,
             total_network_tx_dropped,
             total_network_rx_dropped,
+            verified_core_ok: verified_core.is_verified(),
+            verified_core_violation_count: verified_core.violations.len(),
+            capability_model_verified: verified_core.capability_model_verified,
+            vfs_invariants_verified: verified_core.vfs_invariants_verified,
+            scheduler_state_machine_verified: verified_core.scheduler_state_machine_verified,
+            cpu_extended_state_lifecycle_verified: verified_core
+                .cpu_extended_state_lifecycle_verified,
         }
     }
 
@@ -138,6 +310,7 @@ impl KernelRuntime {
             name: process.name().to_string(),
             image_path: process.image_path().to_string(),
             executable_image: process.executable_image().clone(),
+            root: process.root().to_string(),
             cwd: process.cwd().to_string(),
             state: process.state(),
             exit_code: process.exit_code(),
@@ -157,6 +330,7 @@ impl KernelRuntime {
             session_stage: process.session_stage(),
             session_code: process.session_code(),
             session_detail: process.session_detail(),
+            abi_profile: process_abi_profile(process),
             contract_bindings: process.contract_bindings(),
             scheduler_override: process.scheduler_override(),
             scheduler_policy,
@@ -260,6 +434,7 @@ impl KernelRuntime {
             scheduler_agent_decisions: self.scheduler.recent_decisions().to_vec(),
             io_agent_decisions: self.recent_io_agent_decisions().to_vec(),
             vm_agent_decisions: self.recent_vm_agent_decisions().to_vec(),
+            syscall_dispatches: Vec::new(),
             event_queues: self
                 .event_queues
                 .iter()
@@ -335,6 +510,20 @@ impl KernelRuntime {
         if segments[1] == "system" {
             let content = match segments[2] {
                 "queues" if segments.len() == 3 => self.render_procfs_system_queues()?,
+                "scheduler" if segments.len() == 3 => self.render_procfs_system_scheduler()?,
+                "schedulerepisodes" if segments.len() == 3 => {
+                    self.render_procfs_system_schedulerepisodes()?
+                }
+                "signals" if segments.len() == 3 => self.render_procfs_system_signals()?,
+                "waits" if segments.len() == 3 => self.render_procfs_system_waits()?,
+                "fdshare" if segments.len() == 3 => self.render_procfs_system_fdshare()?,
+                "resources" if segments.len() == 3 => self.render_procfs_system_resources()?,
+                "bus" if segments.len() == 3 => self.render_procfs_system_bus()?,
+                "io" if segments.len() == 3 => self.render_procfs_system_io()?,
+                "cpu" if segments.len() == 3 => self.render_procfs_system_cpu()?,
+                "verified-core" if segments.len() == 3 => {
+                    self.render_procfs_system_verified_core()?
+                }
                 "network" if segments.len() == 4 && segments[3] == "interfaces" => {
                     self.render_procfs_network_interfaces()?
                 }
@@ -384,6 +573,12 @@ impl KernelRuntime {
             "vmobjects" if segments.len() == 3 => return self.render_procfs_vmobjects(pid),
             "vmdecisions" if segments.len() == 3 => return self.render_procfs_vmdecisions(pid),
             "vmepisodes" if segments.len() == 3 => return self.render_procfs_vmepisodes(pid),
+            "signals" if segments.len() == 3 => self.render_procfs_signals(pid)?,
+            "waits" if segments.len() == 3 => self.render_procfs_waits(pid)?,
+            "fdshare" if segments.len() == 3 => self.render_procfs_fdshare(pid)?,
+            "resources" if segments.len() == 3 => self.render_procfs_resources(pid)?,
+            "io" if segments.len() == 3 => self.render_procfs_io(pid)?,
+            "cpu" if segments.len() == 3 => self.render_procfs_cpu(pid)?,
             "queues" if segments.len() == 3 => self.render_procfs_queues(pid)?,
             "queues" if segments.len() == 5 && segments[3] == "event" => {
                 let queue = segments[4]
@@ -466,6 +661,18 @@ impl KernelRuntime {
             .objects
             .iter()
             .map(|(handle, _)| ContractId::from_handle(handle))
+            .find(|id| id.raw() == raw)
+            .ok_or(RuntimeError::Vfs(VfsError::NotFound))
+    }
+
+    pub(crate) fn find_bus_endpoint_id_by_raw(
+        &self,
+        raw: u64,
+    ) -> Result<BusEndpointId, RuntimeError> {
+        self.bus_endpoints
+            .objects
+            .iter()
+            .map(|(handle, _)| BusEndpointId::from_handle(handle))
             .find(|id| id.raw() == raw)
             .ok_or(RuntimeError::Vfs(VfsError::NotFound))
     }
@@ -1353,6 +1560,820 @@ impl KernelRuntime {
         queue_introspection::render_procfs_system_queues(self)
     }
 
+    fn render_procfs_system_scheduler(&self) -> Result<String, RuntimeError> {
+        let queued_by_class = self.scheduler.queued_threads_by_class();
+        let urgent_by_class = self.scheduler.queued_urgent_len_by_class();
+        let class_tokens = self.scheduler.class_dispatch_tokens();
+        let class_wait_ticks = self.scheduler.class_wait_ticks();
+        let class_lag_debt = self.scheduler.class_lag_debt();
+        let class_dispatch_counts = self.scheduler.class_dispatch_counts();
+        let class_runtime_ticks = self.scheduler.class_runtime_ticks();
+        let starved_classes = self.scheduler.starved_classes();
+        let running = self.scheduler.running().cloned();
+        let decisions = self.scheduler.recent_decisions();
+        let mut out = KernelBuffer::with_capacity(
+            256 + decisions.len().saturating_mul(96)
+                + queued_by_class.iter().map(Vec::len).sum::<usize>() * 24,
+        );
+        let snapshot = self.snapshot();
+        write!(
+            out,
+            "current-tick:\t{}\nbusy-ticks:\t{}\ndefault-budget:\t{}\ndecision-tracing:\t{}\nqueued-total:\t{}\nqueued-latency-critical:\t{}\nqueued-interactive:\t{}\nqueued-best-effort:\t{}\nqueued-background:\t{}\nfairness-dispatch-total:\t{}\nfairness-runtime-total:\t{}\nfairness-runtime-imbalance:\t{}\nrunning:\t{}\n",
+            snapshot.current_tick,
+            snapshot.busy_ticks,
+            self.scheduler.default_budget(),
+            self.scheduler.decision_tracing_enabled(),
+            snapshot.queued_processes,
+            snapshot.queued_latency_critical,
+            snapshot.queued_interactive,
+            snapshot.queued_normal,
+            snapshot.queued_background,
+            snapshot.scheduler_dispatch_total,
+            snapshot.scheduler_runtime_ticks_total,
+            snapshot.scheduler_runtime_imbalance,
+            running
+                .as_ref()
+                .map(|process| format!(
+                    "pid={} tid={} class={:?} budget={} cpu={}",
+                    process.pid.raw(),
+                    process.tid.raw(),
+                    process.class,
+                    process.budget,
+                    process.cpu
+                ))
+                .unwrap_or_else(|| String::from("-")),
+        )
+        .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        writeln!(
+            out,
+            "cpu-summary:\tcount={}\trunning={}\tload-imbalance={}\trebalance-ops={}\trebalance-migrations={}\tlast-rebalance={}",
+            snapshot.scheduler_cpu_count,
+            snapshot
+                .scheduler_running_cpu
+                .map(|cpu| cpu.to_string())
+                .unwrap_or_else(|| String::from("-")),
+            snapshot.scheduler_cpu_load_imbalance,
+            self.scheduler.rebalance_operations(),
+            self.scheduler.rebalance_migrations(),
+            self.scheduler.last_rebalance_migrations(),
+        )
+        .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        for cpu in 0..self.scheduler.logical_cpu_count() {
+            writeln!(
+                out,
+                "cpu\tindex={cpu}\tapic-id={}\tpackage={}\tcore-group={}\tsibling-group={}\tinferred-topology={}\tqueued-load={}\tdispatches={}\truntime-ticks={}\trunning={}",
+                self.scheduler.cpu_apic_id(cpu),
+                self.scheduler.cpu_package_id(cpu),
+                self.scheduler.cpu_core_group(cpu),
+                self.scheduler.cpu_sibling_group(cpu),
+                self.scheduler.cpu_topology_inferred(cpu),
+                self.scheduler.cpu_queued_loads()[cpu],
+                self.scheduler.cpu_dispatch_counts()[cpu],
+                self.scheduler.cpu_runtime_ticks()[cpu],
+                self.scheduler
+                    .running()
+                    .is_some_and(|process| process.cpu == cpu),
+            )
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        }
+        let cpu_class_loads = self.scheduler.cpu_class_queued_loads();
+        for cpu in 0..self.scheduler.logical_cpu_count() {
+            for class in SchedulerClass::ALL {
+                let class_name = match class {
+                    SchedulerClass::LatencyCritical => "latency-critical",
+                    SchedulerClass::Interactive => "interactive",
+                    SchedulerClass::BestEffort => "best-effort",
+                    SchedulerClass::Background => "background",
+                };
+                let tids = self
+                    .scheduler
+                    .queued_threads_for_cpu_and_class(cpu, class)
+                    .into_iter()
+                    .map(|tid| tid.raw().to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                writeln!(
+                    out,
+                    "cpu-queue\tindex={cpu}\tclass={class_name}\tcount={}\ttids=[{}]",
+                    cpu_class_loads[cpu][class.index()],
+                    tids
+                )
+                .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+            }
+        }
+
+        for (index, class) in SchedulerClass::ALL.iter().enumerate() {
+            let class_name = match *class {
+                SchedulerClass::LatencyCritical => "latency-critical",
+                SchedulerClass::Interactive => "interactive",
+                SchedulerClass::BestEffort => "best-effort",
+                SchedulerClass::Background => "background",
+            };
+            let tids = queued_by_class[index]
+                .iter()
+                .map(|tid| tid.raw().to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            writeln!(
+                out,
+                "queue\tclass={class_name}\tcount={}\ttokens={}\twait-ticks={}\tlag-debt={}\tdispatches={}\truntime-ticks={}\ttids=[{}]",
+                queued_by_class[index].len(),
+                class_tokens[index],
+                class_wait_ticks[index],
+                class_lag_debt[index],
+                class_dispatch_counts[index],
+                class_runtime_ticks[index],
+                tids
+            )
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+            writeln!(
+                out,
+                "policy\tclass={class_name}\turgent={}\tstarved={}\tstarvation-guard={}",
+                urgent_by_class[index],
+                starved_classes[index],
+                self.scheduler.starvation_guard_ticks(),
+            )
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        }
+
+        writeln!(out, "decisions:\t{}", decisions.len())
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        for decision in decisions {
+            writeln!(
+                out,
+                "decision\ttick={}\tagent={:?}\tpid={}\ttid={}\tclass={}\tdetail0={}\tdetail1={}\tmeaning={}",
+                decision.tick,
+                decision.agent,
+                decision.pid,
+                decision.tid,
+                decision.class,
+                decision.detail0,
+                decision.detail1,
+                render_scheduler_decision_meaning(*decision),
+            )
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        }
+
+        out.finish()?;
+        Ok(out
+            .as_str()
+            .map_err(|_| RuntimeError::Buffer(BufferError::DrainRejected))?
+            .to_owned())
+    }
+
+    fn render_procfs_system_schedulerepisodes(&self) -> Result<String, RuntimeError> {
+        #[derive(Clone, Copy)]
+        struct SchedulerEpisode {
+            kind: &'static str,
+            tick: u64,
+            pid: u64,
+            tid: u64,
+            class: u64,
+            budget: u64,
+            causal: &'static str,
+        }
+
+        let decisions = self.scheduler.recent_decisions();
+        let mut episodes = Vec::<SchedulerEpisode>::new();
+        for decision in decisions {
+            let maybe_episode = match decision.agent {
+                SchedulerAgentKind::WakeAgent => Some(SchedulerEpisode {
+                    kind: "wake",
+                    tick: decision.tick,
+                    pid: decision.pid,
+                    tid: decision.tid,
+                    class: decision.class,
+                    budget: 0,
+                    causal: "urgent-requeue",
+                }),
+                SchedulerAgentKind::BlockAgent => Some(SchedulerEpisode {
+                    kind: "block",
+                    tick: decision.tick,
+                    pid: decision.pid,
+                    tid: decision.tid,
+                    class: decision.class,
+                    budget: decision.detail0,
+                    causal: "running-blocked",
+                }),
+                SchedulerAgentKind::TickAgent if decision.detail0 == 2 => Some(SchedulerEpisode {
+                    kind: "rotation",
+                    tick: decision.tick,
+                    pid: decision.pid,
+                    tid: decision.tid,
+                    class: decision.class,
+                    budget: decision.detail1,
+                    causal: "budget-expired",
+                }),
+                SchedulerAgentKind::TickAgent if decision.detail0 == 3 => Some(SchedulerEpisode {
+                    kind: "dispatch",
+                    tick: decision.tick,
+                    pid: decision.pid,
+                    tid: decision.tid,
+                    class: decision.class,
+                    budget: decision.detail1,
+                    causal: "selected-next-runnable",
+                }),
+                SchedulerAgentKind::RebindAgent => Some(SchedulerEpisode {
+                    kind: "rebind",
+                    tick: decision.tick,
+                    pid: decision.pid,
+                    tid: decision.tid,
+                    class: decision.class,
+                    budget: decision.detail0,
+                    causal: match decision.detail1 {
+                        0 => "deferred-not-ready",
+                        1 => "running-updated",
+                        2 => "queued-moved",
+                        _ => "rebind-other",
+                    },
+                }),
+                SchedulerAgentKind::AffinityAgent => Some(SchedulerEpisode {
+                    kind: "affinity",
+                    tick: decision.tick,
+                    pid: decision.pid,
+                    tid: decision.tid,
+                    class: decision.class,
+                    budget: decision.detail0,
+                    causal: "cpu-mask-updated",
+                }),
+                SchedulerAgentKind::RemoveAgent => Some(SchedulerEpisode {
+                    kind: "remove",
+                    tick: decision.tick,
+                    pid: decision.pid,
+                    tid: decision.tid,
+                    class: decision.class,
+                    budget: 0,
+                    causal: "detached-from-scheduler",
+                }),
+                _ => None,
+            };
+            if let Some(episode) = maybe_episode {
+                episodes.push(episode);
+            }
+        }
+
+        let mut out = KernelBuffer::with_capacity(episodes.len().saturating_mul(128).max(96));
+        writeln!(out, "episodes:\t{}", episodes.len())
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        for episode in episodes {
+            writeln!(
+                out,
+                "episode\tkind={}\ttick={}\tpid={}\ttid={}\tclass={}\tbudget={}\tcausal={}",
+                episode.kind,
+                episode.tick,
+                episode.pid,
+                episode.tid,
+                episode.class,
+                episode.budget,
+                episode.causal,
+            )
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        }
+        out.finish()?;
+        Ok(out
+            .as_str()
+            .map_err(|_| RuntimeError::Buffer(BufferError::DrainRejected))?
+            .to_owned())
+    }
+
+    fn render_procfs_system_signals(&self) -> Result<String, RuntimeError> {
+        let mut out =
+            KernelBuffer::with_capacity(self.processes.len().saturating_mul(192).max(192));
+        let mut processes = self.process_list();
+        processes.sort_by_key(|process| process.pid.raw());
+        for process in processes {
+            let wait_mask = self
+                .signal_wait_masks
+                .get(&process.pid.raw())
+                .copied()
+                .unwrap_or(0);
+            let process_record = self.processes.get(process.pid)?;
+            let blocked = process_record.blocked_signals();
+            let blocked_pending = self.blocked_pending_signals(process.pid)?;
+            let thread_count = self.processes.threads_for_process(process.pid)?.len();
+            writeln!(
+                out,
+                "pid={}\tname={}\tstate={:?}\tthreads={}\tmask=0x{:x}\tpending={:?}\tblocked={:?}\tblocked-pending={:?}\twait-mask=0x{:x}",
+                process.pid.raw(),
+                process.name,
+                process.state,
+                thread_count,
+                process_record.signal_mask_raw(),
+                process.pending_signals,
+                blocked,
+                blocked_pending,
+                wait_mask,
+            )
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        }
+        out.finish()?;
+        Ok(out
+            .as_str()
+            .map_err(|_| RuntimeError::Buffer(BufferError::DrainRejected))?
+            .to_owned())
+    }
+
+    fn render_procfs_system_waits(&self) -> Result<String, RuntimeError> {
+        let mut out = KernelBuffer::with_capacity(
+            self.sleep_queues
+                .len()
+                .saturating_mul(192)
+                .saturating_add(self.recent_wait_agent_decisions().len().saturating_mul(128))
+                .max(256),
+        );
+        let snapshot = self.snapshot();
+        let decisions = self.recent_wait_agent_decisions();
+        let mut sleep_results = self
+            .sleep_results
+            .iter()
+            .map(|(pid, result)| (*pid, *result))
+            .collect::<Vec<_>>();
+        sleep_results.sort_by_key(|(pid, _)| *pid);
+        writeln!(
+            out,
+            "current-tick:\t{}\nbusy-ticks:\t{}\nsleeping-processes:\t{}\nsleep-queues:\t{}\nwait-decisions:\t{}\nsleep-results:\t{}",
+            snapshot.current_tick,
+            snapshot.busy_ticks,
+            snapshot.sleeping_processes,
+            self.sleep_queues.len(),
+            decisions.len(),
+            sleep_results.len(),
+        )
+        .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+
+        for queue in &self.sleep_queues {
+            let info = self.sleep_queue_info(queue);
+            let channels = info
+                .channels
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let signal_owners = info
+                .signal_wait_owners
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let memory_owners = info
+                .memory_wait_owners
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            writeln!(
+                out,
+                "queue\towner={}\tid={}\twaiters={}\tchannels=[{}]\tdescriptors={}\tsignal-owners=[{}]\tmemory-owners=[{}]",
+                info.owner.raw(),
+                info.id.raw(),
+                info.waiter_count,
+                channels,
+                info.descriptor_ref_count,
+                signal_owners,
+                memory_owners,
+            )
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        }
+
+        for (pid, result) in sleep_results {
+            writeln!(out, "result\tpid={}\tlast={:?}", pid, result)
+                .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        }
+
+        for decision in decisions {
+            writeln!(
+                out,
+                "decision\ttick={}\tagent={:?}\towner={}\tqueue={}\tchannel={}\tdetail0={}\tdetail1={}",
+                decision.tick,
+                decision.agent,
+                decision.owner,
+                decision.queue,
+                decision.channel,
+                decision.detail0,
+                decision.detail1,
+            )
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        }
+
+        out.finish()?;
+        Ok(out
+            .as_str()
+            .map_err(|_| RuntimeError::Buffer(BufferError::DrainRejected))?
+            .to_owned())
+    }
+
+    fn render_procfs_system_fdshare(&self) -> Result<String, RuntimeError> {
+        let mut groups = self.fdshare_groups.clone();
+        groups.sort_by_key(|group| group.id);
+        let mut out = KernelBuffer::with_capacity(groups.len().saturating_mul(96).max(128));
+        writeln!(out, "fdshare-groups:\t{}", groups.len())
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        for group in groups {
+            let members = group
+                .members
+                .iter()
+                .map(|member| member.raw().to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            writeln!(
+                out,
+                "group\tid={}\tmembers=[{}]\tcount={}",
+                group.id,
+                members,
+                group.members.len()
+            )
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        }
+        out.finish()?;
+        Ok(out
+            .as_str()
+            .map_err(|_| RuntimeError::Buffer(BufferError::DrainRejected))?
+            .to_owned())
+    }
+
+    fn render_procfs_system_resources(&self) -> Result<String, RuntimeError> {
+        let mut resources = self.resource_list();
+        resources.sort_by_key(|resource| resource.id.raw());
+        let mut out = KernelBuffer::with_capacity(resources.len().saturating_mul(160).max(192));
+        let decisions = self.recent_resource_agent_decisions();
+        let active = resources
+            .iter()
+            .filter(|resource| resource.state == ResourceState::Active)
+            .count();
+        let queued = resources
+            .iter()
+            .filter(|resource| !resource.waiters.is_empty())
+            .count();
+        writeln!(
+            out,
+            "resources:\t{}\nactive:\t{}\nqueued:\t{}\nresource-decisions:\t{}",
+            resources.len(),
+            active,
+            queued,
+            decisions.len(),
+        )
+        .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+
+        for resource in resources {
+            let waiters = resource
+                .waiters
+                .iter()
+                .map(|contract| contract.raw().to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            writeln!(
+                out,
+                "resource\tid={}\tdomain={}\tcreator={}\tkind={:?}\tstate={:?}\tholder={}\twaiting={}\tacquires={}\thandoffs={}\tpolicy={:?}\tgovernance={:?}\twaiters=[{}]",
+                resource.id.raw(),
+                resource.domain.raw(),
+                resource.creator.raw(),
+                resource.kind,
+                resource.state,
+                resource.holder.map(|holder| holder.raw().to_string()).unwrap_or_else(|| String::from("-")),
+                resource.waiting_count,
+                resource.acquire_count,
+                resource.handoff_count,
+                resource.contract_policy,
+                resource.governance,
+                waiters,
+            )
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        }
+
+        for decision in decisions {
+            writeln!(
+                out,
+                "decision\ttick={}\tagent={:?}\tresource={}\tcontract={}\tdetail0={}\tdetail1={}",
+                decision.tick,
+                decision.agent,
+                decision.resource,
+                decision.contract,
+                decision.detail0,
+                decision.detail1,
+            )
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        }
+
+        out.finish()?;
+        Ok(out
+            .as_str()
+            .map_err(|_| RuntimeError::Buffer(BufferError::DrainRejected))?
+            .to_owned())
+    }
+
+    fn render_procfs_system_bus(&self) -> Result<String, RuntimeError> {
+        let mut peers = self.bus_peers();
+        peers.sort_by_key(|peer| peer.id.raw());
+        let mut endpoints = self.bus_endpoints();
+        endpoints.sort_by_key(|endpoint| endpoint.id.raw());
+        let attached = endpoints
+            .iter()
+            .filter(|endpoint| !endpoint.attached_peers.is_empty())
+            .count();
+        let mut out = KernelBuffer::with_capacity(
+            (peers.len() + endpoints.len()).saturating_mul(160).max(192),
+        );
+        writeln!(
+            out,
+            "bus-peers:\t{}\nbus-endpoints:\t{}\nattached-endpoints:\t{}",
+            peers.len(),
+            endpoints.len(),
+            attached,
+        )
+        .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+
+        for peer in peers {
+            let endpoints = peer
+                .attached_endpoints
+                .iter()
+                .map(|endpoint| endpoint.raw().to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            writeln!(
+                out,
+                "peer\tid={}\towner={}\tdomain={}\tname={}\tpublishes={}\treceives={}\tlast-endpoint={}\tendpoints=[{}]",
+                peer.id.raw(),
+                peer.owner.raw(),
+                peer.domain.raw(),
+                peer.name,
+                peer.publish_count,
+                peer.receive_count,
+                peer.last_endpoint.map(|endpoint| endpoint.raw().to_string()).unwrap_or_else(|| String::from("-")),
+                endpoints,
+            )
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        }
+
+        for endpoint in endpoints {
+            let peers = endpoint
+                .attached_peers
+                .iter()
+                .map(|peer| peer.raw().to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let resource_info = self.resource_info(endpoint.resource)?;
+            let delegated_capabilities = self
+                .capabilities
+                .objects
+                .iter()
+                .filter(|(_, capability)| capability.target() == endpoint.id.handle())
+                .count();
+            writeln!(
+                out,
+                "endpoint\tid={}\tdomain={}\tresource={}\tkind={}\tpath={}\tcontract-policy={}\tissuer-policy={:?}\tdelegated-caps={}\tqueue-depth={}\tqueue-capacity={}\tqueue-peak={}\toverflows={}\tbytes={}\tpublishes={}\treceives={}\tlast-peer={}\tpeers=[{}]",
+                endpoint.id.raw(),
+                endpoint.domain.raw(),
+                endpoint.resource.raw(),
+                endpoint.kind.label(),
+                endpoint.path,
+                match resource_info.contract_policy {
+                    ResourceContractPolicy::Any => "any",
+                    ResourceContractPolicy::Execution => "execution",
+                    ResourceContractPolicy::Memory => "memory",
+                    ResourceContractPolicy::Io => "io",
+                    ResourceContractPolicy::Device => "device",
+                    ResourceContractPolicy::Display => "display",
+                    ResourceContractPolicy::Observe => "observe",
+                },
+                resource_info.issuer_policy,
+                delegated_capabilities,
+                endpoint.queue_depth,
+                endpoint.queue_capacity,
+                endpoint.peak_queue_depth,
+                endpoint.overflow_count,
+                endpoint.byte_count,
+                endpoint.publish_count,
+                endpoint.receive_count,
+                endpoint.last_peer.map(|peer| peer.raw().to_string()).unwrap_or_else(|| String::from("-")),
+                peers,
+            )
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        }
+
+        out.finish()?;
+        Ok(out
+            .as_str()
+            .map_err(|_| RuntimeError::Buffer(BufferError::DrainRejected))?
+            .to_owned())
+    }
+
+    fn render_procfs_system_io(&self) -> Result<String, RuntimeError> {
+        let mut out = KernelBuffer::with_capacity(
+            self.processes.len().saturating_mul(128)
+                + self.recent_io_agent_decisions().len().saturating_mul(96)
+                + 256,
+        );
+        let decisions = self.recent_io_agent_decisions();
+        let reads = decisions
+            .iter()
+            .filter(|entry| matches!(entry.agent, IoAgentKind::ReadAgent))
+            .count();
+        let writes = decisions
+            .iter()
+            .filter(|entry| matches!(entry.agent, IoAgentKind::WriteAgent))
+            .count();
+        let fcntl = decisions
+            .iter()
+            .filter(|entry| matches!(entry.agent, IoAgentKind::FcntlAgent))
+            .count();
+        let readiness = decisions
+            .iter()
+            .filter(|entry| matches!(entry.agent, IoAgentKind::ReadinessAgent))
+            .count();
+        let mut processes = self.process_list();
+        processes.sort_by_key(|process| process.pid.raw());
+        let fd_total = processes
+            .iter()
+            .map(|process| {
+                self.filedesc_entries(process.pid)
+                    .map(|entries| entries.len())
+                    .unwrap_or(0)
+            })
+            .sum::<usize>();
+        writeln!(
+            out,
+            "io-decisions:\t{}\nreads:\t{}\nwrites:\t{}\tfcntl:\t{}\treadiness:\t{}\nfd-total:\t{}\n",
+            decisions.len(),
+            reads,
+            writes,
+            fcntl,
+            readiness,
+            fd_total,
+        )
+        .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+
+        for process in processes {
+            let entries = self.filedesc_entries(process.pid)?;
+            let fds = self
+                .filedesc_entries(process.pid)?
+                .into_iter()
+                .map(|entry| format!("{}:{:?}", entry.fd.raw(), entry.kind))
+                .collect::<Vec<_>>()
+                .join(",");
+            let readiness_count = self
+                .readiness
+                .iter()
+                .filter(|registration| registration.owner == process.pid)
+                .count();
+            let last = decisions
+                .iter()
+                .rev()
+                .find(|entry| entry.owner == process.pid.raw())
+                .map(|entry| format!("{:?}", entry.agent))
+                .unwrap_or_else(|| String::from("-"));
+            writeln!(
+                out,
+                "pid={}\tname={}\tfd-count={}\treadiness={}\tlast={}\tfds=[{}]",
+                process.pid.raw(),
+                process.name,
+                entries.len(),
+                readiness_count,
+                last,
+                fds,
+            )
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        }
+
+        for decision in decisions {
+            writeln!(
+                out,
+                "decision\ttick={}\tagent={:?}\towner={}\tfd={}\tkind={}\tdetail0={}\tdetail1={}",
+                decision.tick,
+                decision.agent,
+                decision.owner,
+                decision.fd,
+                decision.kind,
+                decision.detail0,
+                decision.detail1,
+            )
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        }
+
+        out.finish()?;
+        Ok(out
+            .as_str()
+            .map_err(|_| RuntimeError::Buffer(BufferError::DrainRejected))?
+            .to_owned())
+    }
+
+    fn render_procfs_system_cpu(&self) -> Result<String, RuntimeError> {
+        let snapshot = self.snapshot();
+        let mut processes = self.process_list();
+        processes.sort_by_key(|process| process.pid.raw());
+        let mut out = KernelBuffer::with_capacity(
+            256 + processes.len().saturating_mul(192) + snapshot.thread_count.saturating_mul(160),
+        );
+        writeln!(
+            out,
+            "current-tick:\t{}\nbusy-ticks:\t{}\nprocesses:\t{}\nthreads:\t{}\nrunning:\t{}\nactive-slot:\t{}\nhardware-saves:\t{}\nhardware-restores:\t{}\nhardware-fallbacks:\t{}\nhardware-last-saved-tid:\t{}\nhardware-last-restored-tid:\t{}\nhardware-last-error:\t{}\n",
+            snapshot.current_tick,
+            snapshot.busy_ticks,
+            snapshot.process_count,
+            snapshot.thread_count,
+            snapshot
+                .running_thread
+                .map(|tid| tid.raw().to_string())
+                .unwrap_or_else(|| String::from("-")),
+            self.active_cpu_extended_state()
+                .map(|slot| format!(
+                    "pid={} tid={} bytes={} marker={:#x}",
+                    slot.owner_pid.raw(),
+                    slot.owner_tid.raw(),
+                    slot.image.bytes.len(),
+                    slot.image.profile.last_save_marker,
+                ))
+                .unwrap_or_else(|| String::from("-")),
+            self.cpu_extended_state_hardware_telemetry().save_count,
+            self.cpu_extended_state_hardware_telemetry().restore_count,
+            self.cpu_extended_state_hardware_telemetry().fallback_count,
+            self.cpu_extended_state_hardware_telemetry()
+                .last_saved_tid
+                .map(|tid| tid.raw().to_string())
+                .unwrap_or_else(|| String::from("-")),
+            self.cpu_extended_state_hardware_telemetry()
+                .last_restored_tid
+                .map(|tid| tid.raw().to_string())
+                .unwrap_or_else(|| String::from("-")),
+            self.cpu_extended_state_hardware_telemetry()
+                .last_error
+                .map(|error| format!("{error:?}"))
+                .unwrap_or_else(|| String::from("-")),
+        )
+        .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+
+        for process in processes {
+            let threads = self.thread_infos(process.pid)?;
+            writeln!(
+                out,
+                "process\tpid={}\tname={}\tthreads={}",
+                process.pid.raw(),
+                process.name,
+                threads.len(),
+            )
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+            for thread in threads {
+                writeln!(
+                    out,
+                    "thread\tpid={}\ttid={}\txsave-managed={}\tsave-area={}\txcr0={:#x}\tboot-probed={}\tboot-seed={:#x}\tactive={}\tsaves={}\trestores={}\tbuff-bytes={}\tbuff-align={}\tgeneration={}\tmarker={:#x}",
+                    process.pid.raw(),
+                    thread.tid.raw(),
+                    thread.cpu_extended_state.xsave_managed,
+                    thread.cpu_extended_state.save_area_bytes,
+                    thread.cpu_extended_state.xcr0_mask,
+                    thread.cpu_extended_state.boot_probed,
+                    thread.cpu_extended_state.boot_seed_marker,
+                    thread.cpu_extended_state.active_in_cpu,
+                    thread.cpu_extended_state.save_count,
+                    thread.cpu_extended_state.restore_count,
+                    thread.cpu_extended_state.save_area_buffer_bytes,
+                    thread.cpu_extended_state.save_area_alignment_bytes,
+                    thread.cpu_extended_state.save_area_generation,
+                    thread.cpu_extended_state.last_save_marker,
+                )
+                .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+            }
+        }
+
+        out.finish()?;
+        Ok(out
+            .as_str()
+            .map_err(|_| RuntimeError::Buffer(BufferError::DrainRejected))?
+            .to_owned())
+    }
+
+    fn render_procfs_system_verified_core(&self) -> Result<String, RuntimeError> {
+        let report = self.verify_core();
+        let mut out =
+            KernelBuffer::with_capacity(256 + report.violations.len().saturating_mul(192));
+        writeln!(
+            out,
+            "verified:\t{}\ncapability-model:\t{}\nvfs-invariants:\t{}\nscheduler-state-machine:\t{}\ncpu-extended-state-lifecycle:\t{}\nbus-integrity:\t{}\nviolations:\t{}",
+            report.is_verified(),
+            report.capability_model_verified,
+            report.vfs_invariants_verified,
+            report.scheduler_state_machine_verified,
+            report.cpu_extended_state_lifecycle_verified,
+            report.bus_integrity_verified,
+            report.violations.len(),
+        )
+        .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        for violation in report.violations {
+            writeln!(
+                out,
+                "violation\tfamily={}\tcode={}\tdetail={}",
+                violation.family.label(),
+                violation.code,
+                violation.detail,
+            )
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        }
+        out.finish()?;
+        Ok(out
+            .as_str()
+            .map_err(|_| RuntimeError::Buffer(BufferError::DrainRejected))?
+            .to_owned())
+    }
+
     fn render_procfs_network_interfaces(&self) -> Result<String, RuntimeError> {
         let mut infos = self
             .network_ifaces
@@ -1411,10 +2432,29 @@ impl KernelRuntime {
         infos.sort_by(|left, right| left.path.cmp(&right.path));
         let mut out = KernelBuffer::with_capacity(infos.len().saturating_mul(128).max(96));
         for info in infos {
+            let type_str = match info.socket_type {
+                crate::device_model::SocketType::Udp => "udp",
+                crate::device_model::SocketType::Tcp => "tcp",
+            };
+            let state_str = info.tcp_state.map(|s| match s {
+                crate::device_model::TcpState::Closed => "CLOSED",
+                crate::device_model::TcpState::Listen => "LISTEN",
+                crate::device_model::TcpState::SynSent => "SYN_SENT",
+                crate::device_model::TcpState::SynReceived => "SYN_RECV",
+                crate::device_model::TcpState::Established => "ESTABLISHED",
+                crate::device_model::TcpState::FinWait1 => "FIN_WAIT1",
+                crate::device_model::TcpState::FinWait2 => "FIN_WAIT2",
+                crate::device_model::TcpState::CloseWait => "CLOSE_WAIT",
+                crate::device_model::TcpState::Closing => "CLOSING",
+                crate::device_model::TcpState::LastAck => "LAST_ACK",
+                crate::device_model::TcpState::TimeWait => "TIME_WAIT",
+            }).unwrap_or("");
             writeln!(
                 out,
-                "{}\towner={}\tiface={}\tlocal={}.{}.{}.{}:{}\tremote={}.{}.{}.{}:{}\trx-depth={}\trx-packets={}\ttx-packets={}",
+                "{}\ttype={}\tstate={}\towner={}\tiface={}\tlocal={}.{}.{}.{}:{}\tremote={}.{}.{}.{}:{}\trx-depth={}\trx-packets={}\ttx-packets={}",
                 info.path,
+                type_str,
+                state_str,
                 info.owner.raw(),
                 info.interface,
                 info.local_ipv4[0],
@@ -1552,6 +2592,326 @@ impl KernelRuntime {
                 .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
             }
         }
+        out.finish()?;
+        Ok(out
+            .as_str()
+            .map_err(|_| RuntimeError::Buffer(BufferError::DrainRejected))?
+            .to_owned())
+    }
+
+    fn render_procfs_signals(&self, pid: ProcessId) -> Result<String, RuntimeError> {
+        let process = self.processes.get(pid)?;
+        let wait_mask = self.signal_wait_masks.get(&pid.raw()).copied().unwrap_or(0);
+        let mut out = KernelBuffer::with_capacity(512);
+        write!(
+            out,
+            "pid:\t{}\nname:\t{}\nstate:\t{:?}\nmask:\t0x{:x}\nblocked:\t{:?}\npending:\t{:?}\nblocked-pending:\t{:?}\nwait-mask:\t0x{:x}\n",
+            process.pid.raw(),
+            process.name(),
+            process.state(),
+            process.signal_mask_raw(),
+            process.blocked_signals(),
+            process.pending_signals(),
+            process.pending_blocked_signals(),
+            wait_mask,
+        )
+        .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+
+        writeln!(out, "dispositions:")
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        for signal in 1..=64 {
+            let Some(disposition) = process.signal_disposition(signal)? else {
+                continue;
+            };
+            let action_mask = process.signal_action_mask(signal)?;
+            let restart = process.signal_action_restart(signal)?;
+            writeln!(
+                out,
+                "signal={}\tdisposition={:?}\taction-mask=0x{:x}\trestart={}",
+                signal, disposition, action_mask, restart,
+            )
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        }
+
+        writeln!(out, "threads:").map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        for thread in self.processes.threads_for_process(pid)? {
+            let pending = process.pending_thread_signals(thread)?;
+            writeln!(out, "tid={}\tpending={:?}", thread.raw(), pending)
+                .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        }
+
+        out.finish()?;
+        Ok(out
+            .as_str()
+            .map_err(|_| RuntimeError::Buffer(BufferError::DrainRejected))?
+            .to_owned())
+    }
+
+    fn render_procfs_waits(&self, pid: ProcessId) -> Result<String, RuntimeError> {
+        let process = self.processes.get(pid)?;
+        let mut sleep_queues = self
+            .sleep_queues
+            .iter()
+            .filter(|queue| queue.owner == pid)
+            .map(|queue| self.sleep_queue_info(queue))
+            .collect::<Vec<_>>();
+        sleep_queues.sort_by_key(|queue| queue.id.raw());
+        let decisions = self
+            .recent_wait_agent_decisions()
+            .iter()
+            .copied()
+            .filter(|decision| decision.owner == pid.raw())
+            .collect::<Vec<_>>();
+        let mut out = KernelBuffer::with_capacity(
+            192 + sleep_queues.len().saturating_mul(160) + decisions.len().saturating_mul(96),
+        );
+        write!(
+            out,
+            "pid:\t{}\nname:\t{}\nstate:\t{:?}\nlast-sleep-result:\t{:?}\nsleep-queue-count:\t{}\nwait-decision-count:\t{}\n",
+            process.pid.raw(),
+            process.name(),
+            process.state(),
+            self.last_sleep_result(pid),
+            sleep_queues.len(),
+            decisions.len(),
+        )
+        .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+
+        for queue in sleep_queues {
+            let channels = queue
+                .channels
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            write!(
+                out,
+                "sleep\tid={}\twaiters={}\tchannels=[{}]\tdescriptors={}\tsignal-owners={}\tmemory-owners={}\n",
+                queue.id.raw(),
+                queue.waiter_count,
+                channels,
+                queue.descriptor_ref_count,
+                queue.signal_wait_owners.len(),
+                queue.memory_wait_owners.len(),
+            )
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+            for waiter in queue.waiters {
+                writeln!(
+                    out,
+                    "waiter\towner={}\tchannel={}\tpriority={}\twake-hint={}\tdeadline={:?}\tresult={:?}",
+                    waiter.owner.raw(),
+                    waiter.channel,
+                    waiter.priority,
+                    waiter.wake_hint,
+                    waiter.deadline_tick,
+                    waiter.result,
+                )
+                .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+            }
+        }
+
+        for decision in decisions {
+            writeln!(
+                out,
+                "decision\ttick={}\tagent={:?}\tqueue={}\tchannel={}\tdetail0={}\tdetail1={}",
+                decision.tick,
+                decision.agent,
+                decision.queue,
+                decision.channel,
+                decision.detail0,
+                decision.detail1,
+            )
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        }
+
+        out.finish()?;
+        Ok(out
+            .as_str()
+            .map_err(|_| RuntimeError::Buffer(BufferError::DrainRejected))?
+            .to_owned())
+    }
+
+    fn render_procfs_fdshare(&self, pid: ProcessId) -> Result<String, RuntimeError> {
+        let process = self.processes.get(pid)?;
+        let group = self
+            .fdshare_groups
+            .iter()
+            .find(|group| group.members.contains(&pid));
+        let mut out = KernelBuffer::with_capacity(128);
+        write!(
+            out,
+            "pid:\t{}\nname:\t{}\ngroup:\t{}\nmembers:\t{}\nshared:\t{}\nref-count:\t{}\n",
+            process.pid.raw(),
+            process.name(),
+            group
+                .map(|group| group.id.to_string())
+                .unwrap_or_else(|| String::from("-")),
+            group
+                .map(|group| group
+                    .members
+                    .iter()
+                    .map(|member| member.raw().to_string())
+                    .collect::<Vec<_>>()
+                    .join(","))
+                .unwrap_or_else(|| String::from("-")),
+            group.map(|group| group.members.len() > 1).unwrap_or(false),
+            group.map(|group| group.members.len()).unwrap_or(1),
+        )
+        .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        out.finish()?;
+        Ok(out
+            .as_str()
+            .map_err(|_| RuntimeError::Buffer(BufferError::DrainRejected))?
+            .to_owned())
+    }
+
+    fn render_procfs_io(&self, pid: ProcessId) -> Result<String, RuntimeError> {
+        let process = self.processes.get(pid)?;
+        let entries = self.filedesc_entries(pid)?;
+        let readiness_count = self
+            .readiness
+            .iter()
+            .filter(|registration| registration.owner == pid)
+            .count();
+        let mut out = KernelBuffer::with_capacity(entries.len().saturating_mul(80).max(192));
+        let decisions = self
+            .recent_io_agent_decisions()
+            .iter()
+            .copied()
+            .filter(|entry| entry.owner == pid.raw())
+            .collect::<Vec<_>>();
+        let last = decisions
+            .last()
+            .map(|entry| format!("{:?}", entry.agent))
+            .unwrap_or_else(|| String::from("-"));
+        writeln!(
+            out,
+            "pid:\t{}\nname:\t{}\nfd-count:\t{}\nreadiness:\t{}\nio-decisions:\t{}\nlast:\t{}\n",
+            process.pid.raw(),
+            process.name(),
+            entries.len(),
+            readiness_count,
+            decisions.len(),
+            last,
+        )
+        .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        for entry in entries {
+            let io = self.inspect_io(pid, entry.fd)?;
+            writeln!(
+                out,
+                "fd\t{}\tkind={:?}\tpath={}\tpos={}\tstate={:?}\tflags=cloexec:{} nonblock:{}\trights=0x{:x}\tlen={}",
+                entry.fd.raw(),
+                entry.kind,
+                entry.path,
+                io.cursor(),
+                io.state(),
+                entry.flags.cloexec,
+                entry.flags.nonblock,
+                io.capabilities().bits(),
+                io.payload().len(),
+            )
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        }
+        for decision in decisions {
+            writeln!(
+                out,
+                "decision\ttick={}\tagent={:?}\tfd={}\tkind={}\tdetail0={}\tdetail1={}",
+                decision.tick,
+                decision.agent,
+                decision.fd,
+                decision.kind,
+                decision.detail0,
+                decision.detail1,
+            )
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        }
+        out.finish()?;
+        Ok(out
+            .as_str()
+            .map_err(|_| RuntimeError::Buffer(BufferError::DrainRejected))?
+            .to_owned())
+    }
+
+    fn render_procfs_resources(&self, pid: ProcessId) -> Result<String, RuntimeError> {
+        let process = self.processes.get(pid)?;
+        let mut resources = self
+            .resource_list()
+            .into_iter()
+            .filter(|resource| resource.creator == pid)
+            .collect::<Vec<_>>();
+        resources.sort_by_key(|resource| resource.id.raw());
+        let mut out = KernelBuffer::with_capacity(resources.len().saturating_mul(160).max(128));
+        writeln!(
+            out,
+            "pid:\t{}\nname:\t{}\nresources:\t{}\n",
+            process.pid.raw(),
+            process.name(),
+            resources.len(),
+        )
+        .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        for resource in resources {
+            let waiters = resource
+                .waiters
+                .iter()
+                .map(|contract| contract.raw().to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            writeln!(
+                out,
+                "resource\tid={}\tkind={:?}\tstate={:?}\tholder={}\twaiting={}\tacquires={}\thandoffs={}\twaiters=[{}]",
+                resource.id.raw(),
+                resource.kind,
+                resource.state,
+                resource.holder.map(|holder| holder.raw().to_string()).unwrap_or_else(|| String::from("-")),
+                resource.waiting_count,
+                resource.acquire_count,
+                resource.handoff_count,
+                waiters,
+            )
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        }
+        out.finish()?;
+        Ok(out
+            .as_str()
+            .map_err(|_| RuntimeError::Buffer(BufferError::DrainRejected))?
+            .to_owned())
+    }
+
+    fn render_procfs_cpu(&self, pid: ProcessId) -> Result<String, RuntimeError> {
+        let process = self.processes.get(pid)?;
+        let threads = self.thread_infos(pid)?;
+        let mut out = KernelBuffer::with_capacity(256 + threads.len().saturating_mul(160));
+        writeln!(
+            out,
+            "pid:\t{}\nname:\t{}\nthreads:\t{}\n",
+            process.pid.raw(),
+            process.name(),
+            threads.len(),
+        )
+        .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+
+        for thread in threads {
+            writeln!(
+                out,
+                "thread\ttid={}\towned={}\txsave-managed={}\tsave-area={}\txcr0={:#x}\tboot-probed={}\tboot-seed={:#x}\tactive={}\tsaves={}\trestores={}\tbuff-bytes={}\tbuff-align={}\tgeneration={}\tmarker={:#x}",
+                thread.tid.raw(),
+                thread.cpu_extended_state.owned,
+                thread.cpu_extended_state.xsave_managed,
+                thread.cpu_extended_state.save_area_bytes,
+                thread.cpu_extended_state.xcr0_mask,
+                thread.cpu_extended_state.boot_probed,
+                thread.cpu_extended_state.boot_seed_marker,
+                thread.cpu_extended_state.active_in_cpu,
+                thread.cpu_extended_state.save_count,
+                thread.cpu_extended_state.restore_count,
+                thread.cpu_extended_state.save_area_buffer_bytes,
+                thread.cpu_extended_state.save_area_alignment_bytes,
+                thread.cpu_extended_state.save_area_generation,
+                thread.cpu_extended_state.last_save_marker,
+            )
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        }
+
         out.finish()?;
         Ok(out
             .as_str()

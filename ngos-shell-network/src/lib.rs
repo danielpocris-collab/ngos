@@ -287,8 +287,7 @@ pub fn run_network_smoke_report<B: SyscallBackend>(
             }
             let teardown_line = format!(
                 "network.smoke.teardown socket=/run/net0.sock attached-sockets={} sibling-sockets={} outcome=ok",
-                torn_down.attached_socket_count,
-                torn_down_net1.attached_socket_count
+                torn_down.attached_socket_count, torn_down_net1.attached_socket_count
             );
             runtime.unlink_path("/run/net1.sock").map_err(|_| 525)?;
             match runtime.inspect_network_socket("/run/net1.sock") {
@@ -303,8 +302,7 @@ pub fn run_network_smoke_report<B: SyscallBackend>(
             }
             let teardown_net1_line = format!(
                 "network.smoke.teardown socket=/run/net1.sock attached-sockets={} sibling-sockets={} outcome=ok",
-                torn_down_net1.attached_socket_count,
-                torn_down.attached_socket_count
+                torn_down_net1.attached_socket_count, torn_down.attached_socket_count
             );
 
             runtime.mksock_path("/run/net0.sock").map_err(|_| 506)?;
@@ -336,7 +334,8 @@ pub fn run_network_smoke_report<B: SyscallBackend>(
             let rebound_interface_net1 = runtime
                 .inspect_network_interface("/dev/net1")
                 .map_err(|_| 532)?;
-            if rebound_net1.local_port != 4110 || rebound_interface_net1.attached_socket_count != 1 {
+            if rebound_net1.local_port != 4110 || rebound_interface_net1.attached_socket_count != 1
+            {
                 return Err(533);
             }
             let rebind_net1_line = format!(
@@ -705,6 +704,119 @@ fn shell_driver_inject_udp<B: SyscallBackend>(
             dst_port,
             payload.len()
         ),
+    )
+}
+
+fn shell_tcp_listen<B: SyscallBackend>(
+    runtime: &Runtime<B>,
+    socket_path: &str,
+    device_path: &str,
+    local_port: u16,
+    backlog: usize,
+) -> Result<(), ExitCode> {
+    runtime
+        .tcp_listen(socket_path, device_path, local_port, backlog)
+        .map_err(|_| 246)?;
+    write_line(
+        runtime,
+        &format!(
+            "tcp-listen socket={} device={} port={} backlog={}",
+            socket_path, device_path, local_port, backlog
+        ),
+    )
+}
+
+fn shell_tcp_connect<B: SyscallBackend>(
+    runtime: &Runtime<B>,
+    socket_path: &str,
+    remote_ipv4: [u8; 4],
+    remote_port: u16,
+) -> Result<(), ExitCode> {
+    runtime
+        .tcp_connect(socket_path, remote_ipv4, remote_port)
+        .map_err(|_| 246)?;
+    write_line(
+        runtime,
+        &format!(
+            "tcp-connect socket={} remote={}:{}",
+            socket_path,
+            render_ipv4(remote_ipv4),
+            remote_port
+        ),
+    )
+}
+
+fn shell_tcp_accept<B: SyscallBackend>(
+    runtime: &Runtime<B>,
+    socket_path: &str,
+) -> Result<(), ExitCode> {
+    let (accepted_path, remote_ipv4, remote_port) = runtime
+        .tcp_accept(socket_path)
+        .map_err(|_| 246)?;
+    write_line(
+        runtime,
+        &format!(
+            "tcp-accept socket={} accepted={} remote={}:{}",
+            socket_path,
+            accepted_path,
+            render_ipv4(remote_ipv4),
+            remote_port
+        ),
+    )
+}
+
+fn shell_tcp_send<B: SyscallBackend>(
+    runtime: &Runtime<B>,
+    socket_path: &str,
+    payload: &str,
+) -> Result<(), ExitCode> {
+    let written = runtime.tcp_send(socket_path, payload.as_bytes()).map_err(|_| 246)?;
+    write_line(
+        runtime,
+        &format!(
+            "tcp-send socket={} bytes={}",
+            socket_path, written
+        ),
+    )
+}
+
+fn shell_tcp_recv<B: SyscallBackend>(
+    runtime: &Runtime<B>,
+    socket_path: &str,
+) -> Result<(), ExitCode> {
+    let mut buffer = [0u8; 512];
+    let count = runtime.tcp_recv(socket_path, &mut buffer).map_err(|_| 246)?;
+    let text = core::str::from_utf8(&buffer[..count]).map_err(|_| 239)?;
+    write_line(
+        runtime,
+        &format!(
+            "tcp-recv socket={} bytes={} payload={}",
+            socket_path,
+            count,
+            text
+        ),
+    )
+}
+
+fn shell_tcp_close<B: SyscallBackend>(
+    runtime: &Runtime<B>,
+    socket_path: &str,
+) -> Result<(), ExitCode> {
+    runtime.tcp_close(socket_path).map_err(|_| 246)?;
+    write_line(
+        runtime,
+        &format!("tcp-close socket={}", socket_path),
+    )
+}
+
+fn shell_tcp_reset<B: SyscallBackend>(
+    runtime: &Runtime<B>,
+    socket_path: &str,
+) -> Result<(), ExitCode> {
+    runtime.tcp_reset(socket_path).map_err(|_| 246)?;
+    write_line(
+        runtime,
+        &format!("tcp-reset socket={}", socket_path),
     )
 }
 
@@ -1232,6 +1344,137 @@ pub fn try_handle_network_agent_command<B: SyscallBackend>(
         };
         return Some(Ok(()));
     }
+    if let Some(rest) = line.strip_prefix("tcp-listen ") {
+        let mut parts = rest.split_whitespace();
+        let socket_path = match parts.next() {
+            Some(path) => resolve_shell_path(cwd, path),
+            None => {
+                let _ = write_line(runtime, "usage: tcp-listen <socket> <device> <port> [backlog]");
+                return Some(Err(2));
+            }
+        };
+        let device_path = match parts.next() {
+            Some(path) => resolve_shell_path(cwd, path),
+            None => {
+                let _ = write_line(runtime, "usage: tcp-listen <socket> <device> <port> [backlog]");
+                return Some(Err(2));
+            }
+        };
+        let local_port = match parse_u16_arg(parts.next()) {
+            Some(port) => port,
+            None => {
+                let _ = write_line(runtime, "usage: tcp-listen <socket> <device> <port> [backlog]");
+                return Some(Err(2));
+            }
+        };
+        let backlog = parts.next().map(|s| parse_usize_arg(Some(s))).unwrap_or(Some(128)).unwrap_or(128);
+        *last_status = match shell_tcp_listen(runtime, &socket_path, &device_path, local_port, backlog) {
+            Ok(()) => 0,
+            Err(code) => code,
+        };
+        return Some(Ok(()));
+    }
+    if let Some(rest) = line.strip_prefix("tcp-connect ") {
+        let mut parts = rest.split_whitespace();
+        let socket_path = match parts.next() {
+            Some(path) => resolve_shell_path(cwd, path),
+            None => {
+                let _ = write_line(runtime, "usage: tcp-connect <socket> <remote-ip> <remote-port>");
+                return Some(Err(2));
+            }
+        };
+        let remote_ip = match parts.next().and_then(parse_ipv4) {
+            Some(ip) => ip,
+            None => {
+                let _ = write_line(runtime, "usage: tcp-connect <socket> <remote-ip> <remote-port>");
+                return Some(Err(2));
+            }
+        };
+        let remote_port = match parse_u16_arg(parts.next()) {
+            Some(port) => port,
+            None => {
+                let _ = write_line(runtime, "usage: tcp-connect <socket> <remote-ip> <remote-port>");
+                return Some(Err(2));
+            }
+        };
+        *last_status = match shell_tcp_connect(runtime, &socket_path, remote_ip, remote_port) {
+            Ok(()) => 0,
+            Err(code) => code,
+        };
+        return Some(Ok(()));
+    }
+    if let Some(rest) = line.strip_prefix("tcp-accept ") {
+        let socket_path = match rest.split_whitespace().next() {
+            Some(path) => resolve_shell_path(cwd, path),
+            None => {
+                let _ = write_line(runtime, "usage: tcp-accept <socket>");
+                return Some(Err(2));
+            }
+        };
+        *last_status = match shell_tcp_accept(runtime, &socket_path) {
+            Ok(()) => 0,
+            Err(code) => code,
+        };
+        return Some(Ok(()));
+    }
+    if let Some(rest) = line.strip_prefix("tcp-send ") {
+        let mut parts = rest.split_whitespace();
+        let socket_path = match parts.next() {
+            Some(path) => resolve_shell_path(cwd, path),
+            None => {
+                let _ = write_line(runtime, "usage: tcp-send <socket> <payload>");
+                return Some(Err(2));
+            }
+        };
+        let payload = parts.next().unwrap_or("");
+        *last_status = match shell_tcp_send(runtime, &socket_path, payload) {
+            Ok(()) => 0,
+            Err(code) => code,
+        };
+        return Some(Ok(()));
+    }
+    if let Some(rest) = line.strip_prefix("tcp-recv ") {
+        let socket_path = match rest.split_whitespace().next() {
+            Some(path) => resolve_shell_path(cwd, path),
+            None => {
+                let _ = write_line(runtime, "usage: tcp-recv <socket>");
+                return Some(Err(2));
+            }
+        };
+        *last_status = match shell_tcp_recv(runtime, &socket_path) {
+            Ok(()) => 0,
+            Err(code) => code,
+        };
+        return Some(Ok(()));
+    }
+    if let Some(rest) = line.strip_prefix("tcp-close ") {
+        let socket_path = match rest.split_whitespace().next() {
+            Some(path) => resolve_shell_path(cwd, path),
+            None => {
+                let _ = write_line(runtime, "usage: tcp-close <socket>");
+                return Some(Err(2));
+            }
+        };
+        *last_status = match shell_tcp_close(runtime, &socket_path) {
+            Ok(()) => 0,
+            Err(code) => code,
+        };
+        return Some(Ok(()));
+    }
+    if let Some(rest) = line.strip_prefix("tcp-reset ") {
+        let socket_path = match rest.split_whitespace().next() {
+            Some(path) => resolve_shell_path(cwd, path),
+            None => {
+                let _ = write_line(runtime, "usage: tcp-reset <socket>");
+                return Some(Err(2));
+            }
+        };
+        *last_status = match shell_tcp_reset(runtime, &socket_path) {
+            Ok(()) => 0,
+            Err(code) => code,
+        };
+        return Some(Ok(()));
+    }
     if let Some(path) = line.strip_prefix("netsock ") {
         let resolved = resolve_shell_path(cwd, path.trim());
         return Some(shell_render_network_socket(runtime, &resolved).map_err(|_| 205));
@@ -1596,7 +1839,9 @@ mod tests {
                 String::from("network.smoke.success bytes=10"),
                 String::from("network.smoke.multi iface0=10.1.0.2 iface1=10.2.0.2"),
                 String::from("network.smoke.rx remote=10.1.0.9:5000"),
-                String::from("network.smoke.refusal interface=/dev/net1 state=link-down errno=EACCES outcome=expected"),
+                String::from(
+                    "network.smoke.refusal interface=/dev/net1 state=link-down errno=EACCES outcome=expected"
+                ),
                 String::from("network.smoke.teardown socket=/run/net0.sock"),
                 String::from("network.smoke.teardown socket=/run/net1.sock"),
                 String::from("network.smoke.rebind socket=/run/net0.sock"),
