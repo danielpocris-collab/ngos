@@ -137,6 +137,72 @@ fn native_program_runs_compat_foreign_bootproof_and_reports_unified_family_marke
 }
 
 #[test]
+fn native_program_runs_resource_bootproof_and_reports_resource_model_markers() {
+    let runtime = UserRuntime::new(RecordingBackend::default());
+    let argv = ["ngos-userland-native", "--boot"];
+    let envp = [
+        "NGOS_BOOT=1",
+        "NGOS_BOOT_PROTOCOL=limine",
+        "NGOS_BOOT_MODULE=ngos-userland-native",
+        "NGOS_BOOT_MODULE_LEN=12288",
+        "NGOS_PROCESS_NAME=ngos-userland-native",
+        "NGOS_BOOT_MODULE_PHYS_START=0x200000",
+        "NGOS_BOOT_MODULE_PHYS_END=0x203000",
+        "NGOS_IMAGE_PATH=/kernel/ngos-userland-native",
+        "NGOS_CWD=/",
+        "NGOS_ROOT_MOUNT_PATH=/",
+        "NGOS_ROOT_MOUNT_NAME=rootfs",
+        "NGOS_IMAGE_BASE=0x400000",
+        "NGOS_STACK_TOP=0x7fffffff0000",
+        "NGOS_PHDR=0x40",
+        "NGOS_PHENT=56",
+        "NGOS_PHNUM=2",
+        "NGOS_FRAMEBUFFER_PRESENT=1",
+        "NGOS_FRAMEBUFFER_WIDTH=1920",
+        "NGOS_FRAMEBUFFER_HEIGHT=1080",
+        "NGOS_FRAMEBUFFER_PITCH=7680",
+        "NGOS_FRAMEBUFFER_BPP=32",
+        "NGOS_MEMORY_REGION_COUNT=2",
+        "NGOS_USABLE_MEMORY_BYTES=8388608",
+        "NGOS_PHYSICAL_MEMORY_OFFSET=0x0",
+        "NGOS_RSDP=0xdeadbeef",
+        "NGOS_KERNEL_PHYS_START=0x100000",
+        "NGOS_KERNEL_PHYS_END=0x101000",
+        "NGOS_BOOT_OUTCOME_POLICY=require-zero-exit",
+        "NGOS_BOOT_CPU_XSAVE=1",
+        "NGOS_BOOT_CPU_SAVE_AREA=4096",
+        "NGOS_BOOT_CPU_XCR0=0xe7",
+        "NGOS_BOOT_CPU_BOOT_SEED=0x12345678",
+        "NGOS_BOOT_CPU_HW_PROVIDER=1",
+        "NGOS_BOOT_PROOF=resource",
+    ];
+    let auxv = [
+        ngos_user_abi::AuxvEntry {
+            key: AT_PAGESZ,
+            value: 4096,
+        },
+        ngos_user_abi::AuxvEntry {
+            key: AT_ENTRY,
+            value: 0x401000,
+        },
+    ];
+    let bootstrap = BootstrapArgs::new(&argv, &envp, &auxv);
+
+    let result = main(&runtime, &bootstrap);
+    let stdout = String::from_utf8(runtime.backend().stdout.borrow().clone()).unwrap();
+    assert_eq!(result, 0, "resource stdout:\n{stdout}");
+    assert!(stdout.contains("boot.proof=resource"));
+    assert!(stdout.contains("contract-state-updated id="));
+    assert!(stdout.contains("resource-state-updated id="));
+    assert!(stdout.contains("claim-acquired contract="));
+    assert!(stdout.contains("claim-queued contract="));
+    assert!(stdout.contains("claim-handed-off resource="));
+    assert!(stdout.contains("claim-released contract="));
+    assert!(stdout.contains("resource.smoke.final domain="));
+    assert!(stdout.contains("resource-smoke-ok"));
+}
+
+#[test]
 fn native_program_runs_shell_bootproof_and_reports_shell_markers() {
     let runtime = UserRuntime::new(RecordingBackend::default());
     let argv = ["ngos-userland-native", "--boot"];
@@ -264,7 +330,6 @@ fn native_program_runs_shell_bootproof_and_reports_shell_markers() {
     assert!(stdout.contains("shell.smoke.state pid=1 cwd=/ note=/shell-proof/note outcome=ok"));
 }
 
-#[test]
 fn native_program_runs_device_runtime_bootproof_and_reports_unified_markers() {
     let runtime = UserRuntime::new(RecordingBackend::default());
     let argv = ["ngos-userland-native", "--boot"];

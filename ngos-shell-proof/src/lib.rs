@@ -48,6 +48,7 @@ pub enum BootProofKind {
     NetworkHardwareTx,
     NetworkHardwareUdpTx,
     DeviceRuntime,
+    Resource,
     StorageCommit,
     StorageRecover,
     StorageCorrupt,
@@ -94,6 +95,7 @@ impl BootProofKind {
             "network-hardware-tx" => Some(Self::NetworkHardwareTx),
             "network-hardware-udp-tx" => Some(Self::NetworkHardwareUdpTx),
             "device-runtime" => Some(Self::DeviceRuntime),
+            "resource" => Some(Self::Resource),
             "storage-commit" => Some(Self::StorageCommit),
             "storage-recover" => Some(Self::StorageRecover),
             "storage-corrupt" => Some(Self::StorageCorrupt),
@@ -125,6 +127,7 @@ impl BootProofKind {
             Self::NetworkHardwareTx => "boot.proof=network-hardware-tx",
             Self::NetworkHardwareUdpTx => "boot.proof=network-hardware-udp-tx",
             Self::DeviceRuntime => "boot.proof=device-runtime",
+            Self::Resource => "boot.proof=resource",
             Self::StorageCommit => "boot.proof=storage-commit",
             Self::StorageRecover => "boot.proof=storage-recover",
             Self::StorageCorrupt => "boot.proof=storage-corrupt",
@@ -195,6 +198,7 @@ pub trait BootProofDispatcher {
     fn run_network_hardware_tx(&mut self) -> Self::Output;
     fn run_network_hardware_udp_tx(&mut self) -> Self::Output;
     fn run_device_runtime(&mut self) -> Self::Output;
+    fn run_resource(&mut self) -> Self::Output;
     fn run_storage_commit(&mut self) -> Self::Output;
     fn run_storage_recover(&mut self) -> Self::Output;
     fn run_storage_corrupt(&mut self) -> Self::Output;
@@ -395,6 +399,7 @@ pub fn dispatch_boot_proof<D: BootProofDispatcher>(
         BootProofKind::NetworkHardwareTx => dispatcher.run_network_hardware_tx(),
         BootProofKind::NetworkHardwareUdpTx => dispatcher.run_network_hardware_udp_tx(),
         BootProofKind::DeviceRuntime => dispatcher.run_device_runtime(),
+        BootProofKind::Resource => dispatcher.run_resource(),
         BootProofKind::StorageCommit => dispatcher.run_storage_commit(),
         BootProofKind::StorageRecover => dispatcher.run_storage_recover(),
         BootProofKind::StorageCorrupt => dispatcher.run_storage_corrupt(),
@@ -761,6 +766,9 @@ mod tests {
         }
         fn run_device_runtime(&mut self) -> Self::Output {
             "device-runtime"
+        }
+        fn run_resource(&mut self) -> Self::Output {
+            "resource"
         }
         fn run_storage_commit(&mut self) -> Self::Output {
             "storage-commit"
