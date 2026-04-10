@@ -18,8 +18,9 @@
 use super::*;
 use crate::device_model::{
     DeviceEndpoint, DeviceRegistry, DeviceRequest, DriverEndpoint, GpuBufferObject, IcmpMessage,
-    IpVersion, Ipv6Address, NetworkBuffer, NetworkBufferState, NetworkInterface, NetworkSocket,
-    SocketRxPacket, SocketType, TcpControlBlock, TcpFlags, TcpSegment, TcpState,
+    IcmpType, IcmpUnreachableCode, IpVersion, Ipv6Address, NetworkBuffer, NetworkBufferState,
+    NetworkInterface, NetworkSocket, SocketRxPacket, SocketType, TcpControlBlock, TcpFlags,
+    TcpSegment, TcpState,
 };
 use crate::eventing_model::GraphicsEventKind;
 use crate::runtime_core::RuntimeChannel;
@@ -3051,6 +3052,74 @@ impl KernelRuntime {
         self.network_sockets[socket_index].rx_packets = self.network_sockets[socket_index]
             .rx_packets
             .saturating_add(1);
+
+        Ok(())
+    }
+
+    pub fn icmp_send_port_unreachable(
+        &mut self,
+        device_path: &str,
+        src_ipv4: [u8; 4],
+        dst_ipv4: [u8; 4],
+        src_port: u16,
+        dst_port: u16,
+        original_payload: &[u8],
+    ) -> Result<(), RuntimeError> {
+        let iface_index = self
+            .network_ifaces
+            .iter()
+            .position(|iface| iface.device_path == device_path)
+            .ok_or(DeviceModelError::InvalidDevice)?;
+
+        let mut icmp_msg = IcmpMessage::dest_unreachable(
+            IcmpUnreachableCode::PortUnreachable,
+            original_payload.to_vec(),
+        );
+        icmp_msg.checksum = icmp_checksum(&icmp_msg);
+
+        let icmp_frame = build_icmp_ipv4_frame(
+            self.network_ifaces[iface_index].mac,
+            [0xff; 6],
+            dst_ipv4,
+            src_ipv4,
+            &icmp_msg,
+        );
+
+        let socket_path = format!("/run/icmp-error-{}.sock", self.network_ifaces[iface_index].next_buffer_id);
+        let buffer_id = self.alloc_network_buffer(
+            iface_index,
+            socket_path.clone(),
+            icmp_frame.clone(),
+            NetworkBufferState::TxQueued,
+        )?;
+
+        self.network_ifaces[iface_index].tx_ring.push(buffer_id);
+        self.network_ifaces[iface_index].tx_packets = self.network_ifaces[iface_index]
+            .tx_packets
+            .saturating_add(1);
+
+        let driver_path = self.network_ifaces[iface_index].driver_path.clone();
+        let tx_text = format!(
+            "icmp-error-tx iface={} type=PortUnreachable src={}.{}.{}.{}:{} dst={}.{}.{}.{}:{} buffer={}\n",
+            device_path,
+            src_ipv4[0], src_ipv4[1], src_ipv4[2], src_ipv4[3], src_port,
+            dst_ipv4[0], dst_ipv4[1], dst_ipv4[2], dst_ipv4[3], dst_port,
+            buffer_id,
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(icmp_frame.iter().copied())
+        .collect::<Vec<_>>();
+
+        for (binding_owner, binding_fd) in self.descriptor_bindings_for_path(&driver_path)? {
+            self.io_registry
+                .replace_payload(binding_owner, binding_fd, &tx_text)
+                .map_err(map_runtime_io_error)?;
+            self.io_registry
+                .set_state(binding_owner, binding_fd, IoState::ReadWrite)
+                .map_err(map_runtime_io_error)?;
+            let _ = self.notify_descriptor_ready(binding_owner, binding_fd);
+        }
 
         Ok(())
     }
