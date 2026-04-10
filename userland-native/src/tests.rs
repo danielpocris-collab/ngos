@@ -10170,7 +10170,7 @@ fn native_shell_reports_contract_and_resource_state_refusal_and_recovery_semanti
 #[test]
 fn native_program_runs_signal_commands_from_stdin() {
     let runtime = UserRuntime::new(RecordingBackend::with_stdin(
-        b"kill 1 9\npending-signals 1\nblocked-signals 1\nexit 0\n",
+        b"process-info 1\nkill 1 9\npending-signals 1\nblocked-signals 1\nprocess-info 1\nexit 0\n",
     ));
     let argv = ["ngos-userland-native"];
     let envp = [
@@ -10202,6 +10202,7 @@ fn native_program_runs_signal_commands_from_stdin() {
 
     assert_eq!(main(&runtime, &bootstrap), 0);
     let stdout = String::from_utf8(runtime.backend().stdout.borrow().clone()).unwrap();
+    assert!(stdout.contains("pid=1 name=ngos-userland-native"));
     assert!(stdout.contains("signal-sent pid=1 signal=9"));
     assert!(stdout.contains("pid=1 pending-signals=9"));
     assert!(stdout.contains("pid=1 blocked-pending-signals=-"));
