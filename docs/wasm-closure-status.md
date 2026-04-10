@@ -44,3 +44,16 @@
   - `boot-x86_64` via `ngos.boot.proof=wasm`
 
 This front is real WebAssembly, not a synthetic host-side substitute.
+
+## What Was Verified Now
+
+- the existing `QEMU` proof harness passed again on the real boot path:
+  - [tooling/x86_64/prove-qemu-wasm-smoke.ps1](/C:/Users/pocri/OneDrive/Desktop/experiment/tooling/x86_64/prove-qemu-wasm-smoke.ps1)
+  - [tooling/x86_64/verify-qemu-wasm-log.ps1](/C:/Users/pocri/OneDrive/Desktop/experiment/tooling/x86_64/verify-qemu-wasm-log.ps1)
+- the observable serial evidence was produced again in:
+  - [target/qemu/serial-wasm.log](/C:/Users/pocri/OneDrive/Desktop/experiment/target/qemu/serial-wasm.log)
+
+Result:
+
+- `QEMU` truth for the current `WASM` smoke front is green
+- the subsystem still remains globally open because the broader host interface set and hardware-real proof remain open
