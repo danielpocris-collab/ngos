@@ -409,8 +409,11 @@ pub(crate) struct NetworkSocket {
     pub(crate) path: String,
     pub(crate) owner: ProcessId,
     pub(crate) interface: String,
+    pub(crate) ip_version: IpVersion,
     pub(crate) local_ipv4: [u8; 4],
+    pub(crate) local_ipv6: Ipv6Address,
     pub(crate) remote_ipv4: [u8; 4],
+    pub(crate) remote_ipv6: Ipv6Address,
     pub(crate) local_port: u16,
     pub(crate) remote_port: u16,
     pub(crate) rx_queue: Vec<SocketRxPacket>,
@@ -454,10 +457,206 @@ pub(crate) struct SocketRxPacket {
     pub(crate) dst_port: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct Ipv6Address {
+    pub(crate) octets: [u8; 16],
+}
+
+impl Ipv6Address {
+    pub(crate) const UNSPECIFIED: Self = Self { octets: [0; 16] };
+    pub(crate) const LOOPBACK: Self = Self {
+        octets: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+    };
+
+    pub(crate) fn from_segments(a: u16, b: u16, c: u16, d: u16, e: u16, f: u16, g: u16, h: u16) -> Self {
+        let mut octets = [0u8; 16];
+        octets[0..2].copy_from_slice(&a.to_be_bytes());
+        octets[2..4].copy_from_slice(&b.to_be_bytes());
+        octets[4..6].copy_from_slice(&c.to_be_bytes());
+        octets[6..8].copy_from_slice(&d.to_be_bytes());
+        octets[8..10].copy_from_slice(&e.to_be_bytes());
+        octets[10..12].copy_from_slice(&f.to_be_bytes());
+        octets[12..14].copy_from_slice(&g.to_be_bytes());
+        octets[14..16].copy_from_slice(&h.to_be_bytes());
+        Self { octets }
+    }
+
+    pub(crate) fn from_ipv4_mapped(ipv4: [u8; 4]) -> Self {
+        let mut octets = [0u8; 16];
+        octets[10] = 0xff;
+        octets[11] = 0xff;
+        octets[12] = ipv4[0];
+        octets[13] = ipv4[1];
+        octets[14] = ipv4[2];
+        octets[15] = ipv4[3];
+        Self { octets }
+    }
+
+    pub(crate) fn is_ipv4_mapped(&self) -> bool {
+        self.octets[10] == 0xff && self.octets[11] == 0xff
+    }
+
+    pub(crate) fn to_ipv4_mapped(&self) -> Option<[u8; 4]> {
+        if self.is_ipv4_mapped() {
+            Some([self.octets[12], self.octets[13], self.octets[14], self.octets[15]])
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn is_link_local(&self) -> bool {
+        self.octets[0] == 0xfe && (self.octets[1] & 0xc0) == 0x80
+    }
+
+    pub(crate) fn is_multicast(&self) -> bool {
+        self.octets[0] == 0xff
+    }
+
+    pub(crate) fn is_loopback(&self) -> bool {
+        *self == Self::LOOPBACK
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IpVersion {
+    Ipv4,
+    Ipv6,
+}
+
+impl IpVersion {
+    pub(crate) fn to_u8(self) -> u8 {
+        match self {
+            Self::Ipv4 => 4,
+            Self::Ipv6 => 6,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum IpAddress {
+    V4([u8; 4]),
+    V6(Ipv6Address),
+}
+
+impl IpAddress {
+    pub(crate) fn version(&self) -> IpVersion {
+        match self {
+            Self::V4(_) => IpVersion::Ipv4,
+            Self::V6(_) => IpVersion::Ipv6,
+        }
+    }
+
+    pub(crate) fn is_unspecified(&self) -> bool {
+        match self {
+            Self::V4(addr) => *addr == [0, 0, 0, 0],
+            Self::V6(addr) => *addr == Ipv6Address::UNSPECIFIED,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IcmpType {
+    EchoReply = 0,
+    DestinationUnreachable = 3,
+    SourceQuench = 4,
+    Redirect = 5,
+    EchoRequest = 8,
+    TimeExceeded = 11,
+    ParameterProblem = 12,
+    TimestampRequest = 13,
+    TimestampReply = 14,
+}
+
+impl IcmpType {
+    pub(crate) fn from_u8(val: u8) -> Option<Self> {
+        match val {
+            0 => Some(Self::EchoReply),
+            3 => Some(Self::DestinationUnreachable),
+            4 => Some(Self::SourceQuench),
+            5 => Some(Self::Redirect),
+            8 => Some(Self::EchoRequest),
+            11 => Some(Self::TimeExceeded),
+            12 => Some(Self::ParameterProblem),
+            13 => Some(Self::TimestampRequest),
+            14 => Some(Self::TimestampReply),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn to_u8(self) -> u8 {
+        self as u8
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IcmpUnreachableCode {
+    NetworkUnreachable = 0,
+    HostUnreachable = 1,
+    ProtocolUnreachable = 2,
+    PortUnreachable = 3,
+    FragmentationNeeded = 4,
+    SourceRouteFailed = 5,
+}
+
+impl IcmpUnreachableCode {
+    pub(crate) fn to_u8(self) -> u8 {
+        self as u8
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IcmpMessage {
+    pub(crate) icmp_type: IcmpType,
+    pub(crate) code: u8,
+    pub(crate) checksum: u16,
+    pub(crate) identifier: u16,
+    pub(crate) sequence: u16,
+    pub(crate) payload: Vec<u8>,
+}
+
+impl IcmpMessage {
+    pub(crate) fn echo_request(identifier: u16, sequence: u16, payload: Vec<u8>) -> Self {
+        Self {
+            icmp_type: IcmpType::EchoRequest,
+            code: 0,
+            checksum: 0,
+            identifier,
+            sequence,
+            payload,
+        }
+    }
+
+    pub(crate) fn echo_reply(identifier: u16, sequence: u16, payload: Vec<u8>) -> Self {
+        Self {
+            icmp_type: IcmpType::EchoReply,
+            code: 0,
+            checksum: 0,
+            identifier,
+            sequence,
+            payload,
+        }
+    }
+
+    pub(crate) fn dest_unreachable(
+        code: IcmpUnreachableCode,
+        original_header: Vec<u8>,
+    ) -> Self {
+        Self {
+            icmp_type: IcmpType::DestinationUnreachable,
+            code: code.to_u8(),
+            checksum: 0,
+            identifier: 0,
+            sequence: 0,
+            payload: original_header,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SocketType {
     Udp,
     Tcp,
+    Icmp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -488,6 +687,10 @@ pub(crate) struct NetworkInterface {
     pub(crate) ipv4_addr: [u8; 4],
     pub(crate) ipv4_netmask: [u8; 4],
     pub(crate) ipv4_gateway: [u8; 4],
+    pub(crate) ipv6_addr: Ipv6Address,
+    pub(crate) ipv6_gateway: Ipv6Address,
+    pub(crate) ipv6_prefix_len: u8,
+    pub(crate) link_local: Ipv6Address,
     pub(crate) tx_capacity: usize,
     pub(crate) rx_capacity: usize,
     pub(crate) tx_inflight_limit: usize,

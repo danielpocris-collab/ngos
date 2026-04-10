@@ -17,9 +17,9 @@
 
 use super::*;
 use crate::device_model::{
-    DeviceEndpoint, DeviceRegistry, DeviceRequest, DriverEndpoint, GpuBufferObject, NetworkBuffer,
-    NetworkBufferState, NetworkInterface, NetworkSocket, SocketRxPacket, SocketType, TcpControlBlock,
-    TcpFlags, TcpSegment, TcpState,
+    DeviceEndpoint, DeviceRegistry, DeviceRequest, DriverEndpoint, GpuBufferObject, IcmpMessage,
+    IpVersion, Ipv6Address, NetworkBuffer, NetworkBufferState, NetworkInterface, NetworkSocket,
+    SocketRxPacket, SocketType, TcpControlBlock, TcpFlags, TcpSegment, TcpState,
 };
 use crate::eventing_model::GraphicsEventKind;
 use crate::runtime_core::RuntimeChannel;
@@ -242,6 +242,173 @@ fn build_tcp_ipv4_frame(
 }
 
 type ParsedUdpIpv4Frame = ([u8; 6], [u8; 6], [u8; 4], [u8; 4], u16, u16, Vec<u8>);
+
+fn icmp_checksum(msg: &IcmpMessage) -> u16 {
+    let mut data = Vec::with_capacity(8 + msg.payload.len());
+    data.push(msg.icmp_type.to_u8());
+    data.push(msg.code);
+    data.extend_from_slice(&0u16.to_be_bytes()); // checksum placeholder
+    data.extend_from_slice(&msg.identifier.to_be_bytes());
+    data.extend_from_slice(&msg.sequence.to_be_bytes());
+    data.extend_from_slice(&msg.payload);
+
+    if data.len() % 2 != 0 {
+        data.push(0);
+    }
+
+    let mut sum = 0u32;
+    for chunk in data.chunks_exact(2) {
+        sum = sum.wrapping_add(u16::from_be_bytes([chunk[0], chunk[1]]) as u32);
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+fn build_icmp_ipv4_frame(
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    msg: &IcmpMessage,
+) -> Vec<u8> {
+    let icmp_len = 8 + msg.payload.len();
+    let ip_len = 20 + icmp_len;
+    let mut frame = Vec::with_capacity(14 + ip_len);
+    frame.extend_from_slice(&dst_mac);
+    frame.extend_from_slice(&src_mac);
+    frame.extend_from_slice(&0x0800u16.to_be_bytes());
+
+    let mut ip_header = [0u8; 20];
+    ip_header[0] = 0x45;
+    ip_header[1] = 0;
+    ip_header[2..4].copy_from_slice(&(ip_len as u16).to_be_bytes());
+    ip_header[4..6].copy_from_slice(&0u16.to_be_bytes());
+    ip_header[6..8].copy_from_slice(&0x4000u16.to_be_bytes());
+    ip_header[8] = 64;
+    ip_header[9] = 1;
+    ip_header[12..16].copy_from_slice(&src_ip);
+    ip_header[16..20].copy_from_slice(&dst_ip);
+    let ip_checksum = checksum16(&ip_header);
+    ip_header[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+    frame.extend_from_slice(&ip_header);
+
+    frame.push(msg.icmp_type.to_u8());
+    frame.push(msg.code);
+    frame.extend_from_slice(&msg.checksum.to_be_bytes());
+    frame.extend_from_slice(&msg.identifier.to_be_bytes());
+    frame.extend_from_slice(&msg.sequence.to_be_bytes());
+    frame.extend_from_slice(&msg.payload);
+
+    frame
+}
+
+fn build_ipv6_header(
+    src_ip: Ipv6Address,
+    dst_ip: Ipv6Address,
+    next_header: u8,
+    payload_len: u16,
+) -> Vec<u8> {
+    let mut header = Vec::with_capacity(40);
+    // Version (4 bits) + Traffic Class (8 bits) + Flow Label (20 bits)
+    header.extend_from_slice(&0x60000000u32.to_be_bytes());
+    // Payload Length
+    header.extend_from_slice(&payload_len.to_be_bytes());
+    // Next Header
+    header.push(next_header);
+    // Hop Limit
+    header.push(64);
+    // Source Address
+    header.extend_from_slice(&src_ip.octets);
+    // Destination Address
+    header.extend_from_slice(&dst_ip.octets);
+    header
+}
+
+fn build_tcp_ipv6_frame(
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    src_ip: Ipv6Address,
+    dst_ip: Ipv6Address,
+    src_port: u16,
+    dst_port: u16,
+    segment: &TcpSegment,
+) -> Vec<u8> {
+    let tcp_header_len = 20;
+    let payload_len = segment.payload.len();
+    let tcp_len = tcp_header_len + payload_len;
+    let ipv6_payload_len = tcp_len as u16;
+
+    let mut frame = Vec::with_capacity(14 + 40 + tcp_len);
+    // Ethernet header
+    frame.extend_from_slice(&dst_mac);
+    frame.extend_from_slice(&src_mac);
+    frame.extend_from_slice(&0x86DDu16.to_be_bytes()); // IPv6 ethertype
+
+    // IPv6 header
+    let ipv6_header = build_ipv6_header(src_ip, dst_ip, 6, ipv6_payload_len);
+    frame.extend_from_slice(&ipv6_header);
+
+    // TCP header
+    let mut tcp_header = Vec::with_capacity(tcp_header_len);
+    tcp_header.extend_from_slice(&src_port.to_be_bytes());
+    tcp_header.extend_from_slice(&dst_port.to_be_bytes());
+    tcp_header.extend_from_slice(&segment.seq.to_be_bytes());
+    tcp_header.extend_from_slice(&segment.ack.to_be_bytes());
+    tcp_header.push(0x50); // Data offset
+    tcp_header.push(segment.flags.to_u8());
+    tcp_header.extend_from_slice(&segment.window.to_be_bytes());
+    tcp_header.extend_from_slice(&0u16.to_be_bytes()); // Checksum
+    tcp_header.extend_from_slice(&0u16.to_be_bytes()); // Urgent pointer
+
+    frame.extend_from_slice(&tcp_header);
+    frame.extend_from_slice(&segment.payload);
+
+    // TCP checksum with IPv6 pseudo-header
+    let mut pseudo = Vec::with_capacity(40 + tcp_len);
+    pseudo.extend_from_slice(&src_ip.octets);
+    pseudo.extend_from_slice(&dst_ip.octets);
+    pseudo.extend_from_slice(&(tcp_len as u32).to_be_bytes());
+    pseudo.extend_from_slice(&[0, 0, 0, 6]); // Reserved + Next Header
+    pseudo.extend_from_slice(&tcp_header);
+    pseudo.extend_from_slice(&segment.payload);
+    let tcp_checksum = checksum16(&pseudo);
+    frame[74..76].copy_from_slice(&tcp_checksum.to_be_bytes());
+
+    frame
+}
+
+fn build_icmpv6_ipv6_frame(
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    src_ip: Ipv6Address,
+    dst_ip: Ipv6Address,
+    msg: &IcmpMessage,
+) -> Vec<u8> {
+    let icmp_len = 8 + msg.payload.len();
+    let ipv6_payload_len = icmp_len as u16;
+
+    let mut frame = Vec::with_capacity(14 + 40 + icmp_len);
+    // Ethernet header
+    frame.extend_from_slice(&dst_mac);
+    frame.extend_from_slice(&src_mac);
+    frame.extend_from_slice(&0x86DDu16.to_be_bytes()); // IPv6 ethertype
+
+    // IPv6 header
+    let ipv6_header = build_ipv6_header(src_ip, dst_ip, 58, ipv6_payload_len);
+    frame.extend_from_slice(&ipv6_header);
+
+    // ICMPv6 message
+    frame.push(msg.icmp_type.to_u8());
+    frame.push(msg.code);
+    frame.extend_from_slice(&msg.checksum.to_be_bytes());
+    frame.extend_from_slice(&msg.identifier.to_be_bytes());
+    frame.extend_from_slice(&msg.sequence.to_be_bytes());
+    frame.extend_from_slice(&msg.payload);
+
+    frame
+}
 
 fn parse_udp_ipv4_frame(frame: &[u8]) -> Option<ParsedUdpIpv4Frame> {
     if frame.len() < 14 + 20 + 8 {
@@ -1113,6 +1280,10 @@ impl KernelRuntime {
             ipv4_addr: synthetic_ipv4_for_path(device_path),
             ipv4_netmask: [255, 255, 255, 0],
             ipv4_gateway: [10, 0, 0, 1],
+            ipv6_addr: Ipv6Address::UNSPECIFIED,
+            ipv6_gateway: Ipv6Address::UNSPECIFIED,
+            ipv6_prefix_len: 0,
+            link_local: Ipv6Address::UNSPECIFIED,
             tx_capacity: 128,
             rx_capacity: 128,
             tx_inflight_limit: 64,
@@ -1346,8 +1517,11 @@ impl KernelRuntime {
                 path: socket_path.to_string(),
                 owner,
                 interface: iface_name.clone(),
+                ip_version: IpVersion::Ipv4,
                 local_ipv4: self.network_ifaces[iface_index].ipv4_addr,
+                local_ipv6: Ipv6Address::UNSPECIFIED,
                 remote_ipv4: self.network_ifaces[iface_index].ipv4_gateway,
+                remote_ipv6: Ipv6Address::UNSPECIFIED,
                 local_port: 0,
                 remote_port: 0,
                 rx_queue: Vec::new(),
@@ -2700,6 +2874,159 @@ impl KernelRuntime {
                 let _ = self.notify_descriptor_ready(binding_owner, binding_fd);
             }
         }
+        Ok(())
+    }
+
+    // ===== ICMP Implementation =====
+
+    pub fn icmp_echo_request(
+        &mut self,
+        socket_path: &str,
+        owner: ProcessId,
+        target_ipv4: [u8; 4],
+        identifier: u16,
+        sequence: u16,
+        payload: &[u8],
+        _current_tick: u64,
+    ) -> Result<(), RuntimeError> {
+        let socket_index = self
+            .network_sockets
+            .iter()
+            .position(|socket| socket.path == socket_path && socket.owner == owner)
+            .ok_or(DeviceModelError::InvalidDevice)?;
+
+        let socket_type = self.network_sockets[socket_index].socket_type;
+        if socket_type != SocketType::Icmp {
+            return Err(DeviceModelError::InvalidDevice.into());
+        }
+
+        let iface_name = self.network_sockets[socket_index].interface.clone();
+        let local_ipv4 = self.network_sockets[socket_index].local_ipv4;
+
+        let iface_index = self
+            .network_ifaces
+            .iter()
+            .position(|iface| iface.device_path == iface_name)
+            .ok_or(DeviceModelError::InvalidDevice)?;
+
+        if !network_effective_link_up(&self.network_ifaces[iface_index]) {
+            return Err(DeviceModelError::NotBound.into());
+        }
+
+        let mut icmp_msg = IcmpMessage::echo_request(identifier, sequence, payload.to_vec());
+        icmp_msg.checksum = icmp_checksum(&icmp_msg);
+
+        let iface_mac = self.network_ifaces[iface_index].mac;
+        let icmp_frame = build_icmp_ipv4_frame(
+            iface_mac,
+            [0xff; 6],
+            local_ipv4,
+            target_ipv4,
+            &icmp_msg,
+        );
+
+        if icmp_frame.len().saturating_sub(14) > self.network_ifaces[iface_index].mtu {
+            return Err(DeviceModelError::PacketTooLarge.into());
+        }
+
+        let buffer_id = self.alloc_network_buffer(
+            iface_index,
+            socket_path.to_string(),
+            icmp_frame.clone(),
+            NetworkBufferState::TxQueued,
+        )?;
+        self.network_ifaces[iface_index].tx_ring.push(buffer_id);
+        self.network_ifaces[iface_index].tx_packets = self.network_ifaces[iface_index]
+            .tx_packets
+            .saturating_add(1);
+
+        let socket = &mut self.network_sockets[socket_index];
+        socket.tx_packets = socket.tx_packets.saturating_add(1);
+
+        let driver_path = self.network_ifaces[iface_index].driver_path.clone();
+        let tx_text = format!(
+            "icmp-tx iface={} socket={} type=EchoRequest id={} seq={} bytes={} target={}.{}.{}.{} buffer={}\n",
+            iface_name,
+            socket_path,
+            identifier,
+            sequence,
+            payload.len(),
+            target_ipv4[0],
+            target_ipv4[1],
+            target_ipv4[2],
+            target_ipv4[3],
+            buffer_id,
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(icmp_frame.iter().copied())
+        .collect::<Vec<_>>();
+
+        for (binding_owner, binding_fd) in self.descriptor_bindings_for_path(&driver_path)? {
+            self.io_registry
+                .replace_payload(binding_owner, binding_fd, &tx_text)
+                .map_err(map_runtime_io_error)?;
+            self.io_registry
+                .set_state(binding_owner, binding_fd, IoState::ReadWrite)
+                .map_err(map_runtime_io_error)?;
+            let _ = self.notify_descriptor_ready(binding_owner, binding_fd);
+        }
+
+        Ok(())
+    }
+
+    pub fn icmp_process_incoming(
+        &mut self,
+        socket_path: &str,
+        owner: ProcessId,
+        icmp_msg: IcmpMessage,
+        src_ipv4: [u8; 4],
+    ) -> Result<(), RuntimeError> {
+        let socket_index = self
+            .network_sockets
+            .iter()
+            .position(|socket| socket.path == socket_path && socket.owner == owner)
+            .ok_or(DeviceModelError::InvalidDevice)?;
+
+        let socket_type = self.network_sockets[socket_index].socket_type;
+        if socket_type != SocketType::Icmp {
+            return Err(DeviceModelError::InvalidDevice.into());
+        }
+
+        if self.network_sockets[socket_index].rx_queue.len() >= self.network_sockets[socket_index].rx_queue_limit {
+            return Err(DeviceModelError::QueueFull.into());
+        }
+
+        let iface_name = self.network_sockets[socket_index].interface.clone();
+        let local_ipv4 = self.network_sockets[socket_index].local_ipv4;
+        let identifier = icmp_msg.identifier;
+        let sequence = icmp_msg.sequence;
+        let payload = icmp_msg.payload.clone();
+
+        let iface_index = self
+            .network_ifaces
+            .iter()
+            .position(|iface| iface.device_path == iface_name)
+            .ok_or(DeviceModelError::InvalidDevice)?;
+
+        let buffer_id = self.alloc_network_buffer(
+            iface_index,
+            socket_path.to_string(),
+            payload,
+            NetworkBufferState::SocketQueued,
+        )?;
+
+        self.network_sockets[socket_index].rx_queue.push(SocketRxPacket {
+            buffer_id,
+            src_ipv4,
+            dst_ipv4: local_ipv4,
+            src_port: identifier,
+            dst_port: sequence,
+        });
+        self.network_sockets[socket_index].rx_packets = self.network_sockets[socket_index]
+            .rx_packets
+            .saturating_add(1);
+
         Ok(())
     }
 

@@ -2435,6 +2435,7 @@ impl KernelRuntime {
             let type_str = match info.socket_type {
                 crate::device_model::SocketType::Udp => "udp",
                 crate::device_model::SocketType::Tcp => "tcp",
+                crate::device_model::SocketType::Icmp => "icmp",
             };
             let state_str = info.tcp_state.map(|s| match s {
                 crate::device_model::TcpState::Closed => "CLOSED",
