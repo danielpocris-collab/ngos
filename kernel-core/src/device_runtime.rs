@@ -1513,6 +1513,11 @@ impl KernelRuntime {
             .iter()
             .any(|socket| socket.path == socket_path && socket.owner == owner)
         {
+            let socket_type_val = match socket_type {
+                SocketType::Udp => "udp",
+                SocketType::Tcp => "tcp",
+                SocketType::Icmp => "icmp",
+            };
             self.network_sockets.push(NetworkSocket {
                 path: socket_path.to_string(),
                 owner,
@@ -1531,8 +1536,38 @@ impl KernelRuntime {
                 rx_packets: 0,
                 dropped_packets: 0,
                 socket_type,
-                tcp_state: None,
+                tcp_state: if socket_type == SocketType::Tcp {
+                    Some(TcpControlBlock {
+                        state: TcpState::Closed,
+                        local_seq: 0,
+                        remote_seq: 0,
+                        local_ack: 0,
+                        remote_ack: 0,
+                        local_window: 65535,
+                        remote_window: 65535,
+                        local_port: 0,
+                        remote_port: 0,
+                        listen_backlog: 0,
+                        accept_queue: Vec::new(),
+                        retransmit_timeout_ticks: 100,
+                        last_transmit_tick: None,
+                        unacked_segments: Vec::new(),
+                        ooo_queue: Vec::new(),
+                        rtt_estimate_ticks: 0,
+                        rtt_variance_ticks: 0,
+                        congestion_window: 1,
+                        slow_start_threshold: 65535,
+                        duplicate_acks: 0,
+                    })
+                } else {
+                    None
+                },
             });
+            let socket_type_val = match socket_type {
+                SocketType::Udp => "udp",
+                SocketType::Tcp => "tcp",
+                SocketType::Icmp => "icmp",
+            };
         }
         if !self.network_ifaces[iface_index]
             .attached_sockets
