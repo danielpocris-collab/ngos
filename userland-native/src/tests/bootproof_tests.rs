@@ -329,6 +329,8 @@ fn native_program_runs_device_runtime_bootproof_and_reports_unified_markers() {
     assert!(stdout.contains("device.runtime.smoke.audio device=/dev/audio0"));
     assert!(stdout.contains("device.runtime.smoke.input device=/dev/input0"));
     assert!(stdout.contains("network.smoke.success"));
+    assert!(stdout.contains("network.smoke.teardown socket=/run/net1.sock"));
+    assert!(stdout.contains("network.smoke.rebind socket=/run/net1.sock"));
     assert!(stdout.contains("network.smoke.recovery local=10.1.0.2:4000"));
     assert!(stdout.contains("storage.smoke.mount.commit mount=/persist"));
     assert!(stdout.contains("device.runtime.smoke.storage device=/dev/storage0"));
