@@ -530,6 +530,12 @@ impl KernelRuntime {
                 "network" if segments.len() == 4 && segments[3] == "sockets" => {
                     self.render_procfs_network_sockets()?
                 }
+                "audio" if segments.len() == 4 && segments[3] == "devices" => {
+                    self.render_procfs_audio_devices()?
+                }
+                "audio" if segments.len() == 4 && segments[3] == "drivers" => {
+                    self.render_procfs_audio_drivers()?
+                }
                 "queues" if segments.len() == 6 && segments[3] == "event" => {
                     let owner_raw = segments[4]
                         .parse::<u64>()
@@ -2916,6 +2922,73 @@ impl KernelRuntime {
             .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
         }
 
+        out.finish()?;
+        Ok(out
+            .as_str()
+            .map_err(|_| RuntimeError::Buffer(BufferError::DrainRejected))?
+            .to_owned())
+    }
+
+    fn render_procfs_audio_devices(&self) -> Result<String, RuntimeError> {
+        let mut devices = Vec::new();
+        for device in &self.device_registry.devices {
+            if device.class == DeviceClass::Audio {
+                devices.push(device);
+            }
+        }
+        devices.sort_by_key(|device| &device.path);
+
+        let mut out = KernelBuffer::with_capacity(devices.len().saturating_mul(128).max(64));
+        for device in devices {
+            writeln!(
+                out,
+                "{}\tclass=audio\tstate={:?}\tqueue-capacity={}\tsubmitted={}\tcompleted={}\tlink-up={}",
+                device.path,
+                device.state,
+                device.queue_capacity,
+                device.submitted_requests,
+                device.completed_requests,
+                device.link_up,
+            )
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        }
+        out.finish()?;
+        Ok(out
+            .as_str()
+            .map_err(|_| RuntimeError::Buffer(BufferError::DrainRejected))?
+            .to_owned())
+    }
+
+    fn render_procfs_audio_drivers(&self) -> Result<String, RuntimeError> {
+        let mut drivers = Vec::new();
+        for driver in &self.device_registry.drivers {
+            let bounds_audio = driver.bound_devices.iter().any(|device_path| {
+                self.device_registry
+                    .devices
+                    .iter()
+                    .find(|device| device.path == *device_path)
+                    .is_some_and(|device| device.class == DeviceClass::Audio)
+            });
+            if bounds_audio {
+                drivers.push(driver);
+            }
+        }
+        drivers.sort_by_key(|driver| &driver.path);
+
+        let mut out = KernelBuffer::with_capacity(drivers.len().saturating_mul(128).max(64));
+        for driver in drivers {
+            writeln!(
+                out,
+                "{}\tstate={:?}\tbound-devices={}\tqueued={}\tin-flight={}\tcompleted={}",
+                driver.path,
+                driver.state,
+                driver.bound_devices.len(),
+                driver.queued_requests.len(),
+                driver.in_flight_requests.len(),
+                driver.completed_requests,
+            )
+            .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
+        }
         out.finish()?;
         Ok(out
             .as_str()

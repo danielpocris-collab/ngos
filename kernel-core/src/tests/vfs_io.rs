@@ -2101,6 +2101,111 @@ fn audio_device_writes_complete_immediately_without_driver_queue_residue() {
 }
 
 #[test]
+fn audio_procfs_exposes_devices_and_drivers() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process("owner", None, SchedulerClass::Interactive)
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            owner.handle(),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "root",
+        )
+        .unwrap();
+    runtime
+        .create_vfs_node("/", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/dev", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/drv", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/dev/audio0", ObjectKind::Device, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/drv/audio0", ObjectKind::Driver, root)
+        .unwrap();
+    runtime
+        .bind_device_to_driver("/dev/audio0", "/drv/audio0")
+        .unwrap();
+
+    let devices = runtime
+        .read_procfs_path("/proc/system/audio/devices")
+        .unwrap();
+    let devices_text = String::from_utf8(devices).unwrap();
+    assert!(devices_text.contains("/dev/audio0"));
+    assert!(devices_text.contains("class=audio"));
+
+    let drivers = runtime
+        .read_procfs_path("/proc/system/audio/drivers")
+        .unwrap();
+    let drivers_text = String::from_utf8(drivers).unwrap();
+    assert!(drivers_text.contains("/drv/audio0"));
+    assert!(drivers_text.contains("bound-devices=1"));
+}
+
+#[test]
+fn audio_device_tracks_multiple_streams_and_metadata() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process("owner", None, SchedulerClass::Interactive)
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            owner.handle(),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "root",
+        )
+        .unwrap();
+    runtime
+        .create_vfs_node("/", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/dev", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/drv", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/dev/audio0", ObjectKind::Device, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/drv/audio0", ObjectKind::Driver, root)
+        .unwrap();
+    runtime
+        .bind_device_to_driver("/dev/audio0", "/drv/audio0")
+        .unwrap();
+
+    let device_fd = runtime.open_path(owner, "/dev/audio0").unwrap();
+    let payload1 = b"ngos-audio-translate/v1\nstream=music-001\nsource-api=xaudio2\ntranslation=compat-to-mixer\nroute=music\ntone=lead,440,100,0.800,0.000,sine\n";
+    assert_eq!(
+        runtime.write_io(owner, device_fd, payload1).unwrap(),
+        payload1.len()
+    );
+
+    let payload2 = b"ngos-audio-translate/v1\nstream=effects-001\nsource-api=webaudio\ntranslation=native-mixer\nroute=effects\ntone=click,1000,50,0.500,0.000,square\n";
+    assert_eq!(
+        runtime.write_io(owner, device_fd, payload2).unwrap(),
+        payload2.len()
+    );
+
+    let device_info = runtime.device_info_by_path("/dev/audio0").unwrap();
+    assert_eq!(device_info.submitted_requests, 2);
+    assert_eq!(device_info.completed_requests, 2);
+    assert_eq!(device_info.queue_depth, 0);
+
+    let driver_info = runtime.driver_info_by_path("/drv/audio0").unwrap();
+    assert_eq!(driver_info.completed_requests, 2);
+    assert_eq!(driver_info.queued_requests, 0);
+    assert_eq!(driver_info.in_flight_requests, 0);
+}
+
+#[test]
 fn input_device_writes_complete_immediately_without_driver_queue_residue() {
     let mut runtime = KernelRuntime::host_runtime_default();
     let owner = runtime
