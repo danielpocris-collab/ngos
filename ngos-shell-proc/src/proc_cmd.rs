@@ -224,5 +224,11 @@ pub fn try_handle_proc_agent_command<B: SyscallBackend>(
     if let Some(path) = line.strip_prefix("cat ") {
         return Some(shell_render_procfs_path(runtime, path.trim()).map_err(|_| 205));
     }
+    if line == "cpu-info" {
+        return Some(shell_render_procfs_path(runtime, "/proc/system/cpu").map_err(|_| 205));
+    }
+    if line == "cpu-topology" {
+        return Some(shell_render_procfs_path(runtime, "/proc/system/scheduler").map_err(|_| 205));
+    }
     None
 }
