@@ -18,6 +18,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
+pub mod ac97_audio;
 pub mod acpi;
 pub mod device_platform;
 pub mod limine;
@@ -29,6 +30,10 @@ pub mod user_mode;
 pub mod virtio_blk;
 pub mod virtio_gpu;
 pub mod virtio_net;
+
+pub use ac97_audio::{
+    Ac97AudioController, Ac97AudioDriver, Ac97Error, Ac97FormatInfo,
+};
 
 pub use acpi::{
     AcpiProbeInfo, AcpiRootInfo, ApicTopologyInfo, InterruptSourceOverride, IoApicEntry,
