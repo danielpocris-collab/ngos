@@ -4200,3 +4200,138 @@ fn procfs_system_verified_core_renders_report_and_observe_contract_gates_reads()
     .unwrap();
     assert!(allowed.contains("violations:\t0"));
 }
+
+#[test]
+fn bus_stress_rapid_publish_receive_cycle() {
+    let mut surface = crate::syscall_surface::KernelSyscallSurface::host_runtime_default();
+    let bootstrap = surface
+        .runtime
+        .spawn_process("bus-stress", None, SchedulerClass::Interactive)
+        .unwrap();
+
+    let domain = match surface
+        .dispatch(
+            SyscallContext::kernel(bootstrap),
+            Syscall::CreateDomain(CreateDomain {
+                owner: bootstrap,
+                parent: None,
+                name: String::from("stress"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::DomainCreated(id) => id,
+        other => panic!("unexpected: {other:?}"),
+    };
+
+    let resource = match surface
+        .dispatch(
+            SyscallContext::kernel(bootstrap),
+            Syscall::CreateResource(CreateResource {
+                creator: bootstrap,
+                domain,
+                kind: ResourceKind::Channel,
+                name: String::from("stress-chan"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::ResourceCreated(id) => id,
+        other => panic!("unexpected: {other:?}"),
+    };
+
+    let root = surface
+        .runtime
+        .grant_capability(
+            bootstrap,
+            bootstrap.handle(),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "ipc-root",
+        )
+        .unwrap();
+    surface
+        .runtime
+        .create_vfs_node("/ipc", ObjectKind::Directory, root)
+        .unwrap();
+    surface
+        .runtime
+        .create_vfs_node("/ipc/stress", ObjectKind::Channel, root)
+        .unwrap();
+
+    let peer = match surface
+        .dispatch(
+            SyscallContext::kernel(bootstrap),
+            Syscall::CreateBusPeer(CreateBusPeer {
+                owner: bootstrap,
+                domain,
+                name: String::from("stress-peer"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusPeerCreated(id) => id,
+        other => panic!("unexpected: {other:?}"),
+    };
+
+    let endpoint = match surface
+        .dispatch(
+            SyscallContext::kernel(bootstrap),
+            Syscall::CreateBusEndpoint(CreateBusEndpoint {
+                domain,
+                resource,
+                path: String::from("/ipc/stress"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusEndpointCreated(id) => id,
+        other => panic!("unexpected: {other:?}"),
+    };
+
+    surface
+        .dispatch(
+            SyscallContext::kernel(bootstrap),
+            Syscall::AttachBusPeer(AttachBusPeer { peer, endpoint }),
+        )
+        .unwrap();
+
+    const MESSAGE_COUNT: usize = 100;
+    const BATCH_SIZE: usize = 50;
+    let ctx = SyscallContext::kernel(bootstrap);
+
+    for batch in 0..(MESSAGE_COUNT / BATCH_SIZE) {
+        for i in 0..BATCH_SIZE {
+            let msg_idx = batch * BATCH_SIZE + i;
+            let bytes = format!("msg-{}", msg_idx).into_bytes();
+            surface
+                .dispatch(
+                    ctx.clone(),
+                    Syscall::PublishBusMessage(PublishBusMessage {
+                        peer,
+                        endpoint,
+                        bytes,
+                    }),
+                )
+                .unwrap();
+        }
+
+        for i in 0..BATCH_SIZE {
+            let msg_idx = batch * BATCH_SIZE + i;
+            let msg = match surface
+                .dispatch(
+                    ctx.clone(),
+                    Syscall::ReceiveBusMessage(ReceiveBusMessage {
+                        peer,
+                        endpoint,
+                    }),
+                )
+                .unwrap()
+            {
+                SyscallResult::BusMessageReceived { bytes, .. } => bytes,
+                other => panic!("unexpected: {other:?}"),
+            };
+            let expected = format!("msg-{}", msg_idx).into_bytes();
+            assert_eq!(msg, expected);
+        }
+    }
+}
