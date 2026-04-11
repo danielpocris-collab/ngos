@@ -1328,4 +1328,53 @@ mod tests {
         assert!(report.observation.process_status_bytes > 0);
         assert!(report.observation.process_cwd_root);
     }
+
+    #[test]
+    fn wasm_execute_module_from_bytes_roundtrip() {
+        // Validates that execute_wasm_component can process a module
+        // and produce correct observations - simulating what execute_wasm_file would do
+        let runtime = Runtime::new(WasmBackend::new());
+        
+        // Load the hardcoded module bytes (as if from VFS)
+        let module_bytes = WASM_BOOT_PROOF_COMPONENT;
+        
+        let report = execute_wasm_component(
+            &runtime,
+            module_bytes,
+            1,
+            &[
+                WasmCapability::ObserveProcessCapabilityCount,
+                WasmCapability::ObserveSystemProcessCount,
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(report.verdict, WasmVerdict::Ready);
+        assert_eq!(report.observation.pid, 1);
+        assert_eq!(report.granted_capabilities.len(), 2);
+    }
+
+    #[test]
+    fn wasm_execute_module_with_all_capabilities() {
+        let runtime = Runtime::new(WasmBackend::new());
+        let report = execute_wasm_component(
+            &runtime,
+            WASM_BOOT_PROOF_COMPONENT,
+            1,
+            &[
+                WasmCapability::ObserveProcessCapabilityCount,
+                WasmCapability::ObserveSystemProcessCount,
+                WasmCapability::ObserveProcessStatusBytes,
+                WasmCapability::ObserveProcessCwdRoot,
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(report.verdict, WasmVerdict::Ready);
+        assert_eq!(report.observation.process_capability_count, 2);
+        assert_eq!(report.observation.process_count, 2);
+        assert!(report.observation.process_status_bytes > 0);
+        assert!(report.observation.process_cwd_root);
+        assert_eq!(report.granted_capabilities.len(), 4);
+    }
 }
