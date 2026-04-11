@@ -58,7 +58,8 @@ use ngos_user_abi::{
     SYS_SPAWN_PATH_PROCESS, SYS_SPAWN_PROCESS_COPY_VM, SYS_START_GPU_MEDIA_SESSION, SYS_STAT_PATH,
     SYS_STATFS_PATH, SYS_STORE_MEMORY_WORD, SYS_SUBMIT_GPU_BUFFER, SYS_SYMLINK_PATH,
     SYS_SYNC_MEMORY_RANGE, SYS_TCP_ACCEPT, SYS_TCP_CLOSE, SYS_TCP_CONNECT, SYS_TCP_LISTEN,
-    SYS_TCP_RECV, SYS_TCP_RESET, SYS_TCP_SEND, SYS_ICMP_ECHO_REQUEST, SYS_UNBIND_DEVICE_DRIVER,
+    SYS_TCP_RECV, SYS_TCP_RESET, SYS_TCP_SEND, SYS_ICMP_ECHO_REQUEST, SYS_CPU_ONLINE, SYS_CPU_OFFLINE,
+    SYS_CPU_INFO, SYS_UNBIND_DEVICE_DRIVER,
     SYS_UNLINK_PATH,
     SYS_UNMAP_MEMORY_RANGE, SYS_WAIT_EVENT_QUEUE, SYS_WATCH_BUS_EVENTS, SYS_WATCH_GRAPHICS_EVENTS,
     SYS_WATCH_NET_EVENTS, SYS_WATCH_PROCESS_EVENTS, SYS_WATCH_RESOURCE_EVENTS, SYS_WRITE_GPU_BUFFER,
@@ -1865,6 +1866,22 @@ impl KernelRuntime {
                     self.current_tick,
                 )?;
                 Ok(SyscallReturn::ok(count))
+            }
+            SYS_CPU_ONLINE => {
+                let cpu = frame.arg0;
+                self.set_cpu_online(cpu, true)?;
+                Ok(SyscallReturn::ok(0))
+            }
+            SYS_CPU_OFFLINE => {
+                let cpu = frame.arg0;
+                self.set_cpu_online(cpu, false)?;
+                Ok(SyscallReturn::ok(0))
+            }
+            SYS_CPU_INFO => {
+                let logical_count = self.logical_cpu_count();
+                let online_count = self.cpu_online_count();
+                let result = ((online_count as usize) << 32) | (logical_count as usize);
+                Ok(SyscallReturn::ok(result))
             }
             SYS_CREATE_EVENT_QUEUE => {
                 let mode = match NativeEventQueueMode::from_raw(frame.arg0 as u32) {

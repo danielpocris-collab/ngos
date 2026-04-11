@@ -98,6 +98,7 @@ use ngos_user_abi::{
     SYS_STORE_MEMORY_WORD, SYS_SUBMIT_GPU_BUFFER, SYS_SYMLINK_PATH, SYS_SYMLINK_PATH_AT,
     SYS_SYNC_MEMORY_RANGE, SYS_TRANSFER_RESOURCE, SYS_TCP_ACCEPT, SYS_TCP_CLOSE, SYS_TCP_CONNECT,
     SYS_TCP_LISTEN, SYS_TCP_RECV, SYS_TCP_RESET, SYS_TCP_SEND, SYS_ICMP_ECHO_REQUEST,
+    SYS_CPU_ONLINE, SYS_CPU_OFFLINE, SYS_CPU_INFO,
     SYS_TRUNCATE_PATH,
     SYS_TRUNCATE_PATH_AT,
     SYS_UNBIND_DEVICE_DRIVER, SYS_UNLINK_PATH, SYS_UNLINK_PATH_AT, SYS_UNMAP_MEMORY_RANGE,
@@ -3470,6 +3471,29 @@ impl<B: SyscallBackend> Runtime<B> {
             [pid as usize, cpu_mask as usize, 0, 0, 0, 0],
         )
         .map(|_| ())
+    }
+
+    pub fn cpu_online(&self, cpu: usize) -> Result<bool, ngos_user_abi::Errno> {
+        let result = self.invoke(SYS_CPU_INFO, [cpu, 0, 0, 0, 0, 0])?;
+        // Returns online status in lower bits
+        Ok((result & 1) != 0)
+    }
+
+    pub fn set_cpu_online(&self, cpu: usize, online: bool) -> Result<(), ngos_user_abi::Errno> {
+        if online {
+            self.invoke(SYS_CPU_ONLINE, [cpu, 0, 0, 0, 0, 0])
+                .map(|_| ())
+        } else {
+            self.invoke(SYS_CPU_OFFLINE, [cpu, 0, 0, 0, 0, 0])
+                .map(|_| ())
+        }
+    }
+
+    pub fn cpu_info(&self) -> Result<(usize, usize), ngos_user_abi::Errno> {
+        let result = self.invoke(SYS_CPU_INFO, [0, 0, 0, 0, 0, 0])?;
+        let online_count = result >> 32;
+        let logical_count = result & 0xFFFFFFFF;
+        Ok((online_count, logical_count))
     }
 
     pub fn create_domain(

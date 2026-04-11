@@ -230,5 +230,25 @@ pub fn try_handle_proc_agent_command<B: SyscallBackend>(
     if line == "cpu-topology" {
         return Some(shell_render_procfs_path(runtime, "/proc/system/scheduler").map_err(|_| 205));
     }
+    if let Some(rest) = line.strip_prefix("cpu-online ") {
+        let cpu = match rest.trim().parse::<u64>() {
+            Ok(cpu) => cpu,
+            Err(_) => {
+                let _ = write_line(runtime, "usage: cpu-online <cpu-index>");
+                return Some(Err(2));
+            }
+        };
+        return Some(runtime.set_cpu_online(cpu as usize, true).map(|_| ()).map_err(|_| 251));
+    }
+    if let Some(rest) = line.strip_prefix("cpu-offline ") {
+        let cpu = match rest.trim().parse::<u64>() {
+            Ok(cpu) => cpu,
+            Err(_) => {
+                let _ = write_line(runtime, "usage: cpu-offline <cpu-index>");
+                return Some(Err(2));
+            }
+        };
+        return Some(runtime.set_cpu_online(cpu as usize, false).map(|_| ()).map_err(|_| 251));
+    }
     None
 }

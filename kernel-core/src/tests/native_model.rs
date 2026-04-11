@@ -3764,14 +3764,15 @@ fn procfs_system_scheduler_renders_cpu_placement_and_balancing() {
     let scheduler =
         String::from_utf8(runtime.read_procfs_path("/proc/system/scheduler").unwrap()).unwrap();
     assert!(scheduler.contains("cpu-summary:\tcount=2"));
+    assert!(scheduler.contains("online=2"));
     assert!(scheduler.contains("rebalance-ops="));
     assert!(scheduler.contains("rebalance-migrations="));
     assert!(scheduler.contains("last-rebalance="));
     assert!(scheduler.contains(
-        "cpu\tindex=0\tapic-id=0\tpackage=0\tcore-group=0\tsibling-group=0\tinferred-topology=true\tqueued-load="
+        "cpu\tindex=0\tonline=true\tapic-id=0\tpackage=0\tcore-group=0\tsibling-group=0\tinferred-topology=true\tqueued-load="
     ));
     assert!(scheduler.contains(
-        "cpu\tindex=1\tapic-id=1\tpackage=0\tcore-group=0\tsibling-group=1\tinferred-topology=true\tqueued-load="
+        "cpu\tindex=1\tonline=true\tapic-id=1\tpackage=0\tcore-group=0\tsibling-group=1\tinferred-topology=true\tqueued-load="
     ));
     assert!(scheduler.contains("cpu-queue\tindex=0\tclass=best-effort"));
     assert!(scheduler.contains("cpu-queue\tindex=1\tclass=best-effort"));
@@ -3810,10 +3811,10 @@ fn procfs_system_scheduler_renders_runtime_policy_topology_handoff() {
     let scheduler =
         String::from_utf8(runtime.read_procfs_path("/proc/system/scheduler").unwrap()).unwrap();
     assert!(scheduler.contains(
-        "cpu\tindex=0\tapic-id=17\tpackage=2\tcore-group=8\tsibling-group=0\tinferred-topology=false\tqueued-load="
+        "cpu\tindex=0\tonline=true\tapic-id=17\tpackage=2\tcore-group=8\tsibling-group=0\tinferred-topology=false\tqueued-load="
     ));
     assert!(scheduler.contains(
-        "cpu\tindex=1\tapic-id=29\tpackage=2\tcore-group=8\tsibling-group=1\tinferred-topology=false\tqueued-load="
+        "cpu\tindex=1\tonline=true\tapic-id=29\tpackage=2\tcore-group=8\tsibling-group=1\tinferred-topology=false\tqueued-load="
     ));
 }
 

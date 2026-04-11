@@ -1606,8 +1606,9 @@ impl KernelRuntime {
         .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
         writeln!(
             out,
-            "cpu-summary:\tcount={}\trunning={}\tload-imbalance={}\trebalance-ops={}\trebalance-migrations={}\tlast-rebalance={}",
+            "cpu-summary:\tcount={}\tonline={}\trunning={}\tload-imbalance={}\trebalance-ops={}\trebalance-migrations={}\tlast-rebalance={}",
             snapshot.scheduler_cpu_count,
+            self.scheduler.cpu_online_count(),
             snapshot
                 .scheduler_running_cpu
                 .map(|cpu| cpu.to_string())
@@ -1619,9 +1620,11 @@ impl KernelRuntime {
         )
         .map_err(|_| RuntimeError::Buffer(BufferError::LimitExceeded))?;
         for cpu in 0..self.scheduler.logical_cpu_count() {
+            let online = self.scheduler.cpu_online(cpu);
             writeln!(
                 out,
-                "cpu\tindex={cpu}\tapic-id={}\tpackage={}\tcore-group={}\tsibling-group={}\tinferred-topology={}\tqueued-load={}\tdispatches={}\truntime-ticks={}\trunning={}",
+                "cpu\tindex={cpu}\tonline={}\tapic-id={}\tpackage={}\tcore-group={}\tsibling-group={}\tinferred-topology={}\tqueued-load={}\tdispatches={}\truntime-ticks={}\trunning={}",
+                if online { "true" } else { "false" },
                 self.scheduler.cpu_apic_id(cpu),
                 self.scheduler.cpu_package_id(cpu),
                 self.scheduler.cpu_core_group(cpu),

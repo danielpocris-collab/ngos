@@ -73,6 +73,7 @@ pub enum SchedulerError {
     NotQueued,
     NoRunnableProcess,
     InvalidCpuAffinity,
+    InvalidCpu(usize),
     InvalidProcessState(ProcessState),
 }
 
@@ -107,6 +108,7 @@ pub struct Scheduler {
     class_runtime_ticks: [u64; 4],
     logical_cpu_count: usize,
     cpu_topology: Vec<SchedulerCpuTopologyEntry>,
+    cpu_online: Vec<bool>,
     cpu_queued_loads: Vec<usize>,
     cpu_dispatch_counts: Vec<u64>,
     cpu_runtime_ticks: Vec<u64>,
@@ -160,6 +162,7 @@ impl Scheduler {
             class_runtime_ticks: [0; 4],
             logical_cpu_count,
             cpu_topology,
+            cpu_online: vec![true; logical_cpu_count],
             cpu_queued_loads: vec![0; logical_cpu_count],
             cpu_dispatch_counts: vec![0; logical_cpu_count],
             cpu_runtime_ticks: vec![0; logical_cpu_count],
@@ -216,6 +219,25 @@ impl Scheduler {
 
     pub fn cpu_runtime_ticks(&self) -> &[u64] {
         &self.cpu_runtime_ticks
+    }
+
+    pub fn cpu_online(&self, cpu: usize) -> bool {
+        self.cpu_online.get(cpu).copied().unwrap_or(false)
+    }
+
+    pub fn cpu_online_count(&self) -> usize {
+        self.cpu_online.iter().filter(|&&online| online).count()
+    }
+
+    pub fn set_cpu_online(&mut self, cpu: usize, online: bool) -> Result<(), SchedulerError> {
+        if cpu >= self.logical_cpu_count {
+            return Err(SchedulerError::InvalidCpu(cpu));
+        }
+        if self.cpu_online[cpu] == online {
+            return Ok(());
+        }
+        self.cpu_online[cpu] = online;
+        Ok(())
     }
 
     pub fn cpu_apic_id(&self, cpu: usize) -> u32 {

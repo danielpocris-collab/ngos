@@ -499,6 +499,23 @@ impl KernelRuntime {
         Ok(())
     }
 
+    pub fn cpu_online(&self, cpu: usize) -> bool {
+        self.scheduler.cpu_online(cpu)
+    }
+
+    pub fn cpu_online_count(&self) -> usize {
+        self.scheduler.cpu_online_count()
+    }
+
+    pub fn logical_cpu_count(&self) -> usize {
+        self.scheduler.logical_cpu_count()
+    }
+
+    pub fn set_cpu_online(&mut self, cpu: usize, online: bool) -> Result<(), RuntimeError> {
+        self.scheduler.set_cpu_online(cpu, online)?;
+        Ok(())
+    }
+
     pub fn last_sleep_result(&self, pid: ProcessId) -> Option<SleepWaitResult> {
         self.sleep_results.get(&pid.raw()).copied()
     }
