@@ -268,6 +268,13 @@ pub fn poll(endpoint: InputEndpointKind, interest: u32) -> usize {
     })
 }
 
+pub fn keyboard_events_pending() -> usize {
+    INPUT_RUNTIME.initialize();
+    INPUT_RUNTIME.with_mut(|state| {
+        state.as_ref().map(|s| s.driver_queue.len()).unwrap_or(0)
+    })
+}
+
 pub fn read(
     endpoint: InputEndpointKind,
     buffer: *mut u8,
@@ -325,6 +332,37 @@ pub fn write(endpoint: InputEndpointKind, bytes: &[u8]) -> Result<usize, Errno> 
             InputEndpointKind::Driver => complete_driver_request(state, bytes),
         }
     })
+}
+
+pub fn inject_keyboard_event(scancode: u8) {
+    INPUT_RUNTIME.initialize();
+    INPUT_RUNTIME.with_mut(|state| {
+        let state = state.as_mut().unwrap();
+        state.last_request_id = state.last_request_id.saturating_add(1);
+        state.submitted_requests = state.submitted_requests.saturating_add(1);
+        let submitted_tick = next_tick(state);
+        let payload = format!("key-scancode=0x{:02x}", scancode).into_bytes();
+        let payload_len = payload.len();
+        state.driver_queue.push_back((state.last_request_id, payload));
+        state.request_records.push(BootInputRequestRecord {
+            request_id: state.last_request_id,
+            issuer: INPUT_BOOT_ISSUER,
+            kind: INPUT_REQUEST_KIND_WRITE,
+            state: INPUT_REQUEST_STATE_INFLIGHT,
+            opcode: INPUT_DELIVERY_OPCODE,
+            buffer_id: 0,
+            payload_len: payload_len as u64,
+            response_len: 0,
+            submitted_tick,
+            started_tick: submitted_tick,
+            completed_tick: 0,
+            frame_tag: [0; 64],
+            source_api_name: [0; 24],
+            translation_label: [0; 32],
+        });
+        state.in_flight_requests = state.in_flight_requests.saturating_add(1);
+        state.last_payload_len = payload_len as u64;
+    });
 }
 
 fn enqueue_input_request(state: &mut BootInputRuntimeState, bytes: &[u8]) -> u64 {
@@ -690,5 +728,43 @@ mod tests {
             .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn boot_input_runtime_injects_keyboard_scancode_events() {
+        let _guard = acquire_guard();
+        
+        inject_keyboard_event(0x1e);
+        assert_eq!(keyboard_events_pending(), 1);
+        
+        inject_keyboard_event(0x30);
+        assert_eq!(keyboard_events_pending(), 2);
+        
+        let mut buffer = [0u8; 256];
+        let count = read(
+            InputEndpointKind::Driver,
+            buffer.as_mut_ptr(),
+            buffer.len(),
+            false,
+        )
+        .unwrap();
+        assert!(count > 0);
+        let text = core::str::from_utf8(&buffer[..count]).unwrap();
+        assert!(text.contains("key-scancode=0x1e"));
+        
+        assert_eq!(keyboard_events_pending(), 1);
+        
+        let count = read(
+            InputEndpointKind::Driver,
+            buffer.as_mut_ptr(),
+            buffer.len(),
+            false,
+        )
+        .unwrap();
+        assert!(count > 0);
+        let text = core::str::from_utf8(&buffer[..count]).unwrap();
+        assert!(text.contains("key-scancode=0x30"));
+        
+        assert_eq!(keyboard_events_pending(), 0);
     }
 }
