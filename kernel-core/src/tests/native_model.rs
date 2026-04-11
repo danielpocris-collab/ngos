@@ -1629,15 +1629,23 @@ fn runtime_bus_isolates_parallel_endpoints_for_shared_and_distinct_peers() {
         .grant_capability(
             owner,
             endpoint_b.handle(),
-            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE | CapabilityRights::ADMIN,
             "render-b-root",
+        )
+        .unwrap();
+    let endpoint_a_cap = runtime
+        .grant_capability(
+            owner,
+            endpoint_a.handle(),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::ADMIN,
+            "render-a-root",
         )
         .unwrap();
     runtime
         .duplicate_capability(
             endpoint_b_cap,
             peer_process,
-            CapabilityRights::READ | CapabilityRights::WRITE,
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::ADMIN,
             "render-b-delegate",
         )
         .unwrap();

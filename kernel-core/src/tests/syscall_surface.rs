@@ -867,7 +867,7 @@ fn syscall_surface_bus_endpoint_capability_delegates_and_revocation_restores_den
             NativeModelError::BusAccessDenied {
                 owner: delegate,
                 endpoint,
-                required: CapabilityRights::WRITE,
+                required: CapabilityRights::ADMIN,
             }
         )))
     );
@@ -880,7 +880,8 @@ fn syscall_surface_bus_endpoint_capability_delegates_and_revocation_restores_den
                 target: endpoint.handle(),
                 rights: CapabilityRights::READ
                     | CapabilityRights::WRITE
-                    | CapabilityRights::DUPLICATE,
+                    | CapabilityRights::DUPLICATE
+                    | CapabilityRights::ADMIN,
                 label: String::from("bus-endpoint-root"),
             }),
         )
@@ -895,7 +896,7 @@ fn syscall_surface_bus_endpoint_capability_delegates_and_revocation_restores_den
             Syscall::DuplicateCapability(DuplicateCapability {
                 capability: root_cap,
                 new_owner: delegate,
-                rights: CapabilityRights::READ | CapabilityRights::WRITE,
+                rights: CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::ADMIN,
                 label: String::from("bus-endpoint-delegate"),
             }),
         )
@@ -1613,8 +1614,26 @@ fn syscall_surface_bus_isolates_parallel_endpoints_for_shared_and_distinct_peers
                 target: endpoint_b.handle(),
                 rights: CapabilityRights::READ
                     | CapabilityRights::WRITE
-                    | CapabilityRights::DUPLICATE,
+                    | CapabilityRights::DUPLICATE
+                    | CapabilityRights::ADMIN,
                 label: String::from("render-b-root"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::CapabilityGranted(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let endpoint_a_root = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::GrantCapability(GrantCapability {
+                owner: bootstrap,
+                target: endpoint_a.handle(),
+                rights: CapabilityRights::READ
+                    | CapabilityRights::WRITE
+                    | CapabilityRights::ADMIN,
+                label: String::from("render-a-root"),
             }),
         )
         .unwrap()
@@ -1628,7 +1647,7 @@ fn syscall_surface_bus_isolates_parallel_endpoints_for_shared_and_distinct_peers
             Syscall::DuplicateCapability(DuplicateCapability {
                 capability: endpoint_b_root,
                 new_owner: peer_process,
-                rights: CapabilityRights::READ | CapabilityRights::WRITE,
+                rights: CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::ADMIN,
                 label: String::from("render-b-delegate"),
             }),
         )
