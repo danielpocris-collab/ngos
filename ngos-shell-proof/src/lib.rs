@@ -213,6 +213,7 @@ pub trait SurfaceSmokeDispatcher {
     fn run_bus(&mut self) -> Self::Output;
     fn run_vfs(&mut self) -> Self::Output;
     fn run_wasm(&mut self) -> Self::Output;
+    fn run_wasm_file(&mut self, path: &str) -> Self::Output;
     fn run_compat_gfx(&mut self) -> Self::Output;
     fn run_compat_audio(&mut self) -> Self::Output;
     fn run_compat_input(&mut self) -> Self::Output;
@@ -424,6 +425,13 @@ pub fn dispatch_surface_smoke<D: SurfaceSmokeDispatcher>(
         SurfaceSmokeKind::CompatAbi => dispatcher.run_compat_abi(),
         SurfaceSmokeKind::Network => dispatcher.run_network(),
     }
+}
+
+pub fn dispatch_wasm_run<D: SurfaceSmokeDispatcher>(
+    dispatcher: &mut D,
+    path: &str,
+) -> D::Output {
+    dispatcher.run_wasm_file(path)
 }
 
 pub fn parse_boot_proof_env(value: Option<&str>) -> Option<BootProofKind> {
@@ -801,6 +809,9 @@ mod tests {
         }
         fn run_wasm(&mut self) -> Self::Output {
             "wasm-smoke"
+        }
+        fn run_wasm_file(&mut self, _path: &str) -> Self::Output {
+            "wasm-run"
         }
         fn run_compat_gfx(&mut self) -> Self::Output {
             "compat-gfx-smoke"

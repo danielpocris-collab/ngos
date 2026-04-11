@@ -1,5 +1,10 @@
 use super::*;
-use ngos_shell_proof::{SurfaceSmokeDispatcher, SurfaceSmokeKind, dispatch_surface_smoke};
+use ngos_shell_proof::{
+    SurfaceSmokeDispatcher, SurfaceSmokeKind, dispatch_surface_smoke, dispatch_wasm_run,
+};
+use ngos_user_runtime::wasm::{
+    self, WasmCapability, WasmVerdict, execute_wasm_file,
+};
 
 struct NativeSurfaceSmokeDispatcher<'a, B: SyscallBackend> {
     runtime: &'a Runtime<B>,
@@ -57,6 +62,38 @@ impl<B: SyscallBackend> SurfaceSmokeDispatcher for NativeSurfaceSmokeDispatcher<
         if code == 0 { Ok(()) } else { Err(code) }
     }
 
+    fn run_wasm_file(&mut self, path: &str) -> Self::Output {
+        let pid = 1;
+        let capabilities = vec![
+            WasmCapability::ObserveProcessCapabilityCount,
+            WasmCapability::ObserveSystemProcessCount,
+            WasmCapability::ObserveProcessStatusBytes,
+            WasmCapability::ObserveProcessCwdRoot,
+        ];
+        match execute_wasm_file(self.runtime, path, pid, &capabilities) {
+            Ok(report) => {
+                let _ = write_line(
+                    self.runtime,
+                    &format!(
+                        "wasm.run path={} verdict={} capabilities={}",
+                        path,
+                        report.verdict.marker_name(),
+                        report.granted_capabilities.len()
+                    ),
+                );
+                if report.verdict == WasmVerdict::Ready {
+                    Ok(())
+                } else {
+                    Err(250)
+                }
+            }
+            Err(err) => {
+                let _ = write_line(self.runtime, &format!("wasm.run error={err:?}"));
+                Err(251)
+            }
+        }
+    }
+
     fn run_compat_gfx(&mut self) -> Self::Output {
         let code = run_native_compat_graphics_boot_smoke(self.runtime);
         if code == 0 { Ok(()) } else { Err(code) }
@@ -93,6 +130,15 @@ pub(super) fn try_handle_surface_smoke_command<B: SyscallBackend>(
     context: &SessionContext,
     line: &str,
 ) -> Option<Result<(), ExitCode>> {
+    if let Some(rest) = line.strip_prefix("wasm-run ") {
+        let path = rest.trim();
+        if path.is_empty() {
+            let _ = write_line(runtime, "usage: wasm-run <path>");
+            return Some(Err(2));
+        }
+        let mut dispatcher = NativeSurfaceSmokeDispatcher { runtime, context };
+        return Some(dispatch_wasm_run(&mut dispatcher, path));
+    }
     let smoke_kind = SurfaceSmokeKind::parse_command(line)?;
     let mut dispatcher = NativeSurfaceSmokeDispatcher { runtime, context };
     let result = dispatch_surface_smoke(&mut dispatcher, smoke_kind);

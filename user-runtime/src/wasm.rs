@@ -1,4 +1,4 @@
-use alloc::{string::String, vec::Vec};
+use alloc::{string::String, vec, vec::Vec};
 use core::str;
 
 use crate::Runtime;
@@ -272,6 +272,30 @@ pub fn execute_wasm_component<B: SyscallBackend>(
         verdict,
         granted_capabilities: granted_capabilities.to_vec(),
     })
+}
+
+/// Load and execute a WASM module from the filesystem.
+pub fn execute_wasm_file<B: SyscallBackend>(
+    runtime: &Runtime<B>,
+    path: &str,
+    pid: u64,
+    granted_capabilities: &[WasmCapability],
+) -> Result<WasmExecutionReport, WasmExecutionError> {
+    let fd = runtime.open_path(path).map_err(|e| match e {
+        Errno::NoEnt => WasmExecutionError::InvalidModule {
+            reason: "wasm file not found",
+        },
+        Errno::Access => WasmExecutionError::InvalidModule {
+            reason: "permission denied",
+        },
+        _ => WasmExecutionError::Syscall(e),
+    })?;
+
+    let mut buffer = [0u8; 65536];
+    let len = runtime.read(fd, &mut buffer).map_err(WasmExecutionError::Syscall)?;
+    runtime.close(fd).ok();
+
+    execute_wasm_component(runtime, &buffer[..len], pid, granted_capabilities)
 }
 
 fn capability_for_import(module: &str, name: &str) -> Result<WasmCapability, WasmExecutionError> {
