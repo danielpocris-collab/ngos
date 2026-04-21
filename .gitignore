@@ -4,3 +4,5 @@ tmp_*.txt
 tmp_*.log
 *_tmp.pdb
 host_runtime_*.log
+.claude/settings.local.json
+.claude/worktrees/
