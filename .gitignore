@@ -1,4 +1,5 @@
 /target/
+.cargo-target-*/
 *.pdb
 tmp_*.txt
 tmp_*.log
