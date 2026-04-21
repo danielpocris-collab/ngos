@@ -1,0 +1,2581 @@
+//! Shell pipeline execution: stage dispatch for semantic pipeline operator `|>`.
+
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+
+use ngos_shell_proc::{
+    list_process_ids, read_procfs_all, shell_process_compat_record_value, shell_process_record,
+};
+use ngos_shell_types::{
+    ShellJob, ShellRecordField, ShellSemanticValue, ShellVariable, infer_shell_semantic_value,
+    parse_u64_arg, parse_usize_arg, resolve_shell_path, shell_clone_variable_as,
+    shell_lookup_variable_entry, shell_render_list_value, shell_render_record_value,
+    shell_variable_type_name,
+};
+use ngos_user_abi::bootstrap::SessionContext;
+use ngos_user_abi::{ExitCode, SyscallBackend};
+use ngos_user_runtime::Runtime;
+
+use crate::record::{
+    shell_contract_record, shell_domain_record, shell_mount_record, shell_resource_record,
+};
+use crate::render::shell_session_record;
+use crate::session_cmd::write_line;
+use crate::sources::{
+    shell_capability_list_value, shell_fd_list_value, shell_fdinfo_record, shell_job_list_value,
+    shell_maps_list_value, shell_mount_inventory_value, shell_network_interface_record,
+    shell_network_socket_record, shell_pending_signal_list_value,
+    shell_process_identity_record_value, shell_procfs_list_value, shell_procfs_record_value,
+    shell_procfs_token_record_value, shell_queue_list_value,
+    shell_storage_history_entry_record_value, shell_storage_history_list_value,
+    shell_storage_history_range_list_value, shell_storage_history_tail_list_value,
+    shell_storage_record_value, shell_waiter_list_value,
+};
+
+fn pipeline_list_field_value(item: &str, field: &str) -> Option<String> {
+    for token in item.split_whitespace() {
+        let Some((key, value)) = token.split_once('=') else {
+            continue;
+        };
+        if key.trim_end_matches(':').trim() == field {
+            return Some(value.trim().to_string());
+        }
+    }
+    None
+}
+
+fn shell_pipeline_proof_mode(variables: &[ShellVariable]) -> bool {
+    variables
+        .iter()
+        .any(|variable| variable.name == "SHELL_PROOF_MODE" && variable.value == "1")
+}
+
+fn shell_pipeline_observability_enabled(variables: &[ShellVariable]) -> bool {
+    !shell_pipeline_proof_mode(variables)
+}
+
+pub(crate) fn handle_semantic_pipeline<B: SyscallBackend>(
+    runtime: &Runtime<B>,
+    context: &SessionContext,
+    current_cwd: &str,
+    variables: &mut Vec<ShellVariable>,
+    jobs: &[ShellJob],
+    line: &str,
+) -> Result<(), ExitCode> {
+    let stages = line
+        .split("|>")
+        .map(str::trim)
+        .filter(|stage| !stage.is_empty())
+        .collect::<Vec<_>>();
+    if stages.len() < 2 {
+        let _ = write_line(runtime, "usage: <stage> |> <stage> [|> <stage>]");
+        return Err(2);
+    }
+    let stage_count = stages.len();
+    let mut pipeline_value = None::<ShellVariable>;
+    for stage in stages {
+        execute_pipeline_stage(
+            runtime,
+            context,
+            current_cwd,
+            variables,
+            jobs,
+            &mut pipeline_value,
+            stage,
+        )?;
+    }
+    if shell_pipeline_observability_enabled(variables)
+        && let Some(value) = pipeline_value.as_ref()
+    {
+        write_line(
+            runtime,
+            &format!(
+                "pipeline-complete stages={} type={}",
+                stage_count,
+                shell_variable_type_name(value)
+            ),
+        )
+        .map_err(|_| 196)?;
+    }
+    let _ = line;
+    Ok(())
+}
+
+fn execute_pipeline_stage<B: SyscallBackend>(
+    runtime: &Runtime<B>,
+    context: &SessionContext,
+    current_cwd: &str,
+    variables: &mut Vec<ShellVariable>,
+    jobs: &[ShellJob],
+    pipeline_value: &mut Option<ShellVariable>,
+    stage: &str,
+) -> Result<(), ExitCode> {
+    if stage == "session" {
+        *pipeline_value = Some(shell_session_record(context, current_cwd));
+        if !shell_pipeline_observability_enabled(variables) {
+            return Ok(());
+        }
+        return write_line(
+            runtime,
+            "pipeline-source stage=session type=record fields=4",
+        )
+        .map_err(|_| 196);
+    }
+    if stage == "ps" {
+        let items = list_process_ids(runtime)?
+            .into_iter()
+            .map(|pid| pid.to_string())
+            .collect::<Vec<_>>();
+        let count = items.len();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_list_value(&items),
+            semantic: Some(ShellSemanticValue::List(items)),
+        });
+        if shell_pipeline_proof_mode(variables) {
+            return Ok(());
+        }
+        return write_line(
+            runtime,
+            &format!("pipeline-source stage=ps type=list items={count}"),
+        )
+        .map_err(|_| 196);
+    }
+    if stage == "domains" {
+        let mut ids = vec![0u64; 16];
+        let count = runtime.list_domains(&mut ids).map_err(|_| 206)?;
+        ids.truncate(count);
+        let items = ids.into_iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_list_value(&items),
+            semantic: Some(ShellSemanticValue::List(items)),
+        });
+        if shell_pipeline_proof_mode(variables) {
+            return Ok(());
+        }
+        return write_line(
+            runtime,
+            &format!("pipeline-source stage=domains type=list items={count}"),
+        )
+        .map_err(|_| 196);
+    }
+    if stage == "resources" {
+        let mut ids = vec![0u64; 16];
+        let count = runtime.list_resources(&mut ids).map_err(|_| 210)?;
+        ids.truncate(count);
+        let items = ids.into_iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_list_value(&items),
+            semantic: Some(ShellSemanticValue::List(items)),
+        });
+        if shell_pipeline_proof_mode(variables) {
+            return Ok(());
+        }
+        return write_line(
+            runtime,
+            &format!("pipeline-source stage=resources type=list items={count}"),
+        )
+        .map_err(|_| 196);
+    }
+    if stage == "contracts" {
+        let mut ids = vec![0u64; 16];
+        let count = runtime.list_contracts(&mut ids).map_err(|_| 214)?;
+        ids.truncate(count);
+        let items = ids.into_iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_list_value(&items),
+            semantic: Some(ShellSemanticValue::List(items)),
+        });
+        if shell_pipeline_proof_mode(variables) {
+            return Ok(());
+        }
+        return write_line(
+            runtime,
+            &format!("pipeline-source stage=contracts type=list items={count}"),
+        )
+        .map_err(|_| 196);
+    }
+    if stage == "jobs" {
+        let value = shell_job_list_value(runtime, jobs);
+        let count = match &value.semantic {
+            Some(ShellSemanticValue::List(items)) => items.len(),
+            _ => 0,
+        };
+        *pipeline_value = Some(value);
+        return write_line(
+            runtime,
+            &format!("pipeline-source stage=jobs type=list items={count}"),
+        )
+        .map_err(|_| 196);
+    }
+    if stage == "queues" {
+        let value = shell_queue_list_value(runtime)?;
+        let count = match &value.semantic {
+            Some(ShellSemanticValue::List(items)) => items.len(),
+            _ => 0,
+        };
+        *pipeline_value = Some(value);
+        if shell_pipeline_proof_mode(variables) {
+            return Ok(());
+        }
+        return write_line(
+            runtime,
+            &format!("pipeline-source stage=queues type=list items={count}"),
+        )
+        .map_err(|_| 196);
+    }
+    if stage == "fd" {
+        let value = shell_fd_list_value(runtime)?;
+        let count = match &value.semantic {
+            Some(ShellSemanticValue::List(items)) => items.len(),
+            _ => 0,
+        };
+        *pipeline_value = Some(value);
+        return write_line(
+            runtime,
+            &format!("pipeline-source stage=fd type=list items={count}"),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("maps ") {
+        let Some(pid) = parse_u64_arg(Some(rest.trim())) else {
+            let _ = write_line(runtime, "usage: maps <pid>");
+            return Err(2);
+        };
+        let value = shell_maps_list_value(runtime, pid)?;
+        let count = match &value.semantic {
+            Some(ShellSemanticValue::List(items)) => items.len(),
+            _ => 0,
+        };
+        *pipeline_value = Some(value);
+        if shell_pipeline_proof_mode(variables) {
+            return Ok(());
+        }
+        return write_line(
+            runtime,
+            &format!(
+                "pipeline-source stage=maps pid={} type=list items={count}",
+                pid
+            ),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("vmobjects ") {
+        let Some(pid) = parse_u64_arg(Some(rest.trim())) else {
+            let _ = write_line(runtime, "usage: vmobjects <pid>");
+            return Err(2);
+        };
+        let value = shell_procfs_list_value(runtime, &format!("/proc/{pid}/vmobjects"))?;
+        let count = match &value.semantic {
+            Some(ShellSemanticValue::List(items)) => items.len(),
+            _ => 0,
+        };
+        *pipeline_value = Some(value);
+        if shell_pipeline_proof_mode(variables) {
+            return Ok(());
+        }
+        return write_line(
+            runtime,
+            &format!(
+                "pipeline-source stage=vmobjects pid={} type=list items={count}",
+                pid
+            ),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("vmdecisions ") {
+        let Some(pid) = parse_u64_arg(Some(rest.trim())) else {
+            let _ = write_line(runtime, "usage: vmdecisions <pid>");
+            return Err(2);
+        };
+        let value = shell_procfs_list_value(runtime, &format!("/proc/{pid}/vmdecisions"))?;
+        let count = match &value.semantic {
+            Some(ShellSemanticValue::List(items)) => items.len(),
+            _ => 0,
+        };
+        *pipeline_value = Some(value);
+        if shell_pipeline_proof_mode(variables) {
+            return Ok(());
+        }
+        return write_line(
+            runtime,
+            &format!(
+                "pipeline-source stage=vmdecisions pid={} type=list items={count}",
+                pid
+            ),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("vmepisodes ") {
+        let Some(pid) = parse_u64_arg(Some(rest.trim())) else {
+            let _ = write_line(runtime, "usage: vmepisodes <pid>");
+            return Err(2);
+        };
+        let value = shell_procfs_list_value(runtime, &format!("/proc/{pid}/vmepisodes"))?;
+        let count = match &value.semantic {
+            Some(ShellSemanticValue::List(items)) => items.len(),
+            _ => 0,
+        };
+        *pipeline_value = Some(value);
+        if shell_pipeline_proof_mode(variables) {
+            return Ok(());
+        }
+        return write_line(
+            runtime,
+            &format!(
+                "pipeline-source stage=vmepisodes pid={} type=list items={count}",
+                pid
+            ),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("pending-signals ") {
+        let Some(pid) = parse_u64_arg(Some(rest.trim())) else {
+            let _ = write_line(runtime, "usage: pending-signals <pid>");
+            return Err(2);
+        };
+        let value = shell_pending_signal_list_value(runtime, pid, false)?;
+        *pipeline_value = Some(value);
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("blocked-signals ") {
+        let Some(pid) = parse_u64_arg(Some(rest.trim())) else {
+            let _ = write_line(runtime, "usage: blocked-signals <pid>");
+            return Err(2);
+        };
+        let value = shell_pending_signal_list_value(runtime, pid, true)?;
+        *pipeline_value = Some(value);
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("caps ") {
+        let Some(pid) = parse_u64_arg(Some(rest.trim())) else {
+            let _ = write_line(runtime, "usage: caps <pid>");
+            return Err(2);
+        };
+        let value = shell_capability_list_value(runtime, pid)?;
+        let count = match &value.semantic {
+            Some(ShellSemanticValue::List(items)) => items.len(),
+            _ => 0,
+        };
+        *pipeline_value = Some(value);
+        if shell_pipeline_observability_enabled(variables) {
+            return write_line(
+                runtime,
+                &format!(
+                    "pipeline-source stage=caps pid={} type=list items={}",
+                    pid, count
+                ),
+            )
+            .map_err(|_| 196);
+        }
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("fdinfo ") {
+        let Some(fd) = parse_usize_arg(Some(rest.trim())) else {
+            let _ = write_line(runtime, "usage: fdinfo <fd>");
+            return Err(2);
+        };
+        let record = shell_fdinfo_record(runtime, fd)?;
+        let fields = match &record.semantic {
+            Some(ShellSemanticValue::Record(fields)) => fields.len(),
+            _ => 0,
+        };
+        *pipeline_value = Some(record);
+        if shell_pipeline_proof_mode(variables) {
+            return Ok(());
+        }
+        return write_line(
+            runtime,
+            &format!(
+                "pipeline-source stage=fdinfo fd={} type=record fields={}",
+                fd, fields
+            ),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("waiters ") {
+        let Some(resource) = parse_usize_arg(Some(rest.trim())) else {
+            let _ = write_line(runtime, "usage: waiters <resource>");
+            return Err(2);
+        };
+        let value = shell_waiter_list_value(runtime, resource)?;
+        let count = match &value.semantic {
+            Some(ShellSemanticValue::List(items)) => items.len(),
+            _ => 0,
+        };
+        *pipeline_value = Some(value);
+        return write_line(
+            runtime,
+            &format!(
+                "pipeline-source stage=waiters resource={} type=list items={}",
+                resource, count
+            ),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("domain ") {
+        let Some(id) = parse_usize_arg(Some(rest.trim())) else {
+            let _ = write_line(runtime, "usage: domain <id>");
+            return Err(2);
+        };
+        let record = shell_domain_record(runtime, id)?;
+        let fields = match &record.semantic {
+            Some(ShellSemanticValue::Record(fields)) => fields.len(),
+            _ => 0,
+        };
+        *pipeline_value = Some(record);
+        return write_line(
+            runtime,
+            &format!(
+                "pipeline-source stage=domain id={} type=record fields={}",
+                id, fields
+            ),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("process-info ") {
+        let Some(pid) = parse_u64_arg(Some(rest.trim())) else {
+            let _ = write_line(runtime, "usage: process-info <pid>");
+            return Err(2);
+        };
+        let record = shell_process_record(runtime, pid)?;
+        let fields = match &record.semantic {
+            Some(ShellSemanticValue::Record(fields)) => fields.len(),
+            _ => 0,
+        };
+        *pipeline_value = Some(record);
+        if shell_pipeline_observability_enabled(variables) {
+            return write_line(
+                runtime,
+                &format!(
+                    "pipeline-source stage=process-info pid={} type=record fields={}",
+                    pid, fields
+                ),
+            )
+            .map_err(|_| 196);
+        }
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("compat-of ") {
+        let Some(pid) = parse_u64_arg(Some(rest.trim())) else {
+            let _ = write_line(runtime, "usage: compat-of <pid>");
+            return Err(2);
+        };
+        let record = shell_process_compat_record_value(runtime, pid)?;
+        let fields = match &record.semantic {
+            Some(ShellSemanticValue::Record(fields)) => fields.len(),
+            _ => 0,
+        };
+        *pipeline_value = Some(record);
+        if shell_pipeline_observability_enabled(variables) {
+            return write_line(
+                runtime,
+                &format!(
+                    "pipeline-source stage=compat-of pid={} type=record fields={}",
+                    pid, fields
+                ),
+            )
+            .map_err(|_| 196);
+        }
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("identity-of ") {
+        let Some(pid) = parse_u64_arg(Some(rest.trim())) else {
+            let _ = write_line(runtime, "usage: identity-of <pid>");
+            return Err(2);
+        };
+        let record = shell_process_identity_record_value(runtime, pid)?;
+        let fields = match &record.semantic {
+            Some(ShellSemanticValue::Record(fields)) => fields.len(),
+            _ => 0,
+        };
+        *pipeline_value = Some(record);
+        if shell_pipeline_observability_enabled(variables) {
+            return write_line(
+                runtime,
+                &format!(
+                    "pipeline-source stage=identity-of pid={} type=record fields={}",
+                    pid, fields
+                ),
+            )
+            .map_err(|_| 196);
+        }
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("status-of ") {
+        let Some(pid) = parse_u64_arg(Some(rest.trim())) else {
+            let _ = write_line(runtime, "usage: status-of <pid>");
+            return Err(2);
+        };
+        *pipeline_value = Some(shell_procfs_record_value(
+            runtime,
+            &format!("/proc/{pid}/status"),
+        )?);
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("cmdline-of ") {
+        let Some(pid) = parse_u64_arg(Some(rest.trim())) else {
+            let _ = write_line(runtime, "usage: cmdline-of <pid>");
+            return Err(2);
+        };
+        *pipeline_value = Some(shell_procfs_list_value(
+            runtime,
+            &format!("/proc/{pid}/cmdline"),
+        )?);
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("auxv-of ") {
+        let Some(pid) = parse_u64_arg(Some(rest.trim())) else {
+            let _ = write_line(runtime, "usage: auxv-of <pid>");
+            return Err(2);
+        };
+        *pipeline_value = Some(shell_procfs_list_value(
+            runtime,
+            &format!("/proc/{pid}/auxv"),
+        )?);
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("environ-of ") {
+        let Some(pid) = parse_u64_arg(Some(rest.trim())) else {
+            let _ = write_line(runtime, "usage: environ-of <pid>");
+            return Err(2);
+        };
+        *pipeline_value = Some(shell_procfs_list_value(
+            runtime,
+            &format!("/proc/{pid}/environ"),
+        )?);
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("root-of ") {
+        let Some(pid) = parse_u64_arg(Some(rest.trim())) else {
+            let _ = write_line(runtime, "usage: root-of <pid>");
+            return Err(2);
+        };
+        let path = format!("/proc/{pid}/root");
+        let bytes = read_procfs_all(runtime, &path)?;
+        let value = core::str::from_utf8(&bytes)
+            .map_err(|_| 203)?
+            .trim()
+            .to_string();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: value.clone(),
+            semantic: infer_shell_semantic_value(&value),
+        });
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("cwd-of ") {
+        let Some(pid) = parse_u64_arg(Some(rest.trim())) else {
+            let _ = write_line(runtime, "usage: cwd-of <pid>");
+            return Err(2);
+        };
+        let path = format!("/proc/{pid}/cwd");
+        let bytes = read_procfs_all(runtime, &path)?;
+        let value = core::str::from_utf8(&bytes)
+            .map_err(|_| 203)?
+            .trim()
+            .to_string();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: value.clone(),
+            semantic: infer_shell_semantic_value(&value),
+        });
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("exe-of ") {
+        let Some(pid) = parse_u64_arg(Some(rest.trim())) else {
+            let _ = write_line(runtime, "usage: exe-of <pid>");
+            return Err(2);
+        };
+        let path = format!("/proc/{pid}/exe");
+        let bytes = read_procfs_all(runtime, &path)?;
+        let value = core::str::from_utf8(&bytes)
+            .map_err(|_| 203)?
+            .trim()
+            .to_string();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: value.clone(),
+            semantic: infer_shell_semantic_value(&value),
+        });
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("vfsstats-of ") {
+        let Some(pid) = parse_u64_arg(Some(rest.trim())) else {
+            let _ = write_line(runtime, "usage: vfsstats-of <pid>");
+            return Err(2);
+        };
+        *pipeline_value = Some(shell_procfs_token_record_value(
+            runtime,
+            &format!("/proc/{pid}/vfsstats"),
+        )?);
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("vfslocks-of ") {
+        let Some(pid) = parse_u64_arg(Some(rest.trim())) else {
+            let _ = write_line(runtime, "usage: vfslocks-of <pid>");
+            return Err(2);
+        };
+        *pipeline_value = Some(shell_procfs_list_value(
+            runtime,
+            &format!("/proc/{pid}/vfslocks"),
+        )?);
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("vfswatches-of ") {
+        let Some(pid) = parse_u64_arg(Some(rest.trim())) else {
+            let _ = write_line(runtime, "usage: vfswatches-of <pid>");
+            return Err(2);
+        };
+        *pipeline_value = Some(shell_procfs_list_value(
+            runtime,
+            &format!("/proc/{pid}/vfswatches"),
+        )?);
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("resource ") {
+        let Some(id) = parse_usize_arg(Some(rest.trim())) else {
+            let _ = write_line(runtime, "usage: resource <id>");
+            return Err(2);
+        };
+        let record = shell_resource_record(runtime, id)?;
+        let fields = match &record.semantic {
+            Some(ShellSemanticValue::Record(fields)) => fields.len(),
+            _ => 0,
+        };
+        *pipeline_value = Some(record);
+        return write_line(
+            runtime,
+            &format!(
+                "pipeline-source stage=resource id={} type=record fields={}",
+                id, fields
+            ),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("contract ") {
+        let Some(id) = parse_usize_arg(Some(rest.trim())) else {
+            let _ = write_line(runtime, "usage: contract <id>");
+            return Err(2);
+        };
+        let record = shell_contract_record(runtime, id)?;
+        let fields = match &record.semantic {
+            Some(ShellSemanticValue::Record(fields)) => fields.len(),
+            _ => 0,
+        };
+        *pipeline_value = Some(record);
+        return write_line(
+            runtime,
+            &format!(
+                "pipeline-source stage=contract id={} type=record fields={}",
+                id, fields
+            ),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("mount-info ") {
+        let path = rest.trim();
+        if path.is_empty() {
+            let _ = write_line(runtime, "usage: mount-info <path>");
+            return Err(2);
+        }
+        let resolved = resolve_shell_path(current_cwd, path);
+        let record = shell_mount_record(runtime, &resolved)?;
+        let fields = match &record.semantic {
+            Some(ShellSemanticValue::Record(fields)) => fields.len(),
+            _ => 0,
+        };
+        *pipeline_value = Some(record);
+        if shell_pipeline_observability_enabled(variables) {
+            return write_line(
+                runtime,
+                &format!(
+                    "pipeline-source stage=mount-info path={} type=record fields={}",
+                    resolved, fields
+                ),
+            )
+            .map_err(|_| 196);
+        }
+        return Ok(());
+    }
+    if stage == "mounts" {
+        let value = shell_mount_inventory_value(runtime)?;
+        let count = match &value.semantic {
+            Some(ShellSemanticValue::List(items)) => items.len(),
+            _ => 0,
+        };
+        *pipeline_value = Some(value);
+        if shell_pipeline_observability_enabled(variables) {
+            return write_line(
+                runtime,
+                &format!("pipeline-source stage=mounts type=list items={count}"),
+            )
+            .map_err(|_| 196);
+        }
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("storage ") {
+        let path = rest.trim();
+        if path.is_empty() {
+            let _ = write_line(runtime, "usage: storage <device>");
+            return Err(2);
+        }
+        let resolved = resolve_shell_path(current_cwd, path);
+        let value = shell_storage_record_value(runtime, &resolved)?;
+        let field_count = match &value.semantic {
+            Some(ShellSemanticValue::Record(fields)) => fields.len(),
+            _ => 0,
+        };
+        *pipeline_value = Some(value);
+        return write_line(
+            runtime,
+            &format!(
+                "pipeline-source stage=storage path={} type=record fields={}",
+                resolved, field_count
+            ),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("storage-volume ") {
+        let path = rest.trim();
+        if path.is_empty() {
+            let _ = write_line(runtime, "usage: storage-volume <device>");
+            return Err(2);
+        }
+        let resolved = resolve_shell_path(current_cwd, path);
+        let value = shell_storage_record_value(runtime, &resolved)?;
+        let field_count = match &value.semantic {
+            Some(ShellSemanticValue::Record(fields)) => fields.len(),
+            _ => 0,
+        };
+        *pipeline_value = Some(value);
+        return write_line(
+            runtime,
+            &format!(
+                "pipeline-source stage=storage-volume path={} type=record fields={}",
+                resolved, field_count
+            ),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("storage-history-of ") {
+        let path = rest.trim();
+        if path.is_empty() {
+            let _ = write_line(runtime, "usage: storage-history-of <device>");
+            return Err(2);
+        }
+        let resolved = resolve_shell_path(current_cwd, path);
+        let value = shell_storage_history_list_value(runtime, &resolved)?;
+        let count = match &value.semantic {
+            Some(ShellSemanticValue::List(items)) => items.len(),
+            _ => 0,
+        };
+        *pipeline_value = Some(value);
+        return write_line(
+            runtime,
+            &format!(
+                "pipeline-source stage=storage-history-of path={} type=list items={}",
+                resolved, count
+            ),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("storage-history-range-of ") {
+        let mut parts = rest.split_whitespace();
+        let Some(path) = parts.next() else {
+            let _ = write_line(
+                runtime,
+                "usage: storage-history-range-of <device> <start> <count>",
+            );
+            return Err(2);
+        };
+        let Some(start) = parts.next().and_then(|token| parse_u64_arg(Some(token))) else {
+            let _ = write_line(
+                runtime,
+                "usage: storage-history-range-of <device> <start> <count>",
+            );
+            return Err(2);
+        };
+        let Some(count) = parts.next().and_then(|token| parse_u64_arg(Some(token))) else {
+            let _ = write_line(
+                runtime,
+                "usage: storage-history-range-of <device> <start> <count>",
+            );
+            return Err(2);
+        };
+        let resolved = resolve_shell_path(current_cwd, path);
+        let value = shell_storage_history_range_list_value(
+            runtime,
+            &resolved,
+            start as usize,
+            count as usize,
+        )?;
+        let items = match &value.semantic {
+            Some(ShellSemanticValue::List(items)) => items.len(),
+            _ => 0,
+        };
+        *pipeline_value = Some(value);
+        return write_line(
+            runtime,
+            &format!(
+                "pipeline-source stage=storage-history-range-of path={} start={} count={} type=list items={}",
+                resolved, start, count, items
+            ),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("storage-history-tail-of ") {
+        let mut parts = rest.split_whitespace();
+        let Some(path) = parts.next() else {
+            let _ = write_line(runtime, "usage: storage-history-tail-of <device> <count>");
+            return Err(2);
+        };
+        let Some(count) = parts.next().and_then(|token| parse_u64_arg(Some(token))) else {
+            let _ = write_line(runtime, "usage: storage-history-tail-of <device> <count>");
+            return Err(2);
+        };
+        let resolved = resolve_shell_path(current_cwd, path);
+        let value = shell_storage_history_tail_list_value(runtime, &resolved, count as usize)?;
+        let items = match &value.semantic {
+            Some(ShellSemanticValue::List(items)) => items.len(),
+            _ => 0,
+        };
+        *pipeline_value = Some(value);
+        return write_line(
+            runtime,
+            &format!(
+                "pipeline-source stage=storage-history-tail-of path={} count={} type=list items={}",
+                resolved, count, items
+            ),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("storage-history-entry-of ") {
+        let mut parts = rest.split_whitespace();
+        let Some(path) = parts.next() else {
+            let _ = write_line(runtime, "usage: storage-history-entry-of <device> <index>");
+            return Err(2);
+        };
+        let Some(index) = parts
+            .next()
+            .and_then(|token| parse_u64_arg(Some(token)))
+            .map(|value| value as usize)
+        else {
+            let _ = write_line(runtime, "usage: storage-history-entry-of <device> <index>");
+            return Err(2);
+        };
+        let resolved = resolve_shell_path(current_cwd, path);
+        let value = shell_storage_history_entry_record_value(runtime, &resolved, index)?;
+        let field_count = match &value.semantic {
+            Some(ShellSemanticValue::Record(fields)) => fields.len(),
+            _ => 0,
+        };
+        *pipeline_value = Some(value);
+        return write_line(
+            runtime,
+            &format!(
+                "pipeline-source stage=storage-history-entry-of path={} index={} type=record fields={}",
+                resolved, index, field_count
+            ),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("netif ") {
+        let path = rest.trim();
+        if path.is_empty() {
+            let _ = write_line(runtime, "usage: netif <path>");
+            return Err(2);
+        }
+        let resolved = resolve_shell_path(current_cwd, path);
+        let record = shell_network_interface_record(runtime, &resolved)?;
+        let fields = match &record.semantic {
+            Some(ShellSemanticValue::Record(fields)) => fields.len(),
+            _ => 0,
+        };
+        *pipeline_value = Some(record);
+        if shell_pipeline_proof_mode(variables) {
+            return Ok(());
+        }
+        return write_line(
+            runtime,
+            &format!(
+                "pipeline-source stage=netif path={} type=record fields={}",
+                resolved, fields
+            ),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("netsock ") {
+        let path = rest.trim();
+        if path.is_empty() {
+            let _ = write_line(runtime, "usage: netsock <path>");
+            return Err(2);
+        }
+        let resolved = resolve_shell_path(current_cwd, path);
+        let record = shell_network_socket_record(runtime, &resolved)?;
+        let fields = match &record.semantic {
+            Some(ShellSemanticValue::Record(fields)) => fields.len(),
+            _ => 0,
+        };
+        *pipeline_value = Some(record);
+        if shell_pipeline_proof_mode(variables) {
+            return Ok(());
+        }
+        return write_line(
+            runtime,
+            &format!(
+                "pipeline-source stage=netsock path={} type=record fields={}",
+                resolved, fields
+            ),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("record ") {
+        let mut fields = Vec::<ShellRecordField>::new();
+        for entry in rest.split_whitespace() {
+            let Some((key, value)) = entry.split_once('=') else {
+                let _ = write_line(runtime, "usage: record <field=value> [field=value...]");
+                return Err(2);
+            };
+            if key.trim().is_empty() || value.trim().is_empty() {
+                let _ = write_line(runtime, "usage: record <field=value> [field=value...]");
+                return Err(2);
+            }
+            fields.push(ShellRecordField {
+                key: key.trim().to_string(),
+                value: value.trim().to_string(),
+            });
+        }
+        if fields.is_empty() {
+            let _ = write_line(runtime, "usage: record <field=value> [field=value...]");
+            return Err(2);
+        }
+        let rendered = shell_render_record_value(&fields);
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: rendered,
+            semantic: Some(ShellSemanticValue::Record(fields)),
+        });
+        if shell_pipeline_proof_mode(variables) {
+            return Ok(());
+        }
+        return write_line(
+            runtime,
+            &format!(
+                "pipeline-source stage=record type=record fields={}",
+                match pipeline_value
+                    .as_ref()
+                    .and_then(|value| value.semantic.as_ref())
+                {
+                    Some(ShellSemanticValue::Record(fields)) => fields.len(),
+                    _ => 0,
+                }
+            ),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("string ") {
+        let value = rest.trim();
+        if value.is_empty() {
+            let _ = write_line(runtime, "usage: string <value>");
+            return Err(2);
+        }
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: value.to_string(),
+            semantic: Some(ShellSemanticValue::String),
+        });
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("int ") {
+        let value = rest.trim();
+        if value.is_empty() || value.parse::<i64>().is_err() {
+            let _ = write_line(runtime, "usage: int <number>");
+            return Err(2);
+        }
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: value.to_string(),
+            semantic: Some(ShellSemanticValue::Int),
+        });
+        return write_line(
+            runtime,
+            &format!("pipeline-source stage=int type=int value={value}"),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("bool ") {
+        let value = rest.trim();
+        if !matches!(value, "true" | "false") {
+            let _ = write_line(runtime, "usage: bool <true|false>");
+            return Err(2);
+        }
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: value.to_string(),
+            semantic: Some(ShellSemanticValue::Bool),
+        });
+        return Ok(());
+    }
+    if stage == "value-type" {
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=value-type");
+            return Err(205);
+        };
+        return write_line(
+            runtime,
+            &format!("pipeline-type type={}", shell_variable_type_name(value)),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("value-load ") {
+        let name = rest.trim();
+        if name.is_empty() {
+            let _ = write_line(runtime, "usage: value-load <name>");
+            return Err(2);
+        }
+        let Some(variable) = shell_lookup_variable_entry(variables, name) else {
+            let _ = write_line(runtime, &format!("value-load-missing name={name}"));
+            return Err(205);
+        };
+        *pipeline_value = Some(variable.clone());
+        return Ok(());
+    }
+    if stage == "string-trim" {
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=string-trim");
+            return Err(205);
+        };
+        let trimmed = value.value.trim().to_string();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: trimmed.clone(),
+            semantic: infer_shell_semantic_value(&trimmed),
+        });
+        return Ok(());
+    }
+    if stage == "string-upper" {
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=string-upper");
+            return Err(205);
+        };
+        let upper = value.value.to_uppercase();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: upper.clone(),
+            semantic: infer_shell_semantic_value(&upper),
+        });
+        return write_line(runtime, &format!("pipeline-string-upper value={upper}"))
+            .map_err(|_| 196);
+    }
+    if stage == "string-lower" {
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=string-lower");
+            return Err(205);
+        };
+        let lower = value.value.to_lowercase();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: lower.clone(),
+            semantic: infer_shell_semantic_value(&lower),
+        });
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("string-contains ") {
+        let needle = rest.trim();
+        if needle.is_empty() {
+            let _ = write_line(runtime, "usage: string-contains <needle>");
+            return Err(2);
+        }
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=string-contains");
+            return Err(205);
+        };
+        let present = value.value.contains(needle);
+        let rendered = if present { "true" } else { "false" };
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: rendered.to_string(),
+            semantic: Some(ShellSemanticValue::Bool),
+        });
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("string-starts-with ") {
+        let needle = rest.trim();
+        if needle.is_empty() {
+            let _ = write_line(runtime, "usage: string-starts-with <prefix>");
+            return Err(2);
+        }
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=string-starts-with");
+            return Err(205);
+        };
+        let present = value.value.starts_with(needle);
+        let rendered = if present { "true" } else { "false" };
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: rendered.to_string(),
+            semantic: Some(ShellSemanticValue::Bool),
+        });
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("string-ends-with ") {
+        let needle = rest.trim();
+        if needle.is_empty() {
+            let _ = write_line(runtime, "usage: string-ends-with <suffix>");
+            return Err(2);
+        }
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=string-ends-with");
+            return Err(205);
+        };
+        let present = value.value.ends_with(needle);
+        let rendered = if present { "true" } else { "false" };
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: rendered.to_string(),
+            semantic: Some(ShellSemanticValue::Bool),
+        });
+        return Ok(());
+    }
+    if stage == "not" {
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=not");
+            return Err(205);
+        };
+        let rendered = if value.value == "true" {
+            "false"
+        } else {
+            "true"
+        };
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: rendered.to_string(),
+            semantic: Some(ShellSemanticValue::Bool),
+        });
+        return Ok(());
+    }
+    if stage == "is-empty" {
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=is-empty");
+            return Err(205);
+        };
+        let empty = match &value.semantic {
+            Some(ShellSemanticValue::List(items)) => items.is_empty(),
+            Some(ShellSemanticValue::Record(fields)) => fields.is_empty(),
+            _ => value.value.is_empty(),
+        };
+        let rendered = if empty { "true" } else { "false" };
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: rendered.to_string(),
+            semantic: Some(ShellSemanticValue::Bool),
+        });
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("string-split ") {
+        let separator = rest;
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=string-split");
+            return Err(205);
+        };
+        let items = if separator.is_empty() {
+            value
+                .value
+                .chars()
+                .map(|ch| ch.to_string())
+                .collect::<Vec<_>>()
+        } else {
+            value
+                .value
+                .split(separator)
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        };
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_list_value(&items),
+            semantic: Some(ShellSemanticValue::List(items)),
+        });
+        return Ok(());
+    }
+    if stage == "value-show" {
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=value-show");
+            return Err(205);
+        };
+        let type_name = shell_variable_type_name(value);
+        if write_line(
+            runtime,
+            &format!("pipeline-show type={} value={}", type_name, value.value),
+        )
+        .is_err()
+        {
+            return Err(196);
+        }
+        if write_line(
+            runtime,
+            &format!(
+                "value-show target=_PIPE type={} value={}",
+                type_name, value.value
+            ),
+        )
+        .is_err()
+        {
+            return Err(196);
+        }
+        if let Some(semantic) = &value.semantic {
+            match semantic {
+                ShellSemanticValue::Record(fields) => {
+                    for field in fields {
+                        if write_line(
+                            runtime,
+                            &format!("pipeline-field field={} value={}", field.key, field.value),
+                        )
+                        .is_err()
+                        {
+                            return Err(196);
+                        }
+                    }
+                }
+                ShellSemanticValue::List(items) => {
+                    for (index, item) in items.iter().enumerate() {
+                        if write_line(
+                            runtime,
+                            &format!("pipeline-item index={} value={}", index, item),
+                        )
+                        .is_err()
+                        {
+                            return Err(196);
+                        }
+                    }
+                }
+                ShellSemanticValue::String | ShellSemanticValue::Bool | ShellSemanticValue::Int => {
+                }
+            }
+        }
+        return Ok(());
+    }
+    if stage == "record-fields" {
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=record-fields");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::Record(fields)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=record");
+            return Err(205);
+        };
+        let items = fields
+            .iter()
+            .map(|field| format!("{}={}", field.key, field.value))
+            .collect::<Vec<_>>();
+        let count = items.len();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_list_value(&items),
+            semantic: Some(ShellSemanticValue::List(items)),
+        });
+        if shell_pipeline_observability_enabled(variables) {
+            return write_line(runtime, &format!("pipeline-record-fields count={count}"))
+                .map_err(|_| 196);
+        }
+        return Ok(());
+    }
+    if stage == "record-keys" {
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=record-keys");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::Record(fields)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=record");
+            return Err(205);
+        };
+        let items = fields
+            .iter()
+            .map(|field| field.key.clone())
+            .collect::<Vec<_>>();
+        let count = items.len();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_list_value(&items),
+            semantic: Some(ShellSemanticValue::List(items)),
+        });
+        if shell_pipeline_observability_enabled(variables) {
+            return write_line(runtime, &format!("pipeline-record-keys count={count}"))
+                .map_err(|_| 196);
+        }
+        return Ok(());
+    }
+    if stage == "record-values" {
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=record-values");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::Record(fields)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=record");
+            return Err(205);
+        };
+        let items = fields
+            .iter()
+            .map(|field| field.value.clone())
+            .collect::<Vec<_>>();
+        let count = items.len();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_list_value(&items),
+            semantic: Some(ShellSemanticValue::List(items)),
+        });
+        if shell_pipeline_observability_enabled(variables) {
+            return write_line(runtime, &format!("pipeline-record-values count={count}"))
+                .map_err(|_| 196);
+        }
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("record-has ") {
+        let field_name = rest.trim();
+        if field_name.is_empty() {
+            let _ = write_line(runtime, "usage: record-has <field>");
+            return Err(2);
+        }
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=record-has");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::Record(fields)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=record");
+            return Err(205);
+        };
+        let found = fields.iter().any(|field| field.key == field_name);
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: if found {
+                String::from("true")
+            } else {
+                String::from("false")
+            },
+            semantic: Some(ShellSemanticValue::Bool),
+        });
+        if shell_pipeline_observability_enabled(variables) {
+            return write_line(
+                runtime,
+                &format!("pipeline-record-has field={} present={}", field_name, found),
+            )
+            .map_err(|_| 196);
+        }
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("record-select ") {
+        let selected_keys = rest
+            .split_whitespace()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        if selected_keys.is_empty() {
+            let _ = write_line(runtime, "usage: record-select <field> [field...]");
+            return Err(2);
+        }
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=record-select");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::Record(fields)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=record");
+            return Err(205);
+        };
+        let selected = fields
+            .iter()
+            .filter(|field| {
+                selected_keys
+                    .iter()
+                    .any(|candidate| *candidate == field.key)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_record_value(&selected),
+            semantic: Some(ShellSemanticValue::Record(selected)),
+        });
+        if shell_pipeline_observability_enabled(variables) {
+            let count = pipeline_value
+                .as_ref()
+                .and_then(|value| value.semantic.as_ref())
+                .and_then(|semantic| match semantic {
+                    ShellSemanticValue::Record(fields) => Some(fields.len()),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            return write_line(runtime, &format!("pipeline-record-select count={count}"))
+                .map_err(|_| 196);
+        }
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("record-drop ") {
+        let dropped_keys = rest
+            .split_whitespace()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        if dropped_keys.is_empty() {
+            let _ = write_line(runtime, "usage: record-drop <field> [field...]");
+            return Err(2);
+        }
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=record-drop");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::Record(fields)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=record");
+            return Err(205);
+        };
+        let kept = fields
+            .iter()
+            .filter(|field| !dropped_keys.iter().any(|candidate| *candidate == field.key))
+            .cloned()
+            .collect::<Vec<_>>();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_record_value(&kept),
+            semantic: Some(ShellSemanticValue::Record(kept)),
+        });
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("record-rename ") {
+        let mut parts = rest.split_whitespace();
+        let Some(from_key) = parts.next() else {
+            let _ = write_line(runtime, "usage: record-rename <from> <to>");
+            return Err(2);
+        };
+        let Some(to_key) = parts.next() else {
+            let _ = write_line(runtime, "usage: record-rename <from> <to>");
+            return Err(2);
+        };
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=record-rename");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::Record(fields)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=record");
+            return Err(205);
+        };
+        let renamed = fields
+            .iter()
+            .map(|field| {
+                if field.key == from_key {
+                    ShellRecordField {
+                        key: to_key.to_string(),
+                        value: field.value.clone(),
+                    }
+                } else {
+                    field.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_record_value(&renamed),
+            semantic: Some(ShellSemanticValue::Record(renamed)),
+        });
+        let _ = from_key;
+        let _ = to_key;
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("record-merge ") {
+        let source_name = rest.trim();
+        if source_name.is_empty() {
+            let _ = write_line(runtime, "usage: record-merge <record-var>");
+            return Err(2);
+        }
+        let Some(source) = shell_lookup_variable_entry(variables, source_name) else {
+            let _ = write_line(runtime, &format!("pipeline-var-missing name={source_name}"));
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::Record(source_fields)) = &source.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=record");
+            return Err(205);
+        };
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=record-merge");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::Record(fields)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=record");
+            return Err(205);
+        };
+        let mut merged = source_fields.clone();
+        for field in fields {
+            if let Some(existing) = merged
+                .iter_mut()
+                .find(|candidate| candidate.key == field.key)
+            {
+                existing.value = field.value.clone();
+            } else {
+                merged.push(field.clone());
+            }
+        }
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_record_value(&merged),
+            semantic: Some(ShellSemanticValue::Record(merged)),
+        });
+        if shell_pipeline_observability_enabled(variables) {
+            let count = pipeline_value
+                .as_ref()
+                .and_then(|value| value.semantic.as_ref())
+                .and_then(|semantic| match semantic {
+                    ShellSemanticValue::Record(fields) => Some(fields.len()),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            return write_line(
+                runtime,
+                &format!("pipeline-record-merge source={} count={count}", source_name),
+            )
+            .map_err(|_| 196);
+        }
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("record-set-field ") {
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        let Some(field_name) = parts
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            let _ = write_line(runtime, "usage: record-set-field <field> <value>");
+            return Err(2);
+        };
+        let Some(field_value) = parts
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            let _ = write_line(runtime, "usage: record-set-field <field> <value>");
+            return Err(2);
+        };
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=record-set-field");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::Record(fields)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=record");
+            return Err(205);
+        };
+        let mut updated = fields.clone();
+        if let Some(existing) = updated
+            .iter_mut()
+            .find(|candidate| candidate.key == field_name)
+        {
+            existing.value = field_value.to_string();
+        } else {
+            updated.push(ShellRecordField {
+                key: field_name.to_string(),
+                value: field_value.to_string(),
+            });
+        }
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_record_value(&updated),
+            semantic: Some(ShellSemanticValue::Record(updated)),
+        });
+        if shell_pipeline_observability_enabled(variables) {
+            let count = pipeline_value
+                .as_ref()
+                .and_then(|value| value.semantic.as_ref())
+                .and_then(|semantic| match semantic {
+                    ShellSemanticValue::Record(fields) => Some(fields.len()),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            return write_line(
+                runtime,
+                &format!(
+                    "pipeline-record-set-field field={} count={count}",
+                    field_name
+                ),
+            )
+            .map_err(|_| 196);
+        }
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("list-count") {
+        let target = rest
+            .split_whitespace()
+            .next()
+            .filter(|value| !value.is_empty());
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=list-count");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::List(items)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=list");
+            return Err(205);
+        };
+        let count = items.len().to_string();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: count.clone(),
+            semantic: Some(ShellSemanticValue::Int),
+        });
+        if let Some(target_name) = target {
+            if let Some(current) = pipeline_value.as_ref() {
+                shell_clone_variable_as(variables, target_name, current);
+            }
+            if shell_pipeline_observability_enabled(variables) {
+                write_line(
+                    runtime,
+                    &format!("pipeline-list-count target={} count={}", target_name, count),
+                )
+                .map_err(|_| 196)?;
+                return write_line(runtime, &format!("pipeline-list-count count={count}"))
+                    .map_err(|_| 196);
+            }
+            return Ok(());
+        }
+        if shell_pipeline_observability_enabled(variables) {
+            return write_line(runtime, &format!("pipeline-list-count count={count}"))
+                .map_err(|_| 196);
+        }
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("list-first") {
+        let target = rest
+            .split_whitespace()
+            .next()
+            .filter(|value| !value.is_empty());
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=list-first");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::List(items)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=list");
+            return Err(205);
+        };
+        let Some(first) = items.first() else {
+            let _ = write_line(runtime, "pipeline-list-empty");
+            return Err(205);
+        };
+        let first_value = first.clone();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: first_value.clone(),
+            semantic: infer_shell_semantic_value(&first_value),
+        });
+        if let Some(target_name) = target {
+            if let Some(current) = pipeline_value.as_ref() {
+                shell_clone_variable_as(variables, target_name, current);
+            }
+            if shell_pipeline_observability_enabled(variables) {
+                write_line(
+                    runtime,
+                    &format!(
+                        "pipeline-list-first target={} value={}",
+                        target_name, first_value
+                    ),
+                )
+                .map_err(|_| 196)?;
+                return write_line(
+                    runtime,
+                    &format!("pipeline-list-first value={}", first_value),
+                )
+                .map_err(|_| 196);
+            }
+        } else if shell_pipeline_observability_enabled(variables) {
+            return write_line(
+                runtime,
+                &format!("pipeline-list-first value={}", first_value),
+            )
+            .map_err(|_| 196);
+        }
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("list-last") {
+        let target = rest
+            .split_whitespace()
+            .next()
+            .filter(|value| !value.is_empty());
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=list-last");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::List(items)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=list");
+            return Err(205);
+        };
+        let Some(last) = items.last() else {
+            let _ = write_line(runtime, "pipeline-list-empty");
+            return Err(205);
+        };
+        let last_value = last.clone();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: last_value.clone(),
+            semantic: infer_shell_semantic_value(&last_value),
+        });
+        if let Some(target_name) = target {
+            if let Some(current) = pipeline_value.as_ref() {
+                shell_clone_variable_as(variables, target_name, current);
+            }
+            if shell_pipeline_proof_mode(variables) {
+                return Ok(());
+            }
+            return write_line(
+                runtime,
+                &format!(
+                    "pipeline-list-last target={} value={}",
+                    target_name, last_value
+                ),
+            )
+            .map_err(|_| 196);
+        }
+        if shell_pipeline_proof_mode(variables) {
+            return Ok(());
+        }
+        return write_line(runtime, &format!("pipeline-list-last value={}", last_value))
+            .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("list-at ") {
+        let mut parts = rest.split_whitespace();
+        let Some(index_text) = parts.next() else {
+            let _ = write_line(runtime, "usage: list-at <index> [target]");
+            return Err(2);
+        };
+        let Ok(index) = index_text.parse::<usize>() else {
+            let _ = write_line(runtime, "usage: list-at <index> [target]");
+            return Err(2);
+        };
+        let target = parts
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=list-at");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::List(items)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=list");
+            return Err(205);
+        };
+        let Some(selected) = items.get(index) else {
+            let _ = write_line(runtime, &format!("pipeline-list-missing index={index}"));
+            return Err(205);
+        };
+        let selected_value = selected.clone();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: selected_value.clone(),
+            semantic: infer_shell_semantic_value(&selected_value),
+        });
+        if let Some(target_name) = target {
+            if let Some(current) = pipeline_value.as_ref() {
+                shell_clone_variable_as(variables, target_name, current);
+            }
+            if shell_pipeline_proof_mode(variables) {
+                return Ok(());
+            }
+            return write_line(
+                runtime,
+                &format!(
+                    "pipeline-list-at index={} target={} value={}",
+                    index, target_name, selected_value
+                ),
+            )
+            .map_err(|_| 196);
+        }
+        if shell_pipeline_proof_mode(variables) {
+            return Ok(());
+        }
+        return write_line(
+            runtime,
+            &format!("pipeline-list-at index={} value={}", index, selected_value),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("list-find ") {
+        let mut parts = rest.split_whitespace();
+        let Some(needle) = parts.next().filter(|value| !value.is_empty()) else {
+            let _ = write_line(runtime, "usage: list-find <needle> [target]");
+            return Err(2);
+        };
+        let target = parts
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=list-find");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::List(items)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=list");
+            return Err(205);
+        };
+        let Some(found) = items.iter().find(|item| item.contains(needle)) else {
+            let _ = write_line(runtime, &format!("pipeline-list-missing needle={needle}"));
+            return Err(205);
+        };
+        let found_value = found.clone();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: found_value.clone(),
+            semantic: infer_shell_semantic_value(&found_value),
+        });
+        if let Some(target_name) = target {
+            if let Some(current) = pipeline_value.as_ref() {
+                shell_clone_variable_as(variables, target_name, current);
+            }
+            if shell_pipeline_observability_enabled(variables) {
+                return write_line(
+                    runtime,
+                    &format!(
+                        "pipeline-list-find needle={} target={} value={}",
+                        needle, target_name, found_value
+                    ),
+                )
+                .map_err(|_| 196);
+            }
+        } else if shell_pipeline_observability_enabled(variables) {
+            return write_line(
+                runtime,
+                &format!("pipeline-list-find needle={} value={}", needle, found_value),
+            )
+            .map_err(|_| 196);
+        }
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("list-find-eq ") {
+        let mut parts = rest.split_whitespace();
+        let Some(needle) = parts.next().filter(|value| !value.is_empty()) else {
+            let _ = write_line(runtime, "usage: list-find-eq <value> [target]");
+            return Err(2);
+        };
+        let target = parts
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=list-find-eq");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::List(items)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=list");
+            return Err(205);
+        };
+        let Some(found) = items.iter().find(|item| item.as_str() == needle) else {
+            let _ = write_line(runtime, &format!("pipeline-list-missing value={needle}"));
+            return Err(205);
+        };
+        let found_value = found.clone();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: found_value.clone(),
+            semantic: infer_shell_semantic_value(&found_value),
+        });
+        if let Some(target_name) = target {
+            if let Some(current) = pipeline_value.as_ref() {
+                shell_clone_variable_as(variables, target_name, current);
+            }
+            if shell_pipeline_observability_enabled(variables) {
+                return write_line(
+                    runtime,
+                    &format!(
+                        "pipeline-list-find-eq value={} target={} value={}",
+                        needle, target_name, found_value
+                    ),
+                )
+                .map_err(|_| 196);
+            }
+        } else if shell_pipeline_observability_enabled(variables) {
+            return write_line(
+                runtime,
+                &format!(
+                    "pipeline-list-find-eq value={} value={}",
+                    needle, found_value
+                ),
+            )
+            .map_err(|_| 196);
+        }
+        return Ok(());
+    }
+    if stage == "list-reverse" {
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=list-reverse");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::List(items)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=list");
+            return Err(205);
+        };
+        let mut reversed = items.clone();
+        reversed.reverse();
+        let count = reversed.len();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_list_value(&reversed),
+            semantic: Some(ShellSemanticValue::List(reversed)),
+        });
+        return write_line(runtime, &format!("pipeline-list-reverse count={count}"))
+            .map_err(|_| 196);
+    }
+    if stage == "list-sort" {
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=list-sort");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::List(items)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=list");
+            return Err(205);
+        };
+        let mut sorted = items.clone();
+        sorted.sort();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_list_value(&sorted),
+            semantic: Some(ShellSemanticValue::List(sorted)),
+        });
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("filter-contains ") {
+        let needle = rest.trim();
+        if needle.is_empty() {
+            let _ = write_line(runtime, "usage: filter-contains <needle>");
+            return Err(2);
+        }
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=filter-contains");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::List(items)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=list");
+            return Err(205);
+        };
+        let filtered = items
+            .iter()
+            .filter(|item| item.contains(needle))
+            .cloned()
+            .collect::<Vec<_>>();
+        let count = filtered.len();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_list_value(&filtered),
+            semantic: Some(ShellSemanticValue::List(filtered)),
+        });
+        if shell_pipeline_proof_mode(variables) {
+            return Ok(());
+        }
+        return write_line(
+            runtime,
+            &format!("pipeline-filter-contains needle={} count={}", needle, count),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("filter-not-contains ") {
+        let needle = rest.trim();
+        if needle.is_empty() {
+            let _ = write_line(runtime, "usage: filter-not-contains <needle>");
+            return Err(2);
+        }
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=filter-not-contains");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::List(items)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=list");
+            return Err(205);
+        };
+        let filtered = items
+            .iter()
+            .filter(|item| !item.contains(needle))
+            .cloned()
+            .collect::<Vec<_>>();
+        let count = filtered.len();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_list_value(&filtered),
+            semantic: Some(ShellSemanticValue::List(filtered)),
+        });
+        if shell_pipeline_proof_mode(variables) {
+            return Ok(());
+        }
+        return write_line(
+            runtime,
+            &format!(
+                "pipeline-filter-not-contains needle={} count={}",
+                needle, count
+            ),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("filter-eq ") {
+        let needle = rest.trim();
+        if needle.is_empty() {
+            let _ = write_line(runtime, "usage: filter-eq <value>");
+            return Err(2);
+        }
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=filter-eq");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::List(items)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=list");
+            return Err(205);
+        };
+        let filtered = items
+            .iter()
+            .filter(|item| item.as_str() == needle)
+            .cloned()
+            .collect::<Vec<_>>();
+        let count = filtered.len();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_list_value(&filtered),
+            semantic: Some(ShellSemanticValue::List(filtered)),
+        });
+        if shell_pipeline_observability_enabled(variables) {
+            return write_line(
+                runtime,
+                &format!("pipeline-filter-eq value={} count={}", needle, count),
+            )
+            .map_err(|_| 196);
+        }
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("filter-prefix ") {
+        let needle = rest.trim();
+        if needle.is_empty() {
+            let _ = write_line(runtime, "usage: filter-prefix <prefix>");
+            return Err(2);
+        }
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=filter-prefix");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::List(items)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=list");
+            return Err(205);
+        };
+        let filtered = items
+            .iter()
+            .filter(|item| item.starts_with(needle))
+            .cloned()
+            .collect::<Vec<_>>();
+        let count = filtered.len();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_list_value(&filtered),
+            semantic: Some(ShellSemanticValue::List(filtered)),
+        });
+        if shell_pipeline_proof_mode(variables) {
+            return Ok(());
+        }
+        return write_line(
+            runtime,
+            &format!("pipeline-filter-prefix prefix={} count={}", needle, count),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("filter-suffix ") {
+        let needle = rest.trim();
+        if needle.is_empty() {
+            let _ = write_line(runtime, "usage: filter-suffix <suffix>");
+            return Err(2);
+        }
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=filter-suffix");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::List(items)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=list");
+            return Err(205);
+        };
+        let filtered = items
+            .iter()
+            .filter(|item| item.ends_with(needle))
+            .cloned()
+            .collect::<Vec<_>>();
+        let count = filtered.len();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_list_value(&filtered),
+            semantic: Some(ShellSemanticValue::List(filtered)),
+        });
+        if shell_pipeline_proof_mode(variables) {
+            return Ok(());
+        }
+        return write_line(
+            runtime,
+            &format!("pipeline-filter-suffix suffix={} count={}", needle, count),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("filter-field-eq ") {
+        let mut parts = rest.split_whitespace();
+        let Some(field) = parts.next() else {
+            let _ = write_line(runtime, "usage: filter-field-eq <field> <value>");
+            return Err(2);
+        };
+        let value = parts.collect::<Vec<_>>().join(" ");
+        if field.is_empty() || value.trim().is_empty() {
+            let _ = write_line(runtime, "usage: filter-field-eq <field> <value>");
+            return Err(2);
+        }
+        let Some(pipe) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=filter-field-eq");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::List(items)) = &pipe.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=list");
+            return Err(205);
+        };
+        let filtered = items
+            .iter()
+            .filter(|item| {
+                pipeline_list_field_value(item, field).is_some_and(|candidate| candidate == value)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_list_value(&filtered),
+            semantic: Some(ShellSemanticValue::List(filtered)),
+        });
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("list-any-contains ") {
+        let needle = rest.trim();
+        if needle.is_empty() {
+            let _ = write_line(runtime, "usage: list-any-contains <needle>");
+            return Err(2);
+        }
+        let Some(pipe) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=list-any-contains");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::List(items)) = &pipe.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=list");
+            return Err(205);
+        };
+        let present = items.iter().any(|item| item.contains(needle));
+        let rendered = if present { "true" } else { "false" };
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: rendered.to_string(),
+            semantic: Some(ShellSemanticValue::Bool),
+        });
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("list-all-contains ") {
+        let needle = rest.trim();
+        if needle.is_empty() {
+            let _ = write_line(runtime, "usage: list-all-contains <needle>");
+            return Err(2);
+        }
+        let Some(pipe) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=list-all-contains");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::List(items)) = &pipe.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=list");
+            return Err(205);
+        };
+        let present = !items.is_empty() && items.iter().all(|item| item.contains(needle));
+        let rendered = if present { "true" } else { "false" };
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: rendered.to_string(),
+            semantic: Some(ShellSemanticValue::Bool),
+        });
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("list-field ") {
+        let field = rest.trim();
+        if field.is_empty() {
+            let _ = write_line(runtime, "usage: list-field <field>");
+            return Err(2);
+        }
+        let Some(pipe) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=list-field");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::List(items)) = &pipe.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=list");
+            return Err(205);
+        };
+        let values = items
+            .iter()
+            .filter_map(|item| pipeline_list_field_value(item, field))
+            .collect::<Vec<_>>();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_list_value(&values),
+            semantic: Some(ShellSemanticValue::List(values)),
+        });
+        return Ok(());
+    }
+    if stage == "list-distinct" {
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=list-distinct");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::List(items)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=list");
+            return Err(205);
+        };
+        let mut distinct = Vec::<String>::new();
+        for item in items {
+            if !distinct.contains(item) {
+                distinct.push(item.clone());
+            }
+        }
+        let count = distinct.len();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_list_value(&distinct),
+            semantic: Some(ShellSemanticValue::List(distinct)),
+        });
+        return write_line(runtime, &format!("pipeline-list-distinct count={count}"))
+            .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("list-append ") {
+        let value_to_append = rest.trim();
+        if value_to_append.is_empty() {
+            let _ = write_line(runtime, "usage: list-append <value>");
+            return Err(2);
+        }
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=list-append");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::List(items)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=list");
+            return Err(205);
+        };
+        let mut extended = items.clone();
+        extended.push(value_to_append.to_string());
+        let count = extended.len();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_list_value(&extended),
+            semantic: Some(ShellSemanticValue::List(extended)),
+        });
+        return write_line(
+            runtime,
+            &format!(
+                "pipeline-list-append value={} count={count}",
+                value_to_append
+            ),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("list-prepend ") {
+        let value_to_prepend = rest.trim();
+        if value_to_prepend.is_empty() {
+            let _ = write_line(runtime, "usage: list-prepend <value>");
+            return Err(2);
+        }
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=list-prepend");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::List(items)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=list");
+            return Err(205);
+        };
+        let mut extended = Vec::<String>::with_capacity(items.len() + 1);
+        extended.push(value_to_prepend.to_string());
+        extended.extend(items.iter().cloned());
+        let count = extended.len();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_list_value(&extended),
+            semantic: Some(ShellSemanticValue::List(extended)),
+        });
+        return write_line(
+            runtime,
+            &format!(
+                "pipeline-list-prepend value={} count={count}",
+                value_to_prepend
+            ),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("list-drop ") {
+        let count_text = rest.trim();
+        let Ok(drop_count) = count_text.parse::<usize>() else {
+            let _ = write_line(runtime, "usage: list-drop <count>");
+            return Err(2);
+        };
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=list-drop");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::List(items)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=list");
+            return Err(205);
+        };
+        let reduced = items.iter().skip(drop_count).cloned().collect::<Vec<_>>();
+        let count = reduced.len();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_list_value(&reduced),
+            semantic: Some(ShellSemanticValue::List(reduced)),
+        });
+        return write_line(
+            runtime,
+            &format!("pipeline-list-drop count={drop_count} remain={count}"),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("list-join ") {
+        let separator = rest;
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=list-join");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::List(items)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=list");
+            return Err(205);
+        };
+        let joined = items.join(separator);
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: joined.clone(),
+            semantic: infer_shell_semantic_value(&joined),
+        });
+        return write_line(
+            runtime,
+            &format!("pipeline-list-join separator={} value={joined}", separator),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("list-take ") {
+        let count_text = rest.trim();
+        let Ok(take_count) = count_text.parse::<usize>() else {
+            let _ = write_line(runtime, "usage: list-take <count>");
+            return Err(2);
+        };
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=list-take");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::List(items)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=list");
+            return Err(205);
+        };
+        let reduced = items.iter().take(take_count).cloned().collect::<Vec<_>>();
+        let count = reduced.len();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_list_value(&reduced),
+            semantic: Some(ShellSemanticValue::List(reduced)),
+        });
+        return write_line(
+            runtime,
+            &format!("pipeline-list-take count={take_count} kept={count}"),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("into ") {
+        let name = rest.trim();
+        if name.is_empty() {
+            let _ = write_line(runtime, "usage: into <name>");
+            return Err(2);
+        }
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=into");
+            return Err(205);
+        };
+        shell_clone_variable_as(variables, name, value);
+        if shell_pipeline_observability_enabled(variables) {
+            return write_line(
+                runtime,
+                &format!(
+                    "pipeline-store name={} type={}",
+                    name,
+                    shell_variable_type_name(value)
+                ),
+            )
+            .map_err(|_| 196);
+        }
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("record-get ") {
+        let mut parts = rest.split_whitespace();
+        let field_name = match parts.next() {
+            Some(field_name) if !field_name.is_empty() => field_name,
+            _ => {
+                let _ = write_line(runtime, "usage: record-get <field> [target]");
+                return Err(2);
+            }
+        };
+        let target = parts
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=record-get");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::Record(fields)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=record");
+            return Err(205);
+        };
+        let Some(field) = fields.iter().find(|field| field.key == field_name) else {
+            let _ = write_line(
+                runtime,
+                &format!("pipeline-field-missing field={field_name}"),
+            );
+            return Err(205);
+        };
+        let field_value = field.value.clone();
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: field_value.clone(),
+            semantic: infer_shell_semantic_value(&field_value),
+        });
+        if let Some(target_name) = target {
+            if let Some(value) = pipeline_value.as_ref() {
+                shell_clone_variable_as(variables, target_name, value);
+            }
+            if shell_pipeline_observability_enabled(variables) {
+                return write_line(
+                    runtime,
+                    &format!(
+                        "pipeline-record-field field={} target={} value={}",
+                        field_name, target_name, field_value
+                    ),
+                )
+                .map_err(|_| 196);
+            }
+            return Ok(());
+        }
+        if shell_pipeline_observability_enabled(variables) {
+            return write_line(
+                runtime,
+                &format!(
+                    "pipeline-record-field field={} value={}",
+                    field_name, field_value
+                ),
+            )
+            .map_err(|_| 196);
+        }
+        return Ok(());
+    }
+    if let Some(rest) = stage.strip_prefix("record-eq ") {
+        let mut parts = rest.split_whitespace();
+        let Some(field_name) = parts.next() else {
+            let _ = write_line(runtime, "usage: record-eq <field> <value>");
+            return Err(2);
+        };
+        let expected = parts.collect::<Vec<_>>().join(" ");
+        if field_name.is_empty() || expected.trim().is_empty() {
+            let _ = write_line(runtime, "usage: record-eq <field> <value>");
+            return Err(2);
+        }
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=record-eq");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::Record(fields)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=record");
+            return Err(205);
+        };
+        let present = fields
+            .iter()
+            .find(|field| field.key == field_name)
+            .is_some_and(|field| field.value == expected);
+        let rendered = if present { "true" } else { "false" };
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: rendered.to_string(),
+            semantic: Some(ShellSemanticValue::Bool),
+        });
+        return write_line(
+            runtime,
+            &format!(
+                "pipeline-record-eq field={} value={} present={}",
+                field_name, expected, present
+            ),
+        )
+        .map_err(|_| 196);
+    }
+    if let Some(rest) = stage.strip_prefix("record-contains ") {
+        let mut parts = rest.split_whitespace();
+        let Some(field_name) = parts.next() else {
+            let _ = write_line(runtime, "usage: record-contains <field> <needle>");
+            return Err(2);
+        };
+        let needle = parts.collect::<Vec<_>>().join(" ");
+        if field_name.is_empty() || needle.trim().is_empty() {
+            let _ = write_line(runtime, "usage: record-contains <field> <needle>");
+            return Err(2);
+        }
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=record-contains");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::Record(fields)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=record");
+            return Err(205);
+        };
+        let present = fields
+            .iter()
+            .find(|field| field.key == field_name)
+            .is_some_and(|field| field.value.contains(&needle));
+        let rendered = if present { "true" } else { "false" };
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: rendered.to_string(),
+            semantic: Some(ShellSemanticValue::Bool),
+        });
+        return write_line(
+            runtime,
+            &format!(
+                "pipeline-record-contains field={} needle={} present={}",
+                field_name, needle, present
+            ),
+        )
+        .map_err(|_| 196);
+    }
+    if stage == "pairs-to-record" {
+        let Some(value) = pipeline_value.as_ref() else {
+            let _ = write_line(runtime, "pipeline-empty stage=pairs-to-record");
+            return Err(205);
+        };
+        let Some(ShellSemanticValue::List(items)) = &value.semantic else {
+            let _ = write_line(runtime, "pipeline-type-mismatch expected=list");
+            return Err(205);
+        };
+        let mut fields = Vec::<ShellRecordField>::new();
+        for item in items {
+            let Some((key, field_value)) = item.split_once('=') else {
+                let _ = write_line(runtime, &format!("pipeline-pair-invalid value={item}"));
+                return Err(205);
+            };
+            let key = key.trim();
+            let field_value = field_value.trim();
+            if key.is_empty() {
+                let _ = write_line(runtime, &format!("pipeline-pair-invalid value={item}"));
+                return Err(205);
+            }
+            fields.push(ShellRecordField {
+                key: key.to_string(),
+                value: field_value.to_string(),
+            });
+        }
+        *pipeline_value = Some(ShellVariable {
+            name: String::from("_PIPE"),
+            value: shell_render_record_value(&fields),
+            semantic: Some(ShellSemanticValue::Record(fields)),
+        });
+        return Ok(());
+    }
+    let _ = write_line(runtime, &format!("pipeline-unsupported stage={stage}"));
+    Err(2)
+}

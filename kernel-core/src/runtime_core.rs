@@ -1,4 +1,22 @@
+//! Canonical subsystem role:
+//! - subsystem: kernel runtime core
+//! - owner layer: Layer 1
+//! - semantic owner: `kernel-core`
+//! - truth path role: canonical execution engine that binds kernel models,
+//!   scheduler, devices, and eventing into runtime behavior
+//!
+//! Canonical contract families handled here:
+//! - runtime orchestration contracts
+//! - hardware provider integration contracts
+//! - process/vm/eventing execution contracts
+//! - runtime snapshot source contracts
+//!
+//! This module may execute and mutate canonical kernel runtime truth. Higher
+//! layers may observe or drive it through contracts, but they must not shadow
+//! its ownership.
+
 use super::*;
+use crate::bus_model::{BusEndpointTable, BusPeerTable};
 use crate::descriptor_model::initial_payload_for_kind;
 use crate::device_model::{DeviceRegistry, NetworkInterface, NetworkSocket};
 
@@ -68,6 +86,8 @@ pub struct KernelRuntime {
     pub(crate) processes: ProcessTable,
     pub(crate) capabilities: CapabilityTable,
     pub(crate) domains: DomainTable,
+    pub(crate) bus_peers: BusPeerTable,
+    pub(crate) bus_endpoints: BusEndpointTable,
     pub(crate) resources: ResourceTable,
     pub(crate) contracts: ContractTable,
     pub(crate) scheduler: Scheduler,
@@ -99,6 +119,8 @@ pub struct KernelRuntime {
     pub(crate) next_event_queue_id: u64,
     pub(crate) next_event_timer_id: u64,
     pub(crate) next_sleep_queue_id: u64,
+    pub(crate) active_cpu_extended_state: Option<ActiveCpuExtendedStateSlot>,
+    pub(crate) cpu_extended_state_hardware: CpuExtendedStateHardwareTelemetry,
 
     // Hardware Abstraction
     pub(crate) hardware: HardwareSlot,
@@ -112,16 +134,28 @@ pub(crate) struct RuntimeChannel {
 
 impl KernelRuntime {
     pub fn new(policy: RuntimePolicy) -> Self {
+        let mut processes = ProcessTable::new(policy.process_range.start, policy.process_range.end);
+        let default_cpu_profile = policy
+            .cpu_extended_state_handoff
+            .map(|handoff| handoff.default_thread_profile())
+            .unwrap_or(policy.default_thread_cpu_extended_state);
+        processes.set_default_thread_cpu_extended_state(default_cpu_profile);
         Self {
-            processes: ProcessTable::new(policy.process_range.start, policy.process_range.end),
+            processes,
             capabilities: CapabilityTable::new(
                 policy.capability_range.start,
                 policy.capability_range.end,
             ),
             domains: DomainTable::new(policy.domain_range.start, policy.domain_range.end),
+            bus_peers: BusPeerTable::new(1, 1 << 16),
+            bus_endpoints: BusEndpointTable::new(1, 1 << 16),
             resources: ResourceTable::new(policy.resource_range.start, policy.resource_range.end),
             contracts: ContractTable::new(policy.contract_range.start, policy.contract_range.end),
-            scheduler: Scheduler::new(policy.scheduler_budget),
+            scheduler: Scheduler::new_with_topology(
+                policy.scheduler_budget,
+                policy.scheduler_logical_cpu_count,
+                policy.scheduler_cpu_topology.clone(),
+            ),
             namespaces: Vec::new(),
             fdshare_groups: Vec::new(),
             next_fdshare_group_id: 1,
@@ -150,12 +184,56 @@ impl KernelRuntime {
             next_event_queue_id: 1,
             next_event_timer_id: 1,
             next_sleep_queue_id: 1,
+            active_cpu_extended_state: None,
+            cpu_extended_state_hardware: CpuExtendedStateHardwareTelemetry::default(),
             hardware: HardwareSlot::empty(),
         }
     }
 
     pub fn host_runtime_default() -> Self {
         Self::new(RuntimePolicy::host_runtime_default())
+    }
+
+    #[allow(dead_code)]
+    pub fn set_default_thread_cpu_extended_state(
+        &mut self,
+        profile: ThreadCpuExtendedStateProfile,
+    ) {
+        self.processes
+            .set_default_thread_cpu_extended_state(profile);
+    }
+
+    pub fn apply_cpu_extended_state_handoff(
+        &mut self,
+        handoff: CpuExtendedStateHandoff,
+    ) -> ThreadCpuExtendedStateProfile {
+        let profile = handoff.default_thread_profile();
+        self.processes
+            .set_default_thread_cpu_extended_state(profile);
+        profile
+    }
+
+    pub fn default_thread_cpu_extended_state(&self) -> ThreadCpuExtendedStateProfile {
+        self.processes.default_thread_cpu_extended_state()
+    }
+
+    pub fn apply_cpu_handoff_to_process_threads(
+        &mut self,
+        pid: ProcessId,
+        handoff: CpuExtendedStateHandoff,
+    ) -> Result<usize, RuntimeError> {
+        self.processes
+            .apply_thread_cpu_extended_state_to_process(pid, handoff.default_thread_profile())
+            .map_err(Into::into)
+    }
+
+    pub fn restore_process_threads_to_default_cpu_handoff(
+        &mut self,
+        pid: ProcessId,
+    ) -> Result<usize, RuntimeError> {
+        self.processes
+            .restore_default_thread_cpu_extended_state_to_process(pid)
+            .map_err(Into::into)
     }
 
     pub fn install_hardware_provider(
@@ -205,6 +283,14 @@ impl KernelRuntime {
         self.processes.recent_vm_agent_decisions()
     }
 
+    pub fn active_cpu_extended_state(&self) -> Option<&ActiveCpuExtendedStateSlot> {
+        self.active_cpu_extended_state.as_ref()
+    }
+
+    pub fn cpu_extended_state_hardware_telemetry(&self) -> CpuExtendedStateHardwareTelemetry {
+        self.cpu_extended_state_hardware
+    }
+
     pub fn set_decision_tracing_enabled(&mut self, enabled: bool) {
         self.decision_tracing_enabled = enabled;
         self.scheduler.set_decision_tracing_enabled(enabled);
@@ -215,10 +301,89 @@ impl KernelRuntime {
         self.current_tick = self.current_tick.saturating_add(1);
         self.tick_sleep_queues()?;
         self.tick_event_queue_timers()?;
+        let previous_running = self.scheduler.running().cloned();
         let scheduled = self
             .scheduler
             .tick(&mut self.processes)
             .map_err(RuntimeError::from)?;
+        let should_flush_active_slot = self
+            .active_cpu_extended_state
+            .as_ref()
+            .map(|slot| slot.owner_tid != scheduled.tid)
+            .unwrap_or(false);
+        if should_flush_active_slot && let Some(slot) = self.active_cpu_extended_state.take() {
+            let mut slot = slot;
+            let flushed_tid = slot.owner_tid;
+            if let Some(provider) = self.hardware.as_mut() {
+                match provider.save_cpu_extended_state(
+                    slot.owner_pid,
+                    slot.owner_tid,
+                    &mut slot.image,
+                ) {
+                    Ok(()) => {
+                        self.cpu_extended_state_hardware.save_count = self
+                            .cpu_extended_state_hardware
+                            .save_count
+                            .saturating_add(1);
+                        self.cpu_extended_state_hardware.last_saved_tid = Some(slot.owner_tid);
+                        self.cpu_extended_state_hardware.last_error = None;
+                    }
+                    Err(error) => {
+                        self.cpu_extended_state_hardware.fallback_count = self
+                            .cpu_extended_state_hardware
+                            .fallback_count
+                            .saturating_add(1);
+                        self.cpu_extended_state_hardware.last_error = Some(error);
+                    }
+                }
+            }
+            self.processes
+                .import_thread_cpu_extended_state_image(slot.owner_tid, slot.image)?;
+            self.processes
+                .mark_thread_cpu_extended_state_saved(flushed_tid, self.current_tick)?;
+        }
+        if let Some(previous) = previous_running {
+            if previous.tid != scheduled.tid {
+                self.processes
+                    .mark_thread_cpu_extended_state_saved(previous.tid, self.current_tick)?;
+            }
+        }
+        self.active_cpu_extended_state = self
+            .processes
+            .export_thread_cpu_extended_state_image(scheduled.tid)
+            .ok()
+            .map(|image| ActiveCpuExtendedStateSlot {
+                owner_pid: scheduled.pid,
+                owner_tid: scheduled.tid,
+                image,
+            });
+        let restore_slot = self
+            .active_cpu_extended_state
+            .as_ref()
+            .map(|slot| (slot.owner_pid, slot.owner_tid, slot.image.clone()));
+        if let Some((owner_pid, owner_tid, image)) = restore_slot
+            && let Some(provider) = self.hardware.as_mut()
+        {
+            match provider.restore_cpu_extended_state(owner_pid, owner_tid, &image) {
+                Ok(()) => {
+                    self.cpu_extended_state_hardware.restore_count = self
+                        .cpu_extended_state_hardware
+                        .restore_count
+                        .saturating_add(1);
+                    self.cpu_extended_state_hardware.last_restored_tid = Some(owner_tid);
+                    self.cpu_extended_state_hardware.last_error = None;
+                }
+                Err(error) => {
+                    self.cpu_extended_state_hardware.fallback_count = self
+                        .cpu_extended_state_hardware
+                        .fallback_count
+                        .saturating_add(1);
+                    self.cpu_extended_state_hardware.last_error = Some(error);
+                }
+            }
+        }
+        self.processes
+            .mark_thread_cpu_extended_state_restored(scheduled.tid, self.current_tick)?;
         self.busy_ticks = self.busy_ticks.saturating_add(1);
         Ok(scheduled)
     }
@@ -317,6 +482,37 @@ impl KernelRuntime {
             }));
         self.scheduler
             .rebind_process(&self.processes, pid, class, budget.max(1))?;
+        Ok(())
+    }
+
+    pub fn set_process_affinity(
+        &mut self,
+        pid: ProcessId,
+        affinity_mask: u64,
+    ) -> Result<(), RuntimeError> {
+        let tid = self
+            .processes
+            .get(pid)?
+            .main_thread()
+            .ok_or(RuntimeError::Scheduler(SchedulerError::InvalidPid))?;
+        self.scheduler.set_thread_affinity(tid, affinity_mask)?;
+        Ok(())
+    }
+
+    pub fn cpu_online(&self, cpu: usize) -> bool {
+        self.scheduler.cpu_online(cpu)
+    }
+
+    pub fn cpu_online_count(&self) -> usize {
+        self.scheduler.cpu_online_count()
+    }
+
+    pub fn logical_cpu_count(&self) -> usize {
+        self.scheduler.logical_cpu_count()
+    }
+
+    pub fn set_cpu_online(&mut self, cpu: usize, online: bool) -> Result<(), RuntimeError> {
+        self.scheduler.set_cpu_online(cpu, online)?;
         Ok(())
     }
 
@@ -643,11 +839,81 @@ impl KernelRuntime {
                     state: thread.state(),
                     is_main: thread.is_main(),
                     exit_code: thread.exit_code(),
+                    cpu_extended_state: thread.cpu_extended_state(),
                 })
             })
             .collect::<Result<Vec<_>, ProcessError>>()?;
         threads.sort_by_key(|thread| thread.tid.raw());
         Ok(threads)
+    }
+
+    pub fn restore_thread_cpu_extended_state_boot_seed(
+        &mut self,
+        pid: ProcessId,
+        tid: ThreadId,
+    ) -> Result<(), RuntimeError> {
+        let thread = self.processes.get_thread(tid)?;
+        if thread.owner() != pid {
+            return Err(RuntimeError::Process(ProcessError::InvalidTid));
+        }
+        self.processes
+            .restore_thread_cpu_extended_state_boot_seed(tid)?;
+        Ok(())
+    }
+
+    pub fn export_thread_cpu_extended_state_image(
+        &self,
+        pid: ProcessId,
+        tid: ThreadId,
+    ) -> Result<ThreadCpuExtendedStateImage, RuntimeError> {
+        let thread = self.processes.get_thread(tid)?;
+        if thread.owner() != pid {
+            return Err(RuntimeError::Process(ProcessError::InvalidTid));
+        }
+        self.processes
+            .export_thread_cpu_extended_state_image(tid)
+            .map_err(Into::into)
+    }
+
+    pub fn import_thread_cpu_extended_state_image(
+        &mut self,
+        pid: ProcessId,
+        tid: ThreadId,
+        image: ThreadCpuExtendedStateImage,
+    ) -> Result<(), RuntimeError> {
+        let thread = self.processes.get_thread(tid)?;
+        if thread.owner() != pid {
+            return Err(RuntimeError::Process(ProcessError::InvalidTid));
+        }
+        self.processes
+            .import_thread_cpu_extended_state_image(tid, image)
+            .map_err(Into::into)
+    }
+
+    pub fn clone_thread_cpu_extended_state_image(
+        &mut self,
+        source_pid: ProcessId,
+        source_tid: ThreadId,
+        target_pid: ProcessId,
+        target_tid: ThreadId,
+    ) -> Result<ThreadCpuExtendedStateImage, RuntimeError> {
+        let image = self.export_thread_cpu_extended_state_image(source_pid, source_tid)?;
+        self.import_thread_cpu_extended_state_image(target_pid, target_tid, image.clone())?;
+        Ok(image)
+    }
+
+    pub fn release_thread_cpu_extended_state_image(
+        &mut self,
+        pid: ProcessId,
+        tid: ThreadId,
+    ) -> Result<(), RuntimeError> {
+        let thread = self.processes.get_thread(tid)?;
+        if thread.owner() != pid {
+            return Err(RuntimeError::Process(ProcessError::InvalidTid));
+        }
+        self.processes
+            .release_thread_cpu_extended_state_image(tid)
+            .map_err(Into::into)
     }
 
     pub fn open_descriptor(

@@ -1,5 +1,20 @@
 #![cfg_attr(not(test), no_std)]
 
+//! Canonical subsystem role:
+//! - subsystem: audio translation support
+//! - owner layer: support translation layer
+//! - semantic owner: `audio-translate`
+//! - truth path role: translation and scripting support for audio-oriented
+//!   runtime/userland flows
+//!
+//! Canonical contract families defined here:
+//! - audio mix script contracts
+//! - waveform and encoding contracts
+//! - foreign-audio translation contracts
+//!
+//! This crate may define translation support for audio flows, but it must not
+//! redefine kernel, device-runtime, or product-level audio truth.
+
 extern crate alloc;
 
 use alloc::{
@@ -266,6 +281,95 @@ impl MixScript {
     }
 }
 
+/// API-uri audio externe pe care le suportăm ca sursă de traducere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForeignAudioApi {
+    DirectSound,
+    XAudio2,
+    CoreAudio,
+    ALSA,
+    OpenAL,
+    PulseAudio,
+    WebAudio,
+    /// API necunoscut / neacoperit — refuse
+    Other,
+}
+
+impl ForeignAudioApi {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::DirectSound => "directsound",
+            Self::XAudio2 => "xaudio2",
+            Self::CoreAudio => "coreaudio",
+            Self::ALSA => "alsa",
+            Self::OpenAL => "openal",
+            Self::PulseAudio => "pulseaudio",
+            Self::WebAudio => "webaudio",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn translation_label(self) -> &'static str {
+        match self {
+            Self::ALSA | Self::PulseAudio | Self::WebAudio => "native-mixer",
+            Self::Other => "unsupported",
+            _ => "compat-to-mixer",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "directsound" => Some(Self::DirectSound),
+            "xaudio2" => Some(Self::XAudio2),
+            "coreaudio" => Some(Self::CoreAudio),
+            "alsa" => Some(Self::ALSA),
+            "openal" => Some(Self::OpenAL),
+            "pulseaudio" => Some(Self::PulseAudio),
+            "webaudio" => Some(Self::WebAudio),
+            "other" => Some(Self::Other),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AudioTranslateError {
+    UnsupportedApi(String),
+    EmptyScript,
+}
+
+impl AudioTranslateError {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::UnsupportedApi(api) => format!("unsupported audio api={api}"),
+            Self::EmptyScript => String::from("empty mix script"),
+        }
+    }
+}
+
+pub struct AudioTranslator {
+    source_api: ForeignAudioApi,
+}
+
+impl AudioTranslator {
+    pub fn new(source_api: ForeignAudioApi) -> Self {
+        Self { source_api }
+    }
+
+    pub fn translate(&self, script: &MixScript) -> Result<EncodedMix, AudioTranslateError> {
+        if self.source_api == ForeignAudioApi::Other {
+            return Err(AudioTranslateError::UnsupportedApi(String::from(
+                self.source_api.name(),
+            )));
+        }
+        if script.ops.is_empty() {
+            return Err(AudioTranslateError::EmptyScript);
+        }
+        let profile = format!("{}-{}", self.source_api.name(), script.latency_mode);
+        Ok(script.encode(&profile))
+    }
+}
+
 fn parse_named_value(key: &str, value: &str) -> Result<String, MixScriptError> {
     if value.is_empty() {
         return Err(MixScriptError::InvalidValue {
@@ -452,6 +556,34 @@ mod tests {
                 .payload
                 .contains("op=clip bus=ambience clip=hangar-loop loops=2 gain=650 pan=100")
         );
+    }
+
+    #[test]
+    fn audio_translator_encodes_xaudio2_to_native_mixer() {
+        use super::{AudioTranslator, ForeignAudioApi};
+        let script = MixScript::parse(
+            "rate=48000\nchannels=2\nstream=test-stream\nroute=music\nlatency-mode=interactive\nspatialization=stereo\ncompletion=fire-and-forget\ntone=main,440,100,0.800,0.000,sine\n",
+        )
+        .unwrap();
+        let translator = AudioTranslator::new(ForeignAudioApi::XAudio2);
+        let encoded = translator.translate(&script).unwrap();
+        assert_eq!(encoded.stream_tag, "test-stream");
+        assert!(encoded.payload.contains("ngos-audio-translate/v1"));
+        assert!(encoded.payload.contains("profile=xaudio2-interactive"));
+    }
+
+    #[test]
+    fn audio_translator_refuses_other_api() {
+        use super::{AudioTranslateError, AudioTranslator, ForeignAudioApi};
+        let script = MixScript::parse(
+            "rate=48000\nchannels=2\nstream=s\nroute=music\nlatency-mode=interactive\nspatialization=stereo\ncompletion=fire-and-forget\ntone=b,440,100,0.800,0.000,sine\n",
+        )
+        .unwrap();
+        let translator = AudioTranslator::new(ForeignAudioApi::Other);
+        assert!(matches!(
+            translator.translate(&script),
+            Err(AudioTranslateError::UnsupportedApi(_))
+        ));
     }
 
     #[test]

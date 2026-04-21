@@ -1,0 +1,13 @@
+[package]
+name = "ngos-shell-nextmind"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "ngos_shell_nextmind"
+
+[dependencies]
+ngos-shell-semantic = { path = "../ngos-shell-semantic" }
+ngos-user-abi = { path = "../user-abi" }
+ngos-user-runtime = { path = "../user-runtime" }

@@ -19,6 +19,10 @@ $EspImage = Join-Path $RepoRoot "target\qemu\limine-uefi-vm.img"
 $SerialLog = Join-Path $RepoRoot "target\qemu\serial-vm.log"
 $DebugconLog = Join-Path $RepoRoot "target\qemu\debugcon-vm.log"
 $HostNetLog = Join-Path $RepoRoot "target\qemu\virtio-net-host.log"
+$StageDir = Join-Path $RepoRoot "target\qemu\limine-uefi-vm"
+$StageConfig = Join-Path $StageDir "limine.conf"
+$BootConfig = Join-Path $StageDir "EFI\BOOT\limine.conf"
+$MakeEspScript = Join-Path $PSScriptRoot "make_esp_image.py"
 
 if (!(Test-Path $QemuExe)) {
     throw "QEMU executable not found at $QemuExe"
@@ -38,6 +42,24 @@ if ($LASTEXITCODE -ne 0) {
 Copy-Item $FirmwareSource $Firmware -Force
 Copy-Item $VarsSource $Vars -Force
 Remove-Item $SerialLog, $DebugconLog, $HostNetLog -ErrorAction SilentlyContinue
+
+$ProofConfig = @"
+timeout: 0
+verbose: yes
+serial: yes
+
+/ngos_vm
+    protocol: limine
+    path: boot():/kernel/ngos-boot-x86_64
+    module_path: boot():/kernel/ngos-userland-native
+    cmdline: console=ttyS0 earlyprintk=serial ngos.boot.proof=vm
+"@
+Set-Content -Path $StageConfig -Value $ProofConfig -Encoding ascii
+Set-Content -Path $BootConfig -Value $ProofConfig -Encoding ascii
+& python $MakeEspScript --source $StageDir --output $EspImage --size-mib 128
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to rebuild ESP image with vm proof config."
+}
 
 $hostProcess = Start-Process -FilePath "python" -ArgumentList @(
     $HostHelper,

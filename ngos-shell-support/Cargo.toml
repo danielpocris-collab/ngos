@@ -1,0 +1,11 @@
+[package]
+name = "ngos-shell-support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "ngos_shell_support"
+
+[dependencies]
+ngos-user-abi = { path = "../user-abi" }

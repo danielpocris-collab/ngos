@@ -1,0 +1,2892 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NGOS - Next Gen OS | Complete Desktop UI</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --glass-bg: rgba(255, 255, 255, 0.1);
+            --glass-bg-hover: rgba(255, 255, 255, 0.15);
+            --glass-border: rgba(255, 255, 255, 0.2);
+            --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            --glass-blur: blur(20px);
+            --primary-accent: #00d4ff;
+            --secondary-accent: #7b2cbf;
+            --text-primary: #ffffff;
+            --text-secondary: rgba(255, 255, 255, 0.7);
+            --danger: #ff4757;
+            --success: #2ed573;
+            --warning: #ffa502;
+            --window-bg: rgba(20, 20, 30, 0.85);
+        }
+
+        [data-theme="light"] {
+            --glass-bg: rgba(0, 0, 0, 0.08);
+            --glass-bg-hover: rgba(0, 0, 0, 0.12);
+            --glass-border: rgba(0, 0, 0, 0.15);
+            --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+            --text-primary: #1a1a2e;
+            --text-secondary: rgba(0, 0, 0, 0.6);
+            --window-bg: rgba(255, 255, 255, 0.85);
+        }
+
+        [data-theme="purple"] {
+            --primary-accent: #a855f7;
+            --secondary-accent: #ec4899;
+        }
+
+        [data-theme="green"] {
+            --primary-accent: #22c55e;
+            --secondary-accent: #06b6d4;
+        }
+
+        [data-theme="orange"] {
+            --primary-accent: #f97316;
+            --secondary-accent: #eab308;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            overflow: hidden;
+            background: #0a0a0f;
+            height: 100vh;
+            width: 100vw;
+            user-select: none;
+        }
+
+        /* Animated Background */
+        .desktop-background {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(135deg, #0a0a0f 0%, #1a1a2e 50%, #16213e 100%);
+            overflow: hidden;
+            z-index: 0;
+        }
+
+        .gradient-orb {
+            position: absolute;
+            border-radius: 50%;
+            filter: blur(80px);
+            opacity: 0.5;
+            animation: float 20s ease-in-out infinite;
+        }
+
+        .gradient-orb-1 {
+            width: 600px;
+            height: 600px;
+            background: linear-gradient(135deg, #00d4ff, #7b2cbf);
+            top: -200px;
+            left: -200px;
+        }
+
+        .gradient-orb-2 {
+            width: 500px;
+            height: 500px;
+            background: linear-gradient(135deg, #ff006e, #8338ec);
+            bottom: -150px;
+            right: -150px;
+            animation-delay: -5s;
+        }
+
+        .gradient-orb-3 {
+            width: 400px;
+            height: 400px;
+            background: linear-gradient(135deg, #00f5d4, #00bbf9);
+            top: 50%;
+            left: 50%;
+            animation-delay: -10s;
+        }
+
+        .gradient-orb-4 {
+            width: 350px;
+            height: 350px;
+            background: linear-gradient(135deg, #fb5607, #ff006e);
+            top: 20%;
+            right: 10%;
+            animation-delay: -15s;
+        }
+
+        @keyframes float {
+            0%, 100% { transform: translate(0, 0) scale(1); }
+            25% { transform: translate(50px, -50px) scale(1.1); }
+            50% { transform: translate(-30px, 30px) scale(0.95); }
+            75% { transform: translate(40px, 20px) scale(1.05); }
+        }
+
+        .noise-overlay {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            background: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+            opacity: 0.03;
+            pointer-events: none;
+        }
+
+        /* Glass Panel Base */
+        .glass-panel {
+            background: var(--glass-bg);
+            backdrop-filter: var(--glass-blur);
+            -webkit-backdrop-filter: var(--glass-blur);
+            border: 1px solid var(--glass-border);
+            box-shadow: var(--glass-shadow);
+        }
+
+        .glass-panel-inner {
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+        }
+
+        .glass-panel-top {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: var(--glass-blur);
+            border-top: 1px solid var(--glass-border);
+        }
+
+        /* Desktop Area */
+        .desktop-area {
+            position: relative;
+            z-index: 1;
+            height: calc(100vh - 80px);
+            padding: 20px;
+        }
+
+        /* Desktop Icons */
+        .desktop-icons {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            flex-wrap: wrap;
+            max-width: 120px;
+        }
+
+        .desktop-icon {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+            padding: 12px 8px;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            border: 1px solid transparent;
+        }
+
+        .desktop-icon:hover {
+            background: var(--glass-bg-hover);
+            border-color: var(--glass-border);
+        }
+
+        .desktop-icon:active {
+            transform: scale(0.95);
+        }
+
+        .icon-wrapper {
+            width: 56px;
+            height: 56px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, rgba(255,255,255,0.1), rgba(255,255,255,0.05));
+            border-radius: 16px;
+            border: 1px solid var(--glass-border);
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+        }
+
+        .icon-wrapper .icon {
+            font-size: 28px;
+            color: var(--text-primary);
+            text-shadow: 0 2px 10px rgba(0, 212, 255, 0.5);
+        }
+
+        .icon-wrapper.ngos {
+            background: linear-gradient(135deg, var(--primary-accent), var(--secondary-accent));
+            border: none;
+        }
+
+        .icon-label {
+            color: var(--text-primary);
+            font-size: 12px;
+            font-weight: 500;
+            text-align: center;
+            text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+        }
+
+        /* Taskbar */
+        .taskbar {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 80px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 20px;
+            z-index: 1000;
+            border-radius: 20px 20px 0 0;
+            border-bottom: none;
+        }
+
+        .start-btn {
+            width: auto;
+            padding: 8px 16px;
+            border-radius: 12px;
+            border: 1px solid var(--glass-border);
+            background: var(--glass-bg);
+            backdrop-filter: var(--glass-blur);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            transition: all 0.3s ease;
+        }
+
+        .start-btn:hover {
+            background: var(--glass-bg-hover);
+            transform: scale(1.05);
+            box-shadow: 0 0 30px rgba(0, 212, 255, 0.3);
+        }
+
+        .start-icon {
+            width: 28px;
+            height: 28px;
+            color: var(--primary-accent);
+        }
+
+        .start-icon svg {
+            width: 100%;
+            height: 100%;
+            filter: drop-shadow(0 0 10px rgba(0, 212, 255, 0.5));
+        }
+
+        /* NGOS Logo */
+        .ngos-logo {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .ngos-logo-icon {
+            width: 32px;
+            height: 32px;
+            background: linear-gradient(135deg, var(--primary-accent), var(--secondary-accent));
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 18px;
+            color: white;
+            box-shadow: 0 0 20px rgba(0, 212, 255, 0.4);
+        }
+
+        .ngos-logo-text {
+            font-size: 20px;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--primary-accent), var(--secondary-accent));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            letter-spacing: 2px;
+        }
+
+        .taskbar-apps {
+            display: flex;
+            gap: 8px;
+            flex: 1;
+            justify-content: center;
+        }
+
+        .taskbar-app {
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            border: 1px solid transparent;
+            color: var(--text-primary);
+            font-size: 20px;
+            position: relative;
+        }
+
+        .taskbar-app:hover {
+            background: var(--glass-bg-hover);
+            border-color: var(--glass-border);
+            transform: translateY(-5px);
+        }
+
+        .taskbar-app.pinned::after {
+            content: '';
+            position: absolute;
+            bottom: 8px;
+            width: 4px;
+            height: 4px;
+            background: var(--primary-accent);
+            border-radius: 50%;
+            box-shadow: 0 0 10px var(--primary-accent);
+        }
+
+        .taskbar-app.active {
+            background: var(--glass-bg-hover);
+            border-color: var(--primary-accent);
+        }
+
+        .system-tray {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .tray-btn {
+            width: 40px;
+            height: 40px;
+            border-radius: 10px;
+            border: 1px solid var(--glass-border);
+            background: var(--glass-bg);
+            backdrop-filter: var(--glass-blur);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-primary);
+            font-size: 16px;
+            transition: all 0.3s ease;
+            position: relative;
+        }
+
+        .tray-btn:hover {
+            background: var(--glass-bg-hover);
+            transform: scale(1.05);
+        }
+
+        .notification-badge {
+            position: absolute;
+            top: -5px;
+            right: -5px;
+            background: var(--danger);
+            color: white;
+            font-size: 10px;
+            font-weight: 600;
+            padding: 2px 6px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(255, 71, 87, 0.5);
+        }
+
+        .clock-section {
+            padding: 10px 16px;
+            border-radius: 12px;
+            text-align: right;
+            min-width: 100px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .clock-section:hover {
+            background: var(--glass-bg-hover);
+        }
+
+        .time {
+            color: var(--text-primary);
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .date {
+            color: var(--text-secondary);
+            font-size: 11px;
+            margin-top: 2px;
+        }
+
+        /* Start Menu */
+        .start-menu {
+            position: fixed;
+            bottom: 100px;
+            left: 50%;
+            transform: translateX(-50%) translateY(20px);
+            width: 650px;
+            max-height: 600px;
+            border-radius: 20px;
+            z-index: 999;
+            opacity: 0;
+            visibility: hidden;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .start-menu.visible {
+            opacity: 1;
+            visibility: visible;
+            transform: translateX(-50%) translateY(0);
+        }
+
+        .start-menu-content {
+            padding: 30px;
+            max-height: 520px;
+            overflow-y: auto;
+        }
+
+        .user-profile {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 25px;
+        }
+
+        .avatar {
+            width: 56px;
+            height: 56px;
+            border-radius: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            color: var(--primary-accent);
+        }
+
+        .user-info .username {
+            color: var(--text-primary);
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        .user-info .email {
+            color: var(--text-secondary);
+            font-size: 13px;
+        }
+
+        .search-box {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 14px 18px;
+            border-radius: 14px;
+            margin-bottom: 25px;
+        }
+
+        .search-box input {
+            flex: 1;
+            background: transparent;
+            border: none;
+            outline: none;
+            color: var(--text-primary);
+            font-size: 14px;
+        }
+
+        .search-box input::placeholder {
+            color: var(--text-secondary);
+        }
+
+        .search-icon {
+            color: var(--text-secondary);
+        }
+
+        .section-title {
+            color: var(--text-primary);
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 15px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .pinned-grid {
+            display: grid;
+            grid-template-columns: repeat(8, 1fr);
+            gap: 12px;
+            margin-bottom: 25px;
+        }
+
+        .pinned-app {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            padding: 10px 8px;
+            border-radius: 12px;
+            transition: all 0.3s ease;
+        }
+
+        .pinned-app:hover {
+            background: var(--glass-bg-hover);
+        }
+
+        .pinned-app .app-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            color: var(--text-primary);
+        }
+
+        .pinned-app span {
+            color: var(--text-secondary);
+            font-size: 11px;
+            text-align: center;
+        }
+
+        .recent-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .recent-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .recent-item:hover {
+            background: var(--glass-bg-hover);
+        }
+
+        .file-icon {
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--glass-bg);
+            border-radius: 10px;
+            font-size: 18px;
+        }
+
+        .file-info {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .file-name {
+            color: var(--text-primary);
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        .file-time {
+            color: var(--text-secondary);
+            font-size: 11px;
+        }
+
+        .start-menu-footer {
+            padding: 15px 30px;
+            border-radius: 0 0 20px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .settings-btn {
+            width: 44px;
+            height: 44px;
+            border-radius: 12px;
+            border: 1px solid var(--glass-border);
+            background: var(--glass-bg);
+            backdrop-filter: var(--glass-blur);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-primary);
+            font-size: 18px;
+            transition: all 0.3s ease;
+        }
+
+        .settings-btn:hover {
+            background: var(--glass-bg-hover);
+        }
+
+        .power-btn {
+            width: 44px;
+            height: 44px;
+            border-radius: 12px;
+            border: 1px solid var(--glass-border);
+            background: var(--glass-bg);
+            backdrop-filter: var(--glass-blur);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--danger);
+            font-size: 18px;
+            transition: all 0.3s ease;
+        }
+
+        .power-btn:hover {
+            background: rgba(255, 71, 87, 0.2);
+            box-shadow: 0 0 20px rgba(255, 71, 87, 0.4);
+        }
+
+        /* Notification Center */
+        .notification-center {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            width: 380px;
+            max-height: 500px;
+            border-radius: 20px;
+            z-index: 998;
+            opacity: 0;
+            visibility: hidden;
+            transform: translateX(20px);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .notification-center.visible {
+            opacity: 1;
+            visibility: visible;
+            transform: translateX(0);
+        }
+
+        .notification-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px;
+            border-bottom: 1px solid var(--glass-border);
+        }
+
+        .notification-header h3 {
+            color: var(--text-primary);
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .clear-all {
+            padding: 8px 16px;
+            border-radius: 8px;
+            border: 1px solid var(--glass-border);
+            background: transparent;
+            color: var(--text-secondary);
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .clear-all:hover {
+            background: var(--glass-bg-hover);
+            color: var(--text-primary);
+        }
+
+        .notifications-list {
+            padding: 15px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .notification-item {
+            display: flex;
+            gap: 15px;
+            padding: 15px;
+            border-radius: 14px;
+            margin-bottom: 10px;
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .notification-item:hover {
+            background: var(--glass-bg-hover);
+        }
+
+        .notification-icon {
+            width: 44px;
+            height: 44px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            flex-shrink: 0;
+        }
+
+        .notification-icon.update { background: linear-gradient(135deg, #00d4ff, #0099cc); color: white; }
+        .notification-icon.message { background: linear-gradient(135deg, #7b2cbf, #5a1f8f); color: white; }
+        .notification-icon.security { background: linear-gradient(135deg, #2ed573, #1e9e52); color: white; }
+        .notification-icon.warning { background: linear-gradient(135deg, #ffa502, #ff7f00); color: white; }
+
+        .notification-content h4 {
+            color: var(--text-primary);
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+
+        .notification-content p {
+            color: var(--text-secondary);
+            font-size: 12px;
+            margin-bottom: 6px;
+        }
+
+        .notification-time {
+            color: var(--text-secondary);
+            font-size: 11px;
+            opacity: 0.6;
+        }
+
+        /* Control Center */
+        .control-center {
+            position: fixed;
+            top: 20px;
+            right: 420px;
+            width: 340px;
+            border-radius: 20px;
+            z-index: 998;
+            opacity: 0;
+            visibility: hidden;
+            transform: translateX(20px);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .control-center.visible {
+            opacity: 1;
+            visibility: visible;
+            transform: translateX(0);
+        }
+
+        .control-header {
+            padding: 20px;
+            border-bottom: 1px solid var(--glass-border);
+        }
+
+        .control-header h3 {
+            color: var(--text-primary);
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .quick-settings-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            padding: 20px;
+        }
+
+        .quick-setting-btn {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+            padding: 15px;
+            border-radius: 14px;
+            border: 1px solid var(--glass-border);
+            background: var(--glass-bg);
+            backdrop-filter: var(--glass-blur);
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .quick-setting-btn i {
+            font-size: 20px;
+            color: var(--text-secondary);
+        }
+
+        .quick-setting-btn span {
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
+        .quick-setting-btn.active {
+            background: linear-gradient(135deg, rgba(0, 212, 255, 0.3), rgba(123, 44, 191, 0.3));
+            border-color: var(--primary-accent);
+        }
+
+        .quick-setting-btn.active i,
+        .quick-setting-btn.active span {
+            color: var(--text-primary);
+        }
+
+        .sliders-section {
+            padding: 0 20px 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .slider-item {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .slider-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: var(--text-secondary);
+            font-size: 12px;
+        }
+
+        .slider-header i {
+            font-size: 14px;
+        }
+
+        .slider-value {
+            margin-left: auto;
+            color: var(--primary-accent);
+            font-weight: 600;
+        }
+
+        .glass-slider {
+            -webkit-appearance: none;
+            width: 100%;
+            height: 6px;
+            border-radius: 3px;
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            outline: none;
+        }
+
+        .glass-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, var(--primary-accent), var(--secondary-accent));
+            cursor: pointer;
+            box-shadow: 0 2px 10px rgba(0, 212, 255, 0.5);
+        }
+
+        .media-widget {
+            margin: 0 20px 20px;
+            padding: 15px;
+            border-radius: 14px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .album-art {
+            width: 50px;
+            height: 50px;
+            border-radius: 10px;
+            background: linear-gradient(135deg, var(--primary-accent), var(--secondary-accent));
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 20px;
+        }
+
+        .track-info {
+            flex: 1;
+        }
+
+        .track-info h4 {
+            color: var(--text-primary);
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        .track-info p {
+            color: var(--text-secondary);
+            font-size: 11px;
+        }
+
+        .media-controls {
+            display: flex;
+            gap: 8px;
+        }
+
+        .media-btn {
+            width: 36px;
+            height: 36px;
+            border-radius: 10px;
+            border: 1px solid var(--glass-border);
+            background: var(--glass-bg);
+            color: var(--text-primary);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s ease;
+        }
+
+        .media-btn:hover {
+            background: var(--glass-bg-hover);
+        }
+
+        .media-btn.play {
+            background: linear-gradient(135deg, var(--primary-accent), var(--secondary-accent));
+            border: none;
+        }
+
+        /* Context Menu */
+        .context-menu {
+            position: fixed;
+            width: 220px;
+            border-radius: 14px;
+            z-index: 2000;
+            padding: 8px;
+            display: none;
+        }
+
+        .context-menu.visible {
+            display: block;
+        }
+
+        .context-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 12px;
+            border-radius: 10px;
+            color: var(--text-primary);
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .context-item:hover {
+            background: var(--glass-bg-hover);
+        }
+
+        .context-item i {
+            width: 18px;
+            color: var(--text-secondary);
+        }
+
+        .submenu-arrow {
+            margin-left: auto;
+            font-size: 10px;
+        }
+
+        .context-divider {
+            height: 1px;
+            background: var(--glass-border);
+            margin: 8px;
+        }
+
+        /* Window */
+        .window {
+            position: absolute;
+            min-width: 400px;
+            min-height: 300px;
+            border-radius: 16px;
+            z-index: 100;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+            transition: transform 0.2s ease, opacity 0.2s ease;
+        }
+
+        .window.minimized {
+            transform: scale(0.1) translateY(500px);
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .window.maximized {
+            top: 0 !important;
+            left: 0 !important;
+            width: 100% !important;
+            height: calc(100vh - 80px) !important;
+            border-radius: 0;
+        }
+
+        .window-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 16px;
+            background: rgba(0, 0, 0, 0.2);
+            border-bottom: 1px solid var(--glass-border);
+            cursor: move;
+        }
+
+        .window-title {
+            color: var(--text-primary);
+            font-size: 14px;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .window-title i {
+            color: var(--primary-accent);
+        }
+
+        .window-controls {
+            display: flex;
+            gap: 8px;
+        }
+
+        .window-btn {
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            border: none;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .window-btn.close { background: #ff5f57; }
+        .window-btn.minimize { background: #ffbd2e; }
+        .window-btn.maximize { background: #28ca41; }
+
+        .window-btn:hover { transform: scale(1.2); }
+
+        .window-content {
+            flex: 1;
+            padding: 20px;
+            color: var(--text-primary);
+            overflow: auto;
+        }
+
+        /* Snap Layouts */
+        .snap-overlay {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 10px;
+            padding: 15px;
+            border-radius: 14px;
+            z-index: 3000;
+            opacity: 0;
+            visibility: hidden;
+            transition: all 0.2s ease;
+        }
+
+        .snap-overlay.visible {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .snap-option {
+            width: 60px;
+            height: 40px;
+            border-radius: 8px;
+            border: 2px solid var(--glass-border);
+            background: var(--glass-bg);
+            cursor: pointer;
+            display: grid;
+            gap: 4px;
+            padding: 4px;
+            transition: all 0.2s ease;
+        }
+
+        .snap-option:hover {
+            border-color: var(--primary-accent);
+            background: var(--glass-bg-hover);
+        }
+
+        .snap-option.half {
+            grid-template-columns: 1fr 1fr;
+        }
+
+        .snap-option.half > div {
+            background: var(--primary-accent);
+            border-radius: 4px;
+            opacity: 0.5;
+        }
+
+        .snap-option.quarter {
+            grid-template-columns: 1fr 1fr;
+            grid-template-rows: 1fr 1fr;
+        }
+
+        .snap-option.quarter > div {
+            background: var(--primary-accent);
+            border-radius: 4px;
+            opacity: 0.5;
+        }
+
+        .snap-option.thirds {
+            grid-template-columns: 1fr 1fr 1fr;
+        }
+
+        .snap-option.thirds > div {
+            background: var(--primary-accent);
+            border-radius: 4px;
+            opacity: 0.5;
+        }
+
+        /* Widgets Panel */
+        .widgets-panel {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            width: 350px;
+            max-height: calc(100vh - 140px);
+            border-radius: 20px;
+            z-index: 998;
+            opacity: 0;
+            visibility: hidden;
+            transform: translateX(-20px);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            overflow-y: auto;
+        }
+
+        .widgets-panel.visible {
+            opacity: 1;
+            visibility: visible;
+            transform: translateX(0);
+        }
+
+        .widget {
+            margin: 15px;
+            padding: 20px;
+            border-radius: 16px;
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+        }
+
+        .widget-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .widget-title {
+            color: var(--text-primary);
+            font-size: 14px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .widget-title i {
+            color: var(--primary-accent);
+        }
+
+        /* Weather Widget */
+        .weather-widget {
+            text-align: center;
+        }
+
+        .weather-temp {
+            font-size: 48px;
+            font-weight: 300;
+            color: var(--text-primary);
+        }
+
+        .weather-condition {
+            color: var(--text-secondary);
+            font-size: 14px;
+            margin: 5px 0;
+        }
+
+        .weather-location {
+            color: var(--text-secondary);
+            font-size: 12px;
+        }
+
+        .weather-details {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid var(--glass-border);
+        }
+
+        .weather-detail {
+            text-align: center;
+        }
+
+        .weather-detail i {
+            color: var(--primary-accent);
+            font-size: 16px;
+            margin-bottom: 5px;
+        }
+
+        .weather-detail span {
+            display: block;
+            color: var(--text-secondary);
+            font-size: 11px;
+        }
+
+        .weather-detail strong {
+            color: var(--text-primary);
+            font-size: 13px;
+        }
+
+        /* Calendar Widget */
+        .calendar-widget {
+            padding: 5px;
+        }
+
+        .calendar-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            margin-bottom: 10px;
+        }
+
+        .calendar-month {
+            color: var(--text-primary);
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .calendar-nav {
+            display: flex;
+            gap: 5px;
+        }
+
+        .calendar-nav button {
+            width: 28px;
+            height: 28px;
+            border-radius: 8px;
+            border: 1px solid var(--glass-border);
+            background: var(--glass-bg);
+            color: var(--text-primary);
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .calendar-nav button:hover {
+            background: var(--glass-bg-hover);
+        }
+
+        .calendar-grid {
+            display: grid;
+            grid-template-columns: repeat(7, 1fr);
+            gap: 4px;
+        }
+
+        .calendar-day {
+            aspect-ratio: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 8px;
+            font-size: 12px;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .calendar-day:hover {
+            background: var(--glass-bg-hover);
+        }
+
+        .calendar-day.today {
+            background: linear-gradient(135deg, var(--primary-accent), var(--secondary-accent));
+            color: white;
+            font-weight: 600;
+        }
+
+        .calendar-day.other-month {
+            opacity: 0.3;
+        }
+
+        .calendar-events {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid var(--glass-border);
+        }
+
+        .event-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px;
+            border-radius: 10px;
+            margin-bottom: 8px;
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+        }
+
+        .event-color {
+            width: 4px;
+            height: 36px;
+            border-radius: 2px;
+        }
+
+        .event-color.blue { background: #00d4ff; }
+        .event-color.green { background: #2ed573; }
+        .event-color.purple { background: #7b2cbf; }
+        .event-color.orange { background: #ffa502; }
+
+        .event-info h4 {
+            color: var(--text-primary);
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        .event-info p {
+            color: var(--text-secondary);
+            font-size: 11px;
+        }
+
+        /* System Stats Widget */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+        }
+
+        .stat-item {
+            text-align: center;
+            padding: 15px;
+            border-radius: 12px;
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+        }
+
+        .stat-icon {
+            font-size: 24px;
+            margin-bottom: 8px;
+        }
+
+        .stat-icon.cpu { color: #00d4ff; }
+        .stat-icon.ram { color: #7b2cbf; }
+        .stat-icon.disk { color: #2ed573; }
+        .stat-icon.network { color: #ffa502; }
+
+        .stat-value {
+            color: var(--text-primary);
+            font-size: 20px;
+            font-weight: 600;
+        }
+
+        .stat-label {
+            color: var(--text-secondary);
+            font-size: 11px;
+            margin-top: 4px;
+        }
+
+        .stat-bar {
+            height: 4px;
+            background: var(--glass-bg);
+            border-radius: 2px;
+            margin-top: 8px;
+            overflow: hidden;
+        }
+
+        .stat-bar-fill {
+            height: 100%;
+            border-radius: 2px;
+            transition: width 0.5s ease;
+        }
+
+        .stat-bar-fill.cpu { background: linear-gradient(90deg, #00d4ff, #0099cc); }
+        .stat-bar-fill.ram { background: linear-gradient(90deg, #7b2cbf, #5a1f8f); }
+        .stat-bar-fill.disk { background: linear-gradient(90deg, #2ed573, #1e9e52); }
+        .stat-bar-fill.network { background: linear-gradient(90deg, #ffa502, #ff7f00); }
+
+        /* Settings Panel */
+        .settings-panel {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%) scale(0.9);
+            width: 800px;
+            max-height: 600px;
+            border-radius: 20px;
+            z-index: 1000;
+            opacity: 0;
+            visibility: hidden;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            display: flex;
+        }
+
+        .settings-panel.visible {
+            opacity: 1;
+            visibility: visible;
+            transform: translate(-50%, -50%) scale(1);
+        }
+
+        .settings-sidebar {
+            width: 220px;
+            padding: 20px;
+            border-right: 1px solid var(--glass-border);
+        }
+
+        .settings-nav-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 15px;
+            border-radius: 12px;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.2s ease;
+            margin-bottom: 5px;
+        }
+
+        .settings-nav-item:hover {
+            background: var(--glass-bg-hover);
+            color: var(--text-primary);
+        }
+
+        .settings-nav-item.active {
+            background: linear-gradient(135deg, rgba(0, 212, 255, 0.2), rgba(123, 44, 191, 0.2));
+            color: var(--text-primary);
+        }
+
+        .settings-nav-item i {
+            width: 20px;
+            text-align: center;
+        }
+
+        .settings-content {
+            flex: 1;
+            padding: 30px;
+            overflow-y: auto;
+        }
+
+        .settings-section {
+            display: none;
+        }
+
+        .settings-section.active {
+            display: block;
+        }
+
+        .settings-section h2 {
+            color: var(--text-primary);
+            font-size: 24px;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }
+
+        .settings-section p {
+            color: var(--text-secondary);
+            font-size: 14px;
+            margin-bottom: 25px;
+        }
+
+        .setting-group {
+            margin-bottom: 25px;
+        }
+
+        .setting-group h3 {
+            color: var(--text-primary);
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 15px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        /* Theme Options */
+        .theme-options {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+        }
+
+        .theme-option {
+            padding: 20px;
+            border-radius: 14px;
+            border: 2px solid var(--glass-border);
+            background: var(--glass-bg);
+            cursor: pointer;
+            text-align: center;
+            transition: all 0.3s ease;
+        }
+
+        .theme-option:hover {
+            transform: scale(1.05);
+        }
+
+        .theme-option.active {
+            border-color: var(--primary-accent);
+            box-shadow: 0 0 20px rgba(0, 212, 255, 0.3);
+        }
+
+        .theme-preview {
+            width: 60px;
+            height: 60px;
+            border-radius: 12px;
+            margin: 0 auto 10px;
+        }
+
+        .theme-preview.dark {
+            background: linear-gradient(135deg, #1a1a2e, #16213e);
+        }
+
+        .theme-preview.light {
+            background: linear-gradient(135deg, #f5f5f5, #e0e0e0);
+        }
+
+        .theme-preview.purple {
+            background: linear-gradient(135deg, #a855f7, #ec4899);
+        }
+
+        .theme-preview.green {
+            background: linear-gradient(135deg, #22c55e, #06b6d4);
+        }
+
+        .theme-option span {
+            color: var(--text-primary);
+            font-size: 13px;
+        }
+
+        /* Wallpaper Options */
+        .wallpaper-options {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 15px;
+        }
+
+        .wallpaper-option {
+            aspect-ratio: 16/10;
+            border-radius: 12px;
+            border: 2px solid var(--glass-border);
+            cursor: pointer;
+            overflow: hidden;
+            transition: all 0.3s ease;
+        }
+
+        .wallpaper-option:hover {
+            transform: scale(1.05);
+        }
+
+        .wallpaper-option.active {
+            border-color: var(--primary-accent);
+        }
+
+        .wallpaper-option div {
+            width: 100%;
+            height: 100%;
+        }
+
+        .wallpaper-1 { background: linear-gradient(135deg, #0a0a0f, #1a1a2e, #16213e); }
+        .wallpaper-2 { background: linear-gradient(135deg, #1e3c72, #2a5298, #7e22ce); }
+        .wallpaper-3 { background: linear-gradient(135deg, #0f2027, #203a43, #2c5364); }
+        .wallpaper-4 { background: linear-gradient(135deg, #4c1d95, #7c3aed, #a855f7); }
+        .wallpaper-5 { background: linear-gradient(135deg, #064e3b, #059669, #34d399); }
+        .wallpaper-6 { background: linear-gradient(135deg, #7c2d12, #ea580c, #fb923c); }
+
+        /* Toggle Switch */
+        .toggle-setting {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px;
+            border-radius: 12px;
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            margin-bottom: 10px;
+        }
+
+        .toggle-info {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .toggle-info i {
+            font-size: 18px;
+            color: var(--primary-accent);
+        }
+
+        .toggle-info span {
+            color: var(--text-primary);
+            font-size: 14px;
+        }
+
+        .toggle-switch {
+            width: 50px;
+            height: 28px;
+            border-radius: 14px;
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            cursor: pointer;
+            position: relative;
+            transition: all 0.3s ease;
+        }
+
+        .toggle-switch.active {
+            background: linear-gradient(135deg, var(--primary-accent), var(--secondary-accent));
+            border-color: var(--primary-accent);
+        }
+
+        .toggle-switch::after {
+            content: '';
+            position: absolute;
+            top: 3px;
+            left: 3px;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: white;
+            transition: all 0.3s ease;
+        }
+
+        .toggle-switch.active::after {
+            left: 25px;
+        }
+
+        /* Calculator App */
+        .calculator-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+            max-width: 320px;
+        }
+
+        .calc-display {
+            grid-column: span 4;
+            padding: 20px;
+            text-align: right;
+            background: var(--glass-bg);
+            border-radius: 12px;
+            border: 1px solid var(--glass-border);
+            margin-bottom: 10px;
+        }
+
+        .calc-expression {
+            color: var(--text-secondary);
+            font-size: 14px;
+            min-height: 20px;
+        }
+
+        .calc-result {
+            color: var(--text-primary);
+            font-size: 32px;
+            font-weight: 300;
+        }
+
+        .calc-btn {
+            padding: 20px;
+            border-radius: 12px;
+            border: 1px solid var(--glass-border);
+            background: var(--glass-bg);
+            color: var(--text-primary);
+            font-size: 18px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .calc-btn:hover {
+            background: var(--glass-bg-hover);
+            transform: scale(1.05);
+        }
+
+        .calc-btn.operator {
+            background: linear-gradient(135deg, rgba(0, 212, 255, 0.2), rgba(123, 44, 191, 0.2));
+            border-color: var(--primary-accent);
+        }
+
+        .calc-btn.equals {
+            background: linear-gradient(135deg, var(--primary-accent), var(--secondary-accent));
+            border: none;
+        }
+
+        .calc-btn.clear {
+            background: rgba(255, 71, 87, 0.2);
+            border-color: var(--danger);
+            color: var(--danger);
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--glass-border);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--glass-bg-hover);
+        }
+
+        /* Animations */
+        @keyframes windowOpen {
+            from {
+                opacity: 0;
+                transform: scale(0.9) translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: scale(1) translateY(0);
+            }
+        }
+
+        .window-open {
+            animation: windowOpen 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        /* Boot Screen */
+        .boot-screen {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(135deg, #0a0a0f 0%, #1a1a2e 50%, #16213e 100%);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 9999;
+            transition: opacity 0.5s ease, visibility 0.5s ease;
+        }
+
+        .boot-screen.hidden {
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+        }
+
+        .boot-logo {
+            width: 150px;
+            height: 150px;
+            background: linear-gradient(135deg, #00d4ff, #7b2cbf);
+            border-radius: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 80px;
+            font-weight: 700;
+            color: white;
+            box-shadow: 0 0 60px rgba(0, 212, 255, 0.6),
+                        0 0 100px rgba(123, 44, 191, 0.4);
+            animation: bootPulse 2s ease-in-out infinite;
+        }
+
+        @keyframes bootPulse {
+            0%, 100% { 
+                transform: scale(1);
+                box-shadow: 0 0 60px rgba(0, 212, 255, 0.6),
+                            0 0 100px rgba(123, 44, 191, 0.4);
+            }
+            50% { 
+                transform: scale(1.05);
+                box-shadow: 0 0 80px rgba(0, 212, 255, 0.8),
+                            0 0 120px rgba(123, 44, 191, 0.6);
+            }
+        }
+
+        .boot-text {
+            margin-top: 30px;
+            font-size: 32px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #00d4ff, #7b2cbf);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            letter-spacing: 4px;
+            animation: bootFadeIn 1s ease-out 0.3s both;
+        }
+
+        .boot-subtitle {
+            margin-top: 10px;
+            font-size: 14px;
+            color: var(--text-secondary);
+            letter-spacing: 2px;
+            animation: bootFadeIn 1s ease-out 0.5s both;
+        }
+
+        @keyframes bootFadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .boot-progress {
+            margin-top: 50px;
+            width: 300px;
+            height: 4px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 2px;
+            overflow: hidden;
+            animation: bootFadeIn 1s ease-out 0.7s both;
+        }
+
+        .boot-progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #00d4ff, #7b2cbf);
+            border-radius: 2px;
+            animation: bootProgress 3s ease-out forwards;
+            box-shadow: 0 0 20px rgba(0, 212, 255, 0.5);
+        }
+
+        @keyframes bootProgress {
+            from { width: 0; }
+            to { width: 100%; }
+        }
+
+        .boot-messages {
+            margin-top: 30px;
+            font-family: 'Consolas', monospace;
+            font-size: 12px;
+            color: var(--text-secondary);
+            text-align: center;
+            line-height: 1.8;
+            animation: bootFadeIn 1s ease-out 0.9s both;
+        }
+
+        .boot-message {
+            opacity: 0;
+            animation: bootMessageFade 0.5s ease-out forwards;
+        }
+
+        .boot-message:nth-child(1) { animation-delay: 1s; }
+        .boot-message:nth-child(2) { animation-delay: 1.3s; }
+        .boot-message:nth-child(3) { animation-delay: 1.6s; }
+        .boot-message:nth-child(4) { animation-delay: 1.9s; }
+        .boot-message:nth-child(5) { animation-delay: 2.2s; }
+
+        @keyframes bootMessageFade {
+            from { opacity: 0; transform: translateX(-10px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        /* Demo Info */
+        .demo-info {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            padding: 15px 20px;
+            border-radius: 14px;
+            z-index: 1001;
+            max-width: 320px;
+        }
+
+        .demo-info h3 {
+            color: var(--text-primary);
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .demo-info p {
+            color: var(--text-secondary);
+            font-size: 11px;
+            line-height: 1.6;
+        }
+
+        .demo-info code {
+            background: rgba(0, 212, 255, 0.2);
+            padding: 2px 6px;
+            border-radius: 4px;
+            color: var(--primary-accent);
+        }
+
+        .demo-info .feature-list {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid var(--glass-border);
+        }
+
+        .demo-info .feature-list span {
+            display: inline-block;
+            background: var(--glass-bg-hover);
+            padding: 4px 8px;
+            border-radius: 6px;
+            font-size: 10px;
+            margin: 3px;
+            color: var(--primary-accent);
+        }
+    </style>
+</head>
+<body>
+    <!-- Boot Screen -->
+    <div class="boot-screen" id="bootScreen">
+        <div class="boot-logo">N</div>
+        <div class="boot-text">NGOS</div>
+        <div class="boot-subtitle">COMPLETE NEXT GEN DESKTOP UI</div>
+        <div class="boot-progress">
+            <div class="boot-progress-bar"></div>
+        </div>
+        <div class="boot-messages">
+            <div class="boot-message">✓ Loading kernel core...</div>
+            <div class="boot-message">✓ Initializing graphics subsystem...</div>
+            <div class="boot-message">✓ Mounting file system...</div>
+            <div class="boot-message">✓ Starting user interface...</div>
+            <div class="boot-message">✓ Welcome to NGOS</div>
+        </div>
+    </div>
+
+    <!-- Demo Info -->
+    <div class="demo-info glass-panel">
+        <h3> NGOS - Complete</h3>
+        <p>
+            <strong>Click</strong> Start pentru Start Menu<br>
+            <strong>Click</strong>  Notifications + Control Center<br>
+            <strong>Click</strong>  Widgets (stânga)<br>
+            <strong>Click dreapta</strong> desktop - Context Menu<br>
+            <strong>Drag</strong> fereaastră de header<br>
+            <strong>Maximize</strong> + drag - Snap Layouts
+        </p>
+        <div class="feature-list">
+            <span> 4 Teme</span>
+            <span> Calculator</span>
+            <span> Calendar</span>
+            <span>️ Weather</span>
+            <span> System Stats</span>
+            <span> Snap Layouts</span>
+            <span>⚙️ Settings Panel</span>
+        </div>
+    </div>
+
+    <!-- Desktop Background -->
+    <div class="desktop-background" id="desktopBackground">
+        <div class="gradient-orb gradient-orb-1"></div>
+        <div class="gradient-orb gradient-orb-2"></div>
+        <div class="gradient-orb gradient-orb-3"></div>
+        <div class="gradient-orb gradient-orb-4"></div>
+        <div class="noise-overlay"></div>
+    </div>
+
+    <!-- Desktop Area -->
+    <div class="desktop-area" id="desktopArea">
+        <div class="desktop-icons">
+            <div class="desktop-icon" onclick="openWindow('explorer')">
+                <div class="icon-wrapper"><i class="fas fa-folder icon"></i></div>
+                <span class="icon-label">File Explorer</span>
+            </div>
+            <div class="desktop-icon" onclick="openWindow('browser')">
+                <div class="icon-wrapper"><i class="fas fa-globe icon"></i></div>
+                <span class="icon-label">Browser</span>
+            </div>
+            <div class="desktop-icon" onclick="openWindow('calculator')">
+                <div class="icon-wrapper"><i class="fas fa-calculator icon"></i></div>
+                <span class="icon-label">Calculator</span>
+            </div>
+            <div class="desktop-icon" onclick="openWindow('settings')">
+                <div class="icon-wrapper"><i class="fas fa-cog icon"></i></div>
+                <span class="icon-label">Settings</span>
+            </div>
+            <div class="desktop-icon" onclick="openWindow('terminal')">
+                <div class="icon-wrapper"><i class="fas fa-terminal icon"></i></div>
+                <span class="icon-label">Terminal</span>
+            </div>
+            <div class="desktop-icon" onclick="openWindow('media')">
+                <div class="icon-wrapper"><i class="fas fa-music icon"></i></div>
+                <span class="icon-label">Media Player</span>
+            </div>
+        </div>
+
+        <!-- Windows Container -->
+        <div class="windows-container" id="windowsContainer"></div>
+    </div>
+
+    <!-- Start Menu -->
+    <div class="start-menu glass-panel" id="startMenu">
+        <div class="start-menu-content">
+            <div class="user-profile">
+                <div class="avatar glass-panel"><i class="fas fa-user"></i></div>
+                <div class="user-info">
+                    <h3 class="username">User</h3>
+                    <p class="email">user@ngos.local</p>
+                </div>
+            </div>
+            <div class="search-box">
+                <i class="fas fa-search search-icon"></i>
+                <input type="text" placeholder="Search apps, files, settings...">
+            </div>
+            <h4 class="section-title">Pinned</h4>
+            <div class="pinned-grid">
+                <div class="pinned-app" onclick="openWindow('explorer')">
+                    <div class="app-icon glass-panel"><i class="fas fa-folder"></i></div><span>Explorer</span>
+                </div>
+                <div class="pinned-app" onclick="openWindow('browser')">
+                    <div class="app-icon glass-panel"><i class="fas fa-globe"></i></div><span>Browser</span>
+                </div>
+                <div class="pinned-app" onclick="openWindow('calculator')">
+                    <div class="app-icon glass-panel"><i class="fas fa-calculator"></i></div><span>Calculator</span>
+                </div>
+                <div class="pinned-app" onclick="openWindow('settings')">
+                    <div class="app-icon glass-panel"><i class="fas fa-cog"></i></div><span>Settings</span>
+                </div>
+                <div class="pinned-app" onclick="openWindow('terminal')">
+                    <div class="app-icon glass-panel"><i class="fas fa-terminal"></i></div><span>Terminal</span>
+                </div>
+                <div class="pinned-app" onclick="openWindow('media')">
+                    <div class="app-icon glass-panel"><i class="fas fa-music"></i></div><span>Media</span>
+                </div>
+                <div class="pinned-app" onclick="toggleWidgets()">
+                    <div class="app-icon glass-panel"><i class="fas fa-chart-line"></i></div><span>Widgets</span>
+                </div>
+                <div class="pinned-app">
+                    <div class="app-icon glass-panel"><i class="fas fa-store"></i></div><span>Store</span>
+                </div>
+            </div>
+            <h4 class="section-title">Recent</h4>
+            <div class="recent-list">
+                <div class="recent-item">
+                    <i class="fas fa-file-word file-icon"></i>
+                    <div class="file-info">
+                        <span class="file-name">Project Proposal.docx</span>
+                        <span class="file-time">2 hours ago</span>
+                    </div>
+                </div>
+                <div class="recent-item">
+                    <i class="fas fa-file-excel file-icon"></i>
+                    <div class="file-info">
+                        <span class="file-name">Budget 2026.xlsx</span>
+                        <span class="file-time">Yesterday</span>
+                    </div>
+                </div>
+                <div class="recent-item">
+                    <i class="fas fa-file-image file-icon"></i>
+                    <div class="file-info">
+                        <span class="file-name">Design Mockup.png</span>
+                        <span class="file-time">3 days ago</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="start-menu-footer glass-panel-top">
+            <button class="settings-btn" onclick="openSettings()">
+                <i class="fas fa-cog"></i>
+            </button>
+            <button class="power-btn">
+                <i class="fas fa-power-off"></i>
+            </button>
+        </div>
+    </div>
+
+    <!-- Taskbar -->
+    <div class="taskbar glass-panel">
+        <button class="start-btn" id="startBtn">
+            <div class="ngos-logo">
+                <div class="ngos-logo-icon">N</div>
+                <span class="ngos-logo-text">NGOS</span>
+            </div>
+        </button>
+        <div class="taskbar-apps">
+            <div class="taskbar-app pinned" onclick="openWindow('explorer')" title="File Explorer"><i class="fas fa-folder"></i></div>
+            <div class="taskbar-app pinned" onclick="openWindow('browser')" title="Browser"><i class="fas fa-globe"></i></div>
+            <div class="taskbar-app pinned" onclick="openWindow('calculator')" title="Calculator"><i class="fas fa-calculator"></i></div>
+            <div class="taskbar-app pinned" onclick="openWindow('terminal')" title="Terminal"><i class="fas fa-terminal"></i></div>
+            <div class="taskbar-app pinned" onclick="openWindow('media')" title="Media Player"><i class="fas fa-music"></i></div>
+        </div>
+        <div class="system-tray">
+            <button class="tray-btn" onclick="toggleWidgets()" title="Widgets">
+                <i class="fas fa-chart-line"></i>
+            </button>
+            <div class="quick-actions">
+                <button class="tray-btn" title="WiFi"><i class="fas fa-wifi"></i></button>
+                <button class="tray-btn" title="Bluetooth"><i class="fas fa-bluetooth-b"></i></button>
+                <button class="tray-btn" title="Volume"><i class="fas fa-volume-high"></i></button>
+            </div>
+            <div class="clock-section" id="clockSection">
+                <div class="time" id="currentTime">12:00 PM</div>
+                <div class="date" id="currentDate">3/31/2026</div>
+            </div>
+            <button class="tray-btn notification-btn" id="notificationBtn">
+                <i class="fas fa-bell"></i>
+                <span class="notification-badge">3</span>
+            </button>
+        </div>
+    </div>
+
+    <!-- Notification Center -->
+    <div class="notification-center glass-panel" id="notificationCenter">
+        <div class="notification-header">
+            <h3>Notifications</h3>
+            <button class="clear-all" id="clearAllBtn">Clear All</button>
+        </div>
+        <div class="notifications-list">
+            <div class="notification-item">
+                <div class="notification-icon update"><i class="fas fa-download"></i></div>
+                <div class="notification-content">
+                    <h4>System Update Available</h4>
+                    <p>NGOS v0.1.0 is ready to install</p>
+                    <span class="notification-time">5 min ago</span>
+                </div>
+            </div>
+            <div class="notification-item">
+                <div class="notification-icon message"><i class="fas fa-envelope"></i></div>
+                <div class="notification-content">
+                    <h4>New Message</h4>
+                    <p>John sent you a file: Report.pdf</p>
+                    <span class="notification-time">1 hour ago</span>
+                </div>
+            </div>
+            <div class="notification-item">
+                <div class="notification-icon security"><i class="fas fa-shield"></i></div>
+                <div class="notification-content">
+                    <h4>Security Scan Complete</h4>
+                    <p>No threats detected. System is secure.</p>
+                    <span class="notification-time">3 hours ago</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Control Center -->
+    <div class="control-center glass-panel" id="controlCenter">
+        <div class="control-header"><h3>Quick Settings</h3></div>
+        <div class="quick-settings-grid">
+            <button class="quick-setting-btn active"><i class="fas fa-wifi"></i><span>WiFi</span></button>
+            <button class="quick-setting-btn active"><i class="fas fa-bluetooth-b"></i><span>Bluetooth</span></button>
+            <button class="quick-setting-btn" id="darkModeToggle"><i class="fas fa-moon"></i><span>Dark Mode</span></button>
+            <button class="quick-setting-btn active"><i class="fas fa-location-arrow"></i><span>Location</span></button>
+            <button class="quick-setting-btn"><i class="fas fa-plane"></i><span>Airplane</span></button>
+            <button class="quick-setting-btn"><i class="fas fa-wifi"></i><span>Hotspot</span></button>
+        </div>
+        <div class="sliders-section">
+            <div class="slider-item">
+                <div class="slider-header"><i class="fas fa-sun"></i><span>Brightness</span><span class="slider-value">75%</span></div>
+                <input type="range" class="glass-slider" min="0" max="100" value="75">
+            </div>
+            <div class="slider-item">
+                <div class="slider-header"><i class="fas fa-volume-high"></i><span>Volume</span><span class="slider-value">50%</span></div>
+                <input type="range" class="glass-slider" min="0" max="100" value="50">
+            </div>
+        </div>
+        <div class="media-widget">
+            <div class="album-art"><i class="fas fa-music"></i></div>
+            <div class="track-info"><h4>Midnight Dreams</h4><p>Electronic Vibes</p></div>
+            <div class="media-controls">
+                <button class="media-btn"><i class="fas fa-step-backward"></i></button>
+                <button class="media-btn play"><i class="fas fa-play"></i></button>
+                <button class="media-btn"><i class="fas fa-step-forward"></i></button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Widgets Panel -->
+    <div class="widgets-panel glass-panel" id="widgetsPanel">
+        <!-- Weather Widget -->
+        <div class="widget weather-widget">
+            <div class="widget-header">
+                <div class="widget-title"><i class="fas fa-cloud-sun"></i> Weather</div>
+            </div>
+            <div class="weather-temp">22°</div>
+            <div class="weather-condition">Partly Cloudy</div>
+            <div class="weather-location">Bucharest, Romania</div>
+            <div class="weather-details">
+                <div class="weather-detail">
+                    <i class="fas fa-wind"></i>
+                    <span>Wind</span>
+                    <strong>12 km/h</strong>
+                </div>
+                <div class="weather-detail">
+                    <i class="fas fa-tint"></i>
+                    <span>Humidity</span>
+                    <strong>65%</strong>
+                </div>
+                <div class="weather-detail">
+                    <i class="fas fa-compress-arrows-alt"></i>
+                    <span>Pressure</span>
+                    <strong>1015 hPa</strong>
+                </div>
+            </div>
+        </div>
+
+        <!-- Calendar Widget -->
+        <div class="widget calendar-widget">
+            <div class="widget-header">
+                <div class="widget-title"><i class="fas fa-calendar"></i> Calendar</div>
+            </div>
+            <div class="calendar-header">
+                <div class="calendar-month" id="calendarMonth">March 2026</div>
+                <div class="calendar-nav">
+                    <button onclick="prevMonth()"><i class="fas fa-chevron-left"></i></button>
+                    <button onclick="nextMonth()"><i class="fas fa-chevron-right"></i></button>
+                </div>
+            </div>
+            <div class="calendar-grid" id="calendarGrid"></div>
+            <div class="calendar-events">
+                <div class="event-item">
+                    <div class="event-color blue"></div>
+                    <div class="event-info"><h4>Team Meeting</h4><p>10:00 AM - 11:00 AM</p></div>
+                </div>
+                <div class="event-item">
+                    <div class="event-color green"></div>
+                    <div class="event-info"><h4>Lunch with Client</h4><p>1:00 PM - 2:30 PM</p></div>
+                </div>
+                <div class="event-item">
+                    <div class="event-color purple"></div>
+                    <div class="event-info"><h4>Project Review</h4><p>4:00 PM - 5:00 PM</p></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- System Stats Widget -->
+        <div class="widget">
+            <div class="widget-header">
+                <div class="widget-title"><i class="fas fa-microchip"></i> System Stats</div>
+            </div>
+            <div class="stats-grid">
+                <div class="stat-item">
+                    <div class="stat-icon cpu"><i class="fas fa-microchip"></i></div>
+                    <div class="stat-value" id="cpuValue">32%</div>
+                    <div class="stat-label">CPU Usage</div>
+                    <div class="stat-bar"><div class="stat-bar-fill cpu" id="cpuBar" style="width: 32%"></div></div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-icon ram"><i class="fas fa-memory"></i></div>
+                    <div class="stat-value" id="ramValue">58%</div>
+                    <div class="stat-label">RAM Usage</div>
+                    <div class="stat-bar"><div class="stat-bar-fill ram" id="ramBar" style="width: 58%"></div></div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-icon disk"><i class="fas fa-hdd"></i></div>
+                    <div class="stat-value" id="diskValue">45%</div>
+                    <div class="stat-label">Disk Usage</div>
+                    <div class="stat-bar"><div class="stat-bar-fill disk" id="diskBar" style="width: 45%"></div></div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-icon network"><i class="fas fa-network-wired"></i></div>
+                    <div class="stat-value" id="networkValue">12%</div>
+                    <div class="stat-label">Network</div>
+                    <div class="stat-bar"><div class="stat-bar-fill network" id="networkBar" style="width: 12%"></div></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Context Menu -->
+    <div class="context-menu glass-panel" id="contextMenu">
+        <div class="context-item"><i class="fas fa-eye"></i><span>View</span></div>
+        <div class="context-item"><i class="fas fa-sort"></i><span>Sort by</span></div>
+        <div class="context-item"><i class="fas fa-sync"></i><span>Refresh</span></div>
+        <div class="context-divider"></div>
+        <div class="context-item"><i class="fas fa-plus"></i><span>New</span><i class="fas fa-chevron-right submenu-arrow"></i></div>
+        <div class="context-item" onclick="toggleWidgets()"><i class="fas fa-chart-line"></i><span>Widgets</span></div>
+        <div class="context-item" onclick="openSettings()"><i class="fas fa-desktop"></i><span>Display Settings</span></div>
+        <div class="context-item" onclick="openSettings()"><i class="fas fa-palette"></i><span>Personalize</span></div>
+    </div>
+
+    <!-- Snap Overlay -->
+    <div class="snap-overlay glass-panel" id="snapOverlay">
+        <div class="snap-option half" onclick="snapWindow('half')">
+            <div></div><div></div>
+        </div>
+        <div class="snap-option thirds" onclick="snapWindow('thirds')">
+            <div></div><div></div><div></div>
+        </div>
+        <div class="snap-option quarter" onclick="snapWindow('quarter')">
+            <div></div><div></div><div></div><div></div>
+        </div>
+    </div>
+
+    <!-- Settings Panel -->
+    <div class="settings-panel glass-panel" id="settingsPanel">
+        <div class="settings-sidebar">
+            <div class="settings-nav-item active" onclick="showSettingsSection('themes')">
+                <i class="fas fa-palette"></i><span>Themes</span>
+            </div>
+            <div class="settings-nav-item" onclick="showSettingsSection('wallpaper')">
+                <i class="fas fa-image"></i><span>Wallpaper</span>
+            </div>
+            <div class="settings-nav-item" onclick="showSettingsSection('display')">
+                <i class="fas fa-desktop"></i><span>Display</span>
+            </div>
+            <div class="settings-nav-item" onclick="showSettingsSection('system')">
+                <i class="fas fa-cog"></i><span>System</span>
+            </div>
+        </div>
+        <div class="settings-content">
+            <!-- Themes Section -->
+            <div class="settings-section active" id="themesSection">
+                <h2>Choose Your Theme</h2>
+                <p>Customize the appearance of your desktop</p>
+                <div class="setting-group">
+                    <h3>Color Theme</h3>
+                    <div class="theme-options">
+                        <div class="theme-option active" onclick="setTheme('dark', this)">
+                            <div class="theme-preview dark"></div>
+                            <span>Dark</span>
+                        </div>
+                        <div class="theme-option" onclick="setTheme('light', this)">
+                            <div class="theme-preview light"></div>
+                            <span>Light</span>
+                        </div>
+                        <div class="theme-option" onclick="setTheme('purple', this)">
+                            <div class="theme-preview purple"></div>
+                            <span>Purple</span>
+                        </div>
+                        <div class="theme-option" onclick="setTheme('green', this)">
+                            <div class="theme-preview green"></div>
+                            <span>Green</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Wallpaper Section -->
+            <div class="settings-section" id="wallpaperSection">
+                <h2>Choose Your Wallpaper</h2>
+                <p>Select a background for your desktop</p>
+                <div class="setting-group">
+                    <h3>Background</h3>
+                    <div class="wallpaper-options">
+                        <div class="wallpaper-option active" onclick="setWallpaper('wallpaper-1', this)"><div class="wallpaper-1"></div></div>
+                        <div class="wallpaper-option" onclick="setWallpaper('wallpaper-2', this)"><div class="wallpaper-2"></div></div>
+                        <div class="wallpaper-option" onclick="setWallpaper('wallpaper-3', this)"><div class="wallpaper-3"></div></div>
+                        <div class="wallpaper-option" onclick="setWallpaper('wallpaper-4', this)"><div class="wallpaper-4"></div></div>
+                        <div class="wallpaper-option" onclick="setWallpaper('wallpaper-5', this)"><div class="wallpaper-5"></div></div>
+                        <div class="wallpaper-option" onclick="setWallpaper('wallpaper-6', this)"><div class="wallpaper-6"></div></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Display Section -->
+            <div class="settings-section" id="displaySection">
+                <h2>Display Settings</h2>
+                <p>Adjust your display preferences</p>
+                <div class="setting-group">
+                    <h3>Options</h3>
+                    <div class="toggle-setting">
+                        <div class="toggle-info"><i class="fas fa-moon"></i><span>Dark Mode</span></div>
+                        <div class="toggle-switch active" onclick="this.classList.toggle('active')"></div>
+                    </div>
+                    <div class="toggle-setting">
+                        <div class="toggle-info"><i class="fas fa-expand"></i><span>Full Screen</span></div>
+                        <div class="toggle-switch" onclick="this.classList.toggle('active')"></div>
+                    </div>
+                    <div class="toggle-setting">
+                        <div class="toggle-info"><i class="fas fa-eye"></i><span>Night Light</span></div>
+                        <div class="toggle-switch" onclick="this.classList.toggle('active')"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- System Section -->
+            <div class="settings-section" id="systemSection">
+                <h2>System Settings</h2>
+                <p>Manage system preferences</p>
+                <div class="setting-group">
+                    <h3>General</h3>
+                    <div class="toggle-setting">
+                        <div class="toggle-info"><i class="fas fa-bell"></i><span>Notifications</span></div>
+                        <div class="toggle-switch active" onclick="this.classList.toggle('active')"></div>
+                    </div>
+                    <div class="toggle-setting">
+                        <div class="toggle-info"><i class="fas fa-shield"></i><span>Security Scan</span></div>
+                        <div class="toggle-switch active" onclick="this.classList.toggle('active')"></div>
+                    </div>
+                    <div class="toggle-setting">
+                        <div class="toggle-info"><i class="fas fa-sync"></i><span>Auto Update</span></div>
+                        <div class="toggle-switch active" onclick="this.classList.toggle('active')"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Boot Screen
+        window.addEventListener('load', () => {
+            setTimeout(() => {
+                const bootScreen = document.getElementById('bootScreen');
+                bootScreen.classList.add('hidden');
+                setTimeout(() => {
+                    bootScreen.style.display = 'none';
+                }, 500);
+            }, 3500);
+        });
+
+        // Clock
+        function updateClock() {
+            const now = new Date();
+            document.getElementById('currentTime').textContent = now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+            document.getElementById('currentDate').textContent = `${now.getMonth() + 1}/${now.getDate()}/${now.getFullYear()}`;
+        }
+        updateClock();
+        setInterval(updateClock, 1000);
+
+        // Panel Toggles
+        const startBtn = document.getElementById('startBtn');
+        const startMenu = document.getElementById('startMenu');
+        const notificationBtn = document.getElementById('notificationBtn');
+        const notificationCenter = document.getElementById('notificationCenter');
+        const controlCenter = document.getElementById('controlCenter');
+        const contextMenu = document.getElementById('contextMenu');
+        const widgetsPanel = document.getElementById('widgetsPanel');
+
+        startBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            startMenu.classList.toggle('visible');
+            closeOtherPanels();
+        });
+
+        notificationBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            notificationCenter.classList.toggle('visible');
+            controlCenter.classList.toggle('visible');
+            startMenu.classList.remove('visible');
+            contextMenu.classList.remove('visible');
+            widgetsPanel.classList.remove('visible');
+        });
+
+        function toggleWidgets() {
+            widgetsPanel.classList.toggle('visible');
+            startMenu.classList.remove('visible');
+            notificationCenter.classList.remove('visible');
+            controlCenter.classList.remove('visible');
+            contextMenu.classList.remove('visible');
+        }
+
+        function closeOtherPanels() {
+            notificationCenter.classList.remove('visible');
+            controlCenter.classList.remove('visible');
+            contextMenu.classList.remove('visible');
+            widgetsPanel.classList.remove('visible');
+        }
+
+        document.addEventListener('click', (e) => {
+            if (!startMenu.contains(e.target) && e.target !== startBtn) startMenu.classList.remove('visible');
+            if (!notificationCenter.contains(e.target) && !controlCenter.contains(e.target) && e.target !== notificationBtn) {
+                notificationCenter.classList.remove('visible');
+                controlCenter.classList.remove('visible');
+            }
+            if (!widgetsPanel.contains(e.target)) widgetsPanel.classList.remove('visible');
+            contextMenu.classList.remove('visible');
+        });
+
+        // Context Menu
+        document.getElementById('desktopArea').addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            contextMenu.style.left = e.clientX + 'px';
+            contextMenu.style.top = e.clientY + 'px';
+            contextMenu.classList.add('visible');
+            closeOtherPanels();
+        });
+
+        // Window Management
+        let activeWindow = null;
+        let windowZIndex = 100;
+        let snapTargetWindow = null;
+
+        const windowTemplates = {
+            explorer: {
+                title: 'File Explorer',
+                icon: 'fa-folder',
+                content: `
+                    <div style="display: flex; gap: 20px; height: 100%;">
+                        <div style="width: 180px; padding-right: 20px; border-right: 1px solid var(--glass-border);">
+                            <div style="padding: 10px; border-radius: 8px; margin-bottom: 5px; background: var(--glass-bg-hover);"><i class="fas fa-home" style="margin-right: 8px;"></i> Home</div>
+                            <div style="padding: 10px; border-radius: 8px; margin-bottom: 5px;"><i class="fas fa-desktop" style="margin-right: 8px;"></i> Desktop</div>
+                            <div style="padding: 10px; border-radius: 8px; margin-bottom: 5px;"><i class="fas fa-download" style="margin-right: 8px;"></i> Downloads</div>
+                            <div style="padding: 10px; border-radius: 8px; margin-bottom: 5px;"><i class="fas fa-file" style="margin-right: 8px;"></i> Documents</div>
+                            <div style="padding: 10px; border-radius: 8px; margin-bottom: 5px;"><i class="fas fa-image" style="margin-right: 8px;"></i> Pictures</div>
+                        </div>
+                        <div style="flex: 1;">
+                            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px;">
+                                <div style="text-align: center; padding: 20px; border-radius: 12px; background: var(--glass-bg); border: 1px solid var(--glass-border);"><i class="fas fa-folder" style="font-size: 48px; color: #ffd700; margin-bottom: 10px;"></i><div style="font-size: 13px; margin-top: 8px;">Projects</div></div>
+                                <div style="text-align: center; padding: 20px; border-radius: 12px; background: var(--glass-bg); border: 1px solid var(--glass-border);"><i class="fas fa-folder" style="font-size: 48px; color: #ffd700; margin-bottom: 10px;"></i><div style="font-size: 13px; margin-top: 8px;">Work</div></div>
+                                <div style="text-align: center; padding: 20px; border-radius: 12px; background: var(--glass-bg); border: 1px solid var(--glass-border);"><i class="fas fa-file-word" style="font-size: 48px; color: #4a90d9; margin-bottom: 10px;"></i><div style="font-size: 13px; margin-top: 8px;">Report.docx</div></div>
+                                <div style="text-align: center; padding: 20px; border-radius: 12px; background: var(--glass-bg); border: 1px solid var(--glass-border);"><i class="fas fa-file-excel" style="font-size: 48px; color: #28a745; margin-bottom: 10px;"></i><div style="font-size: 13px; margin-top: 8px;">Budget.xlsx</div></div>
+                                <div style="text-align: center; padding: 20px; border-radius: 12px; background: var(--glass-bg); border: 1px solid var(--glass-border);"><i class="fas fa-file-pdf" style="font-size: 48px; color: #dc3545; margin-bottom: 10px;"></i><div style="font-size: 13px; margin-top: 8px;">Invoice.pdf</div></div>
+                                <div style="text-align: center; padding: 20px; border-radius: 12px; background: var(--glass-bg); border: 1px solid var(--glass-border);"><i class="fas fa-file-image" style="font-size: 48px; color: #fd7e14; margin-bottom: 10px;"></i><div style="font-size: 13px; margin-top: 8px;">Photo.png</div></div>
+                            </div>
+                        </div>
+                    </div>`
+            },
+            browser: {
+                title: 'Browser',
+                icon: 'fa-globe',
+                content: `
+                    <div style="display: flex; flex-direction: column; height: 100%;">
+                        <div style="display: flex; gap: 10px; padding: 10px; background: var(--glass-bg); border-radius: 10px; margin-bottom: 15px;">
+                            <button style="width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--glass-border); background: var(--glass-bg); color: var(--text-primary); cursor: pointer;"><i class="fas fa-arrow-left"></i></button>
+                            <button style="width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--glass-border); background: var(--glass-bg); color: var(--text-primary); cursor: pointer;"><i class="fas fa-arrow-right"></i></button>
+                            <button style="width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--glass-border); background: var(--glass-bg); color: var(--text-primary); cursor: pointer;"><i class="fas fa-sync"></i></button>
+            <input type="text" value="https://ngos.local" style="flex: 1; padding: 8px 15px; border-radius: 8px; border: 1px solid var(--glass-border); background: var(--glass-bg); color: var(--text-primary); outline: none;">
+                        </div>
+                        <div style="flex: 1; display: flex; align-items: center; justify-content: center; color: var(--text-secondary);">
+                            <div style="text-align: center;">
+                                <i class="fas fa-globe" style="font-size: 64px; margin-bottom: 20px; opacity: 0.5;"></i>
+                                <p style="font-size: 18px;">Welcome to NGOS Browser</p>
+                            </div>
+                        </div>
+                    </div>`
+            },
+            calculator: {
+                title: 'Calculator',
+                icon: 'fa-calculator',
+                content: `
+                    <div style="display: flex; justify-content: center; padding: 20px;">
+                        <div class="calculator-grid">
+                            <div class="calc-display">
+                                <div class="calc-expression" id="calcExpression"></div>
+                                <div class="calc-result" id="calcResult">0</div>
+                            </div>
+                            <button class="calc-btn clear" onclick="calcClear()">C</button>
+                            <button class="calc-btn" onclick="calcInput('(')">(</button>
+                            <button class="calc-btn" onclick="calcInput(')')">)</button>
+                            <button class="calc-btn operator" onclick="calcInput('/')">÷</button>
+                            <button class="calc-btn" onclick="calcInput('7')">7</button>
+                            <button class="calc-btn" onclick="calcInput('8')">8</button>
+                            <button class="calc-btn" onclick="calcInput('9')">9</button>
+                            <button class="calc-btn operator" onclick="calcInput('*')">×</button>
+                            <button class="calc-btn" onclick="calcInput('4')">4</button>
+                            <button class="calc-btn" onclick="calcInput('5')">5</button>
+                            <button class="calc-btn" onclick="calcInput('6')">6</button>
+                            <button class="calc-btn operator" onclick="calcInput('-')">−</button>
+                            <button class="calc-btn" onclick="calcInput('1')">1</button>
+                            <button class="calc-btn" onclick="calcInput('2')">2</button>
+                            <button class="calc-btn" onclick="calcInput('3')">3</button>
+                            <button class="calc-btn operator" onclick="calcInput('+')">+</button>
+                            <button class="calc-btn" onclick="calcInput('0')" style="grid-column: span 2;">0</button>
+                            <button class="calc-btn" onclick="calcInput('.')">.</button>
+                            <button class="calc-btn equals" onclick="calcEquals()">=</button>
+                        </div>
+                    </div>`
+            },
+            settings: {
+                title: 'Settings',
+                icon: 'fa-cog',
+                content: `<div style="display: flex; justify-content: center; align-items: center; height: 100%; color: var(--text-secondary);"><p>Open Settings Panel for full experience</p></div>`
+            },
+            terminal: {
+                title: 'Terminal',
+                icon: 'fa-terminal',
+                content: `
+                    <div style="font-family: 'Consolas', monospace; font-size: 13px; padding: 10px;">
+                        <div style="color: var(--text-secondary); margin-bottom: 10px;">NGOS Terminal v0.1.0</div>
+                        <div style="color: var(--success);">user@ngos:~$ <span style="color: var(--text-primary);">ngos-info</span></div>
+                        <div style="margin-top: 15px; display: flex; gap: 20px; align-items: center;">
+                            <div style="text-align: center;">
+                                <div style="
+                                    width: 80px;
+                                    height: 80px;
+                                    background: linear-gradient(135deg, #00d4ff, #7b2cbf);
+                                    border-radius: 16px;
+                                    display: flex;
+                                    align-items: center;
+                                    justify-content: center;
+                                    font-size: 48px;
+                                    font-weight: 700;
+                                    color: white;
+                                    box-shadow: 0 0 30px rgba(0, 212, 255, 0.5);
+                                    margin: 0 auto 10px;
+                                ">N</div>
+                                <div style="
+                                    font-size: 20px;
+                                    font-weight: 700;
+                                    background: linear-gradient(135deg, #00d4ff, #7b2cbf);
+                                    -webkit-background-clip: text;
+                                    -webkit-text-fill-color: transparent;
+                                    background-clip: text;
+                                    letter-spacing: 3px;
+                                ">NGOS</div>
+                                <div style="
+                                    font-size: 10px;
+                                    color: var(--text-secondary);
+                                    margin-top: 5px;
+                                    letter-spacing: 1px;
+                                ">NEXT GEN OS</div>
+                            </div>
+                            <div style="color: var(--text-secondary); line-height: 1.8;">
+                                <span style="color: var(--primary-accent);">OS</span>: NGOS v0.1.0<br>
+                                <span style="color: var(--primary-accent);">Kernel</span>: ngos-kernel-core<br>
+                                <span style="color: var(--primary-accent);">CPU</span>: Virtual CPU @ 3.5GHz<br>
+                                <span style="color: var(--primary-accent);">Memory</span>: 8192 MB / 16384 MB<br>
+                                <span style="color: var(--primary-accent);">Theme</span>: NGOS Glassmorphism
+                            </div>
+                        </div>
+                        <div style="color: var(--success); margin-top: 15px;">user@ngos:~$ <span style="color: var(--text-primary);">|</span></div>
+                    </div>`
+            },
+            media: {
+                title: 'Media Player',
+                icon: 'fa-music',
+                content: `
+                    <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; gap: 20px;">
+                        <div style="width: 200px; height: 200px; border-radius: 16px; background: linear-gradient(135deg, var(--primary-accent), var(--secondary-accent)); display: flex; align-items: center; justify-content: center; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);">
+                            <i class="fas fa-music" style="font-size: 80px; color: white;"></i>
+                        </div>
+                        <div style="text-align: center;">
+                            <h3 style="color: var(--text-primary); font-size: 20px; margin-bottom: 5px;">Midnight Dreams</h3>
+                            <p style="color: var(--text-secondary); font-size: 14px;">Electronic Vibes</p>
+                        </div>
+                        <div style="display: flex; gap: 15px; align-items: center;">
+                            <button class="media-btn" style="width: 44px; height: 44px;"><i class="fas fa-step-backward"></i></button>
+                            <button class="media-btn play" style="width: 54px; height: 54px; border-radius: 50%;"><i class="fas fa-play"></i></button>
+                            <button class="media-btn" style="width: 44px; height: 44px;"><i class="fas fa-step-forward"></i></button>
+                        </div>
+                        <div style="width: 80%; display: flex; align-items: center; gap: 10px;">
+                            <span style="color: var(--text-secondary); font-size: 11px;">1:23</span>
+                            <div style="flex: 1; height: 4px; background: var(--glass-bg); border-radius: 2px;">
+                                <div style="width: 35%; height: 100%; background: linear-gradient(90deg, var(--primary-accent), var(--secondary-accent)); border-radius: 2px;"></div>
+                            </div>
+                            <span style="color: var(--text-secondary); font-size: 11px;">3:45</span>
+                        </div>
+                    </div>`
+            }
+        };
+
+        function openWindow(appType) {
+            const template = windowTemplates[appType];
+            if (!template) return;
+
+            const windowId = 'window-' + Date.now();
+            const windowEl = document.createElement('div');
+            windowEl.className = 'window glass-panel window-open';
+            windowEl.id = windowId;
+            windowEl.style.cssText = `top: ${100 + Math.random() * 50}px; left: ${300 + Math.random() * 100}px; width: 700px; height: 450px; z-index: ${++windowZIndex};`;
+
+            windowEl.innerHTML = `
+                <div class="window-header" onmousedown="startDrag(event, '${windowId}')">
+                    <div class="window-title"><i class="fas ${template.icon}"></i><span>${template.title}</span></div>
+                    <div class="window-controls">
+                        <button class="window-btn minimize" onclick="minimizeWindow('${windowId}')"></button>
+                        <button class="window-btn maximize" onclick="maximizeWindow('${windowId}')"></button>
+                        <button class="window-btn close" onclick="closeWindow('${windowId}')"></button>
+                    </div>
+                </div>
+                <div class="window-content">${template.content}</div>
+            `;
+
+            windowEl.addEventListener('mousedown', () => {
+                windowEl.style.zIndex = ++windowZIndex;
+                activeWindow = windowId;
+            });
+
+            document.getElementById('windowsContainer').appendChild(windowEl);
+            activeWindow = windowId;
+            startMenu.classList.remove('visible');
+        }
+
+        function closeWindow(windowId) {
+            const windowEl = document.getElementById(windowId);
+            if (windowEl) {
+                windowEl.style.opacity = '0';
+                windowEl.style.transform = 'scale(0.9)';
+                setTimeout(() => windowEl.remove(), 200);
+            }
+        }
+
+        function minimizeWindow(windowId) {
+            const windowEl = document.getElementById(windowId);
+            if (windowEl) windowEl.classList.add('minimized');
+        }
+
+        function maximizeWindow(windowId) {
+            const windowEl = document.getElementById(windowId);
+            if (windowEl) windowEl.classList.toggle('maximized');
+        }
+
+        // Dragging
+        let isDragging = false;
+        let dragWindowId = null;
+        let dragOffsetX = 0;
+        let dragOffsetY = 0;
+
+        function startDrag(e, windowId) {
+            isDragging = true;
+            dragWindowId = windowId;
+            const windowEl = document.getElementById(windowId);
+            const rect = windowEl.getBoundingClientRect();
+            dragOffsetX = e.clientX - rect.left;
+            dragOffsetY = e.clientY - rect.top;
+        }
+
+        document.addEventListener('mousemove', (e) => {
+            if (!isDragging || !dragWindowId) return;
+            const windowEl = document.getElementById(dragWindowId);
+            if (windowEl && !windowEl.classList.contains('maximized')) {
+                windowEl.style.left = (e.clientX - dragOffsetX) + 'px';
+                windowEl.style.top = (e.clientY - dragOffsetY) + 'px';
+
+                // Snap overlay on drag to top
+                if (e.clientY < 50) {
+                    document.getElementById('snapOverlay').classList.add('visible');
+                    snapTargetWindow = dragWindowId;
+                } else {
+                    document.getElementById('snapOverlay').classList.remove('visible');
+                }
+            }
+        });
+
+        document.addEventListener('mouseup', () => {
+            isDragging = false;
+            dragWindowId = null;
+            document.getElementById('snapOverlay').classList.remove('visible');
+        });
+
+        function snapWindow(layout) {
+            if (!snapTargetWindow) return;
+            const windowEl = document.getElementById(snapTargetWindow);
+            if (!windowEl) return;
+
+            windowEl.classList.remove('maximized');
+            document.getElementById('snapOverlay').classList.remove('visible');
+
+            const taskbarHeight = 80;
+            const availableHeight = window.innerHeight - taskbarHeight;
+
+            if (layout === 'half') {
+                windowEl.style.width = '50%';
+                windowEl.style.height = availableHeight + 'px';
+                windowEl.style.top = '0';
+                windowEl.style.left = '0';
+            } else if (layout === 'thirds') {
+                windowEl.style.width = '33.33%';
+                windowEl.style.height = availableHeight + 'px';
+                windowEl.style.top = '0';
+                windowEl.style.left = '0';
+            } else if (layout === 'quarter') {
+                windowEl.style.width = '50%';
+                windowEl.style.height = (availableHeight / 2) + 'px';
+                windowEl.style.top = '0';
+                windowEl.style.left = '0';
+            }
+
+            snapTargetWindow = null;
+        }
+
+        // Calculator
+        let calcExpression = '';
+        function calcClear() { calcExpression = ''; updateCalc(); }
+        function calcInput(val) { calcExpression += val; updateCalc(); }
+        function calcEquals() {
+            try { calcExpression = eval(calcExpression).toString(); } catch { calcExpression = 'Error'; }
+            updateCalc();
+        }
+        function updateCalc() {
+            const exprEl = document.getElementById('calcExpression');
+            const resultEl = document.getElementById('calcResult');
+            if (exprEl) exprEl.textContent = calcExpression;
+            if (resultEl) resultEl.textContent = calcExpression || '0';
+        }
+
+        // Settings Panel
+        function openSettings() {
+            document.getElementById('settingsPanel').classList.add('visible');
+            contextMenu.classList.remove('visible');
+        }
+
+        function showSettingsSection(section) {
+            document.querySelectorAll('.settings-section').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.settings-nav-item').forEach(el => el.classList.remove('active'));
+            document.getElementById(section + 'Section').classList.add('active');
+            event.target.closest('.settings-nav-item').classList.add('active');
+        }
+
+        function setTheme(theme, el) {
+            document.body.setAttribute('data-theme', theme);
+            document.querySelectorAll('.theme-option').forEach(opt => opt.classList.remove('active'));
+            el.classList.add('active');
+        }
+
+        function setWallpaper(wallpaperClass, el) {
+            const bg = document.getElementById('desktopBackground');
+            bg.className = 'desktop-background ' + wallpaperClass;
+            document.querySelectorAll('.wallpaper-option').forEach(opt => opt.classList.remove('active'));
+            el.classList.add('active');
+        }
+
+        // Calendar
+        let currentMonth = new Date();
+        function renderCalendar() {
+            const year = currentMonth.getFullYear();
+            const month = currentMonth.getMonth();
+            const firstDay = new Date(year, month, 1);
+            const lastDay = new Date(year, month + 1, 0);
+            const prevLastDay = new Date(year, month, 0);
+            const today = new Date();
+
+            document.getElementById('calendarMonth').textContent = firstDay.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+
+            const grid = document.getElementById('calendarGrid');
+            grid.innerHTML = '';
+
+            const days = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
+            days.forEach(day => {
+                const el = document.createElement('div');
+                el.className = 'calendar-day';
+                el.style.color = 'var(--text-secondary)';
+                el.style.fontWeight = '600';
+                el.style.fontSize = '10px';
+                el.textContent = day;
+                grid.appendChild(el);
+            });
+
+            for (let i = prevLastDay.getDate(); i > 0; i--) {
+                const el = document.createElement('div');
+                el.className = 'calendar-day other-month';
+                el.textContent = i;
+                grid.appendChild(el);
+            }
+
+            for (let i = 1; i <= lastDay.getDate(); i++) {
+                const el = document.createElement('div');
+                el.className = 'calendar-day';
+                el.textContent = i;
+                if (i === today.getDate() && month === today.getMonth() && year === today.getFullYear()) {
+                    el.classList.add('today');
+                }
+                grid.appendChild(el);
+            }
+        }
+        renderCalendar();
+
+        function prevMonth() { currentMonth.setMonth(currentMonth.getMonth() - 1); renderCalendar(); }
+        function nextMonth() { currentMonth.setMonth(currentMonth.getMonth() + 1); renderCalendar(); }
+
+        // System Stats Animation
+        function updateStats() {
+            const stats = {
+                cpu: Math.floor(Math.random() * 40) + 20,
+                ram: Math.floor(Math.random() * 30) + 45,
+                disk: Math.floor(Math.random() * 10) + 40,
+                network: Math.floor(Math.random() * 30) + 5
+            };
+
+            ['cpu', 'ram', 'disk', 'network'].forEach(stat => {
+                const valueEl = document.getElementById(stat + 'Value');
+                const barEl = document.getElementById(stat + 'Bar');
+                if (valueEl) valueEl.textContent = stats[stat] + '%';
+                if (barEl) barEl.style.width = stats[stat] + '%';
+            });
+        }
+        setInterval(updateStats, 3000);
+
+        // Quick Settings Toggle
+        document.querySelectorAll('.quick-setting-btn').forEach(btn => {
+            btn.addEventListener('click', () => btn.classList.toggle('active'));
+        });
+
+        // Slider Value Update
+        document.querySelectorAll('.glass-slider').forEach(slider => {
+            slider.addEventListener('input', (e) => {
+                e.target.parentElement.querySelector('.slider-value').textContent = e.target.value + '%';
+            });
+        });
+
+        // Clear Notifications
+        document.getElementById('clearAllBtn').addEventListener('click', () => {
+            document.querySelector('.notifications-list').innerHTML = `
+                <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
+                    <i class="fas fa-check-circle" style="font-size: 48px; margin-bottom: 15px; opacity: 0.5;"></i>
+                    <p>All notifications cleared</p>
+                </div>`;
+            document.querySelector('.notification-badge').style.display = 'none';
+        });
+    </script>
+</body>
+</html>

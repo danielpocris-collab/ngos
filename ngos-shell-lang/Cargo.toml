@@ -1,0 +1,11 @@
+[package]
+name = "ngos-shell-lang"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shell language parser and interpreter for the ngos native shell"
+
+[dependencies]
+ngos-shell-types = { path = "../ngos-shell-types" }
+ngos-user-abi = { path = "../user-abi" }
+ngos-user-runtime = { path = "../user-runtime" }

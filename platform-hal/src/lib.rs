@@ -1,5 +1,20 @@
 #![no_std]
 
+//! Canonical subsystem role:
+//! - subsystem: platform hardware abstraction contracts
+//! - owner layer: platform contract layer
+//! - semantic owner: `platform-hal`
+//! - truth path role: canonical cross-platform mechanism contracts consumed by
+//!   real platform crates and `kernel-core`
+//!
+//! Canonical contract families defined here:
+//! - address-space and paging mechanism contracts
+//! - device/platform mechanism contracts
+//! - DMA/MMIO/interrupt mechanism contracts
+//!
+//! This crate may define platform mechanism interfaces, but it must not own the
+//! higher-level semantic truth of kernel subsystems.
+
 extern crate alloc;
 
 use alloc::format;
@@ -155,6 +170,14 @@ pub enum BusKind {
     Virtual,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuVendor {
+    Nvidia,
+    Amd,
+    Intel,
+    Virtio,
+    Unknown,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceClass {
     Network,
@@ -623,9 +646,21 @@ pub struct GpuTensorEvidence {
 }
 
 pub trait GpuPlatform: DevicePlatform {
+    fn get_gpu_vendor(&self) -> GpuVendor;
+    fn get_gpu_name(&self) -> String;
     fn setup_gpu_agent(&mut self, device: DeviceLocator) -> Result<(), HalError>;
     fn submit_gpu_command(&mut self, rpc_id: u32, payload: &[u8]) -> Result<Vec<u8>, HalError>;
     fn allocate_gpu_memory(&mut self, kind: GpuMemoryKind, size: u64) -> Result<u64, HalError>;
+    fn submit_gpu_sync(&mut self, addr_paddr: u64, value: u32) -> Result<(), HalError> {
+        let _ = addr_paddr;
+        let _ = value;
+        Err(HalError::Unsupported)
+    }
+    fn wait_gpu_fence(&mut self, fence_vaddr: u64, expected: u32) -> Result<(), HalError> {
+        let _ = fence_vaddr;
+        let _ = expected;
+        Err(HalError::Unsupported)
+    }
     fn set_primary_gpu_power_state(&mut self, _pstate: u32) -> Result<(), HalError> {
         Err(HalError::Unsupported)
     }

@@ -1,10 +1,25 @@
 //! NGOS Browser UI Shell
 //!
 //! Semantic orchestration surface over the FrameScript browser renderer.
+//!
+//! Canonical subsystem role:
+//! - subsystem: browser UI shell
+//! - owner layer: presentation support layer
+//! - semantic owner: `browser-ui`
+//! - truth path role: browser-oriented presentation orchestration over
+//!   rendering support crates
+//!
+//! Canonical contract families handled here:
+//! - browser viewport and scene profile contracts
+//! - browser rendering orchestration contracts
+//! - browser UI presentation support contracts
+//!
+//! This crate may orchestrate browser-facing presentation flows, but it must
+//! not redefine kernel, runtime, or subsystem truth.
 
 pub use browser_core::{BrowserError, BrowserResult};
 use browser_layout::{LayoutNode, LayoutTree, Rect};
-use browser_paint::{FrameScriptRenderer, Renderer};
+use browser_paint::{FrameScriptRenderer, Renderer, SkiaRenderer};
 use ngos_gfx_translate::{DrawOp, EncodedFrame, FrameScript, RgbaColor};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +148,15 @@ impl BrowserUiSurface {
             script,
             encoded,
         })
+    }
+
+    pub fn render_layout_png(
+        &self,
+        tree: &LayoutTree,
+        path: impl AsRef<std::path::Path>,
+    ) -> BrowserResult<()> {
+        let mut renderer = SkiaRenderer::new(self.viewport.width, self.viewport.height);
+        renderer.render_to_png(tree, path)
     }
 }
 
@@ -303,6 +327,21 @@ mod tests {
         assert!(frame.encoded.payload.contains("op=rounded-rect"));
         assert!(frame.encoded.payload.contains("op=shadow-rect"));
         assert!(frame.encoded.payload.contains("op=line"));
+    }
+
+    #[test]
+    fn render_layout_png_writes_file() {
+        let surface = BrowserUiSurface::new(BrowserViewport::new(800, 600));
+        let mut path = std::env::temp_dir();
+        path.push("ngos-browser-ui-test.png");
+
+        surface
+            .render_layout_png(&test_tree(), &path)
+            .expect("png render should succeed");
+
+        let metadata = std::fs::metadata(&path).expect("png file should exist");
+        assert!(metadata.len() > 0);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

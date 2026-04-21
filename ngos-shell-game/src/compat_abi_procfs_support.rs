@@ -1,0 +1,2 @@
+pub use crate::compat_abi_process_resolve_support::game_compat_resolve_process_pid;
+pub use crate::compat_abi_procfs_snapshot_support::game_compat_proc_probe_snapshot;

@@ -1,3 +1,19 @@
+//! Canonical subsystem role:
+//! - subsystem: host platform mediation
+//! - owner layer: auxiliary execution layer
+//! - semantic owner: `platform-host-runtime`
+//! - truth path role: host-only platform mechanism surface for auxiliary
+//!   execution, not real product truth
+//!
+//! Canonical contract families handled here:
+//! - host platform contracts
+//! - host address-space mediation contracts
+//! - host platform descriptor contracts
+//!
+//! This crate may provide host-side platform mechanics for validation, but it
+//! must not be treated as the final platform truth surface for subsystem
+//! closure.
+
 use std::collections::BTreeMap;
 
 use kernel_core::{

@@ -1,3 +1,18 @@
+//! Canonical subsystem role:
+//! - subsystem: native kernel object and contract model
+//! - owner layer: Layer 1
+//! - semantic owner: `kernel-core`
+//! - truth path role: canonical native resource, contract, and governance
+//!   object model
+//!
+//! Canonical contract families defined here:
+//! - resource contracts
+//! - domain and contract state contracts
+//! - governance and arbitration contracts
+//!
+//! This module may define canonical native object truth for `ngos`. Higher
+//! layers may inspect or serialize it, but they must not redefine it.
+
 use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

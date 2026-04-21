@@ -1,5 +1,21 @@
+//! Canonical subsystem role:
+//! - subsystem: boot hardware facts
+//! - owner layer: Layer 0
+//! - semantic owner: `boot-x86_64`
+//! - truth path role: authoritative boot-stage discovery of CPU, memory, and
+//!   firmware facts for handoff into the real system path
+//!
+//! Canonical contract families produced here:
+//! - CPU fact contracts
+//! - memory region summary contracts
+//! - firmware and topology fact contracts
+//!
+//! This module may discover and report authoritative boot-stage hardware facts,
+//! but it must not redefine the long-term kernel ownership model that consumes
+//! those facts.
+
 #[cfg(target_arch = "x86_64")]
-use core::arch::x86_64::__cpuid;
+use core::arch::x86_64::{__cpuid, __cpuid_count};
 
 use platform_x86_64::{
     BootInfo, BootMemoryRegionKind, acpi_probe_info, acpi_probe_signatures, acpi_root_info,
@@ -24,6 +40,7 @@ pub struct MemoryRegionSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CpuFacts {
+    pub vendor_kind: CpuVendor,
     pub vendor: [u8; 12],
     pub max_basic_leaf: u32,
     pub max_extended_leaf: u32,
@@ -36,6 +53,47 @@ pub struct CpuFacts {
     pub has_syscall_sysret: bool,
     pub has_nx: bool,
     pub has_1g_pages: bool,
+    pub has_xsave: bool,
+    pub has_osxsave: bool,
+    pub has_x2apic: bool,
+    pub has_pcid: bool,
+    pub has_invpcid: bool,
+    pub has_fsgsbase: bool,
+    pub has_smep: bool,
+    pub has_smap: bool,
+    pub has_umip: bool,
+    pub has_pku: bool,
+    pub has_ospke: bool,
+    pub has_la57: bool,
+    pub has_rdpid: bool,
+    pub has_avx: bool,
+    pub has_avx2: bool,
+    pub has_avx512f: bool,
+    pub max_xsave_bytes: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuVendor {
+    Intel,
+    Amd,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuFeaturePolicy {
+    pub vendor: CpuVendor,
+    pub enable_xsave: bool,
+    pub enable_x2apic: bool,
+    pub enable_fsgsbase: bool,
+    pub enable_pcid: bool,
+    pub enable_invpcid: bool,
+    pub enable_smep: bool,
+    pub enable_smap: bool,
+    pub enable_umip: bool,
+    pub enable_pku: bool,
+    pub enable_la57: bool,
+    pub allow_avx_user_state: bool,
+    pub allow_avx512_user_state: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +147,7 @@ pub fn emit_boot_facts(boot_info: &BootInfo<'_>) {
     #[cfg(target_arch = "x86_64")]
     {
         let cpu = cpu_facts();
+        let policy = cpu_feature_policy(&cpu);
         let vendor = core::str::from_utf8(&cpu.vendor).unwrap_or("unknown");
         serial::print(format_args!(
             "ngos/x86_64: cpu vendor={} family={} model={} stepping={} apic_id={} cpuid_basic={:#x} cpuid_ext={:#x}\n",
@@ -107,6 +166,42 @@ pub fn emit_boot_facts(boot_info: &BootInfo<'_>) {
             cpu.has_syscall_sysret,
             cpu.has_nx,
             cpu.has_1g_pages
+        ));
+        serial::print(format_args!(
+            "ngos/x86_64: cpu modern xsave={} osxsave={} xsave_max={} x2apic={} pcid={} invpcid={} fsgsbase={} smep={} smap={} umip={} pku={} ospke={} la57={} rdpid={} avx={} avx2={} avx512f={}\n",
+            cpu.has_xsave,
+            cpu.has_osxsave,
+            cpu.max_xsave_bytes,
+            cpu.has_x2apic,
+            cpu.has_pcid,
+            cpu.has_invpcid,
+            cpu.has_fsgsbase,
+            cpu.has_smep,
+            cpu.has_smap,
+            cpu.has_umip,
+            cpu.has_pku,
+            cpu.has_ospke,
+            cpu.has_la57,
+            cpu.has_rdpid,
+            cpu.has_avx,
+            cpu.has_avx2,
+            cpu.has_avx512f
+        ));
+        serial::print(format_args!(
+            "ngos/x86_64: cpu policy vendor={:?} xsave={} x2apic={} fsgsbase={} pcid={} invpcid={} smep={} smap={} umip={} pku={} la57={} avx={} avx512={}\n",
+            policy.vendor,
+            policy.enable_xsave,
+            policy.enable_x2apic,
+            policy.enable_fsgsbase,
+            policy.enable_pcid,
+            policy.enable_invpcid,
+            policy.enable_smep,
+            policy.enable_smap,
+            policy.enable_umip,
+            policy.enable_pku,
+            policy.enable_la57,
+            policy.allow_avx_user_state,
+            policy.allow_avx512_user_state
         ));
     }
 
@@ -228,6 +323,16 @@ pub fn cpu_facts() -> CpuFacts {
     let basic = __cpuid(0);
     let extended = __cpuid(0x8000_0000);
     let signature = __cpuid(1);
+    let structured_features = if basic.eax >= 7 {
+        Some(__cpuid_count(7, 0))
+    } else {
+        None
+    };
+    let xsave_leaf0 = if (signature.ecx & (1 << 26)) != 0 && basic.eax >= 0x0d {
+        Some(__cpuid_count(0x0d, 0))
+    } else {
+        None
+    };
     let extended_features = if extended.eax >= 0x8000_0001 {
         Some(__cpuid(0x8000_0001))
     } else {
@@ -254,6 +359,7 @@ pub fn cpu_facts() -> CpuFacts {
     };
 
     CpuFacts {
+        vendor_kind: cpu_vendor(vendor_bytes(basic.ebx, basic.edx, basic.ecx)),
         vendor: vendor_bytes(basic.ebx, basic.edx, basic.ecx),
         max_basic_leaf: basic.eax,
         max_extended_leaf: extended.eax,
@@ -266,6 +372,77 @@ pub fn cpu_facts() -> CpuFacts {
         has_syscall_sysret: extended_features.is_some_and(|leaf| (leaf.edx & (1 << 11)) != 0),
         has_nx: extended_features.is_some_and(|leaf| (leaf.edx & (1 << 20)) != 0),
         has_1g_pages: extended_features.is_some_and(|leaf| (leaf.edx & (1 << 26)) != 0),
+        has_xsave: (signature.ecx & (1 << 26)) != 0,
+        has_osxsave: (signature.ecx & (1 << 27)) != 0,
+        has_x2apic: (signature.ecx & (1 << 21)) != 0,
+        has_pcid: (signature.ecx & (1 << 17)) != 0,
+        has_invpcid: structured_features.is_some_and(|leaf| (leaf.ebx & (1 << 10)) != 0),
+        has_fsgsbase: structured_features.is_some_and(|leaf| (leaf.ebx & (1 << 0)) != 0),
+        has_smep: structured_features.is_some_and(|leaf| (leaf.ebx & (1 << 7)) != 0),
+        has_smap: structured_features.is_some_and(|leaf| (leaf.ebx & (1 << 20)) != 0),
+        has_umip: structured_features.is_some_and(|leaf| (leaf.ecx & (1 << 2)) != 0),
+        has_pku: structured_features.is_some_and(|leaf| (leaf.ecx & (1 << 3)) != 0),
+        has_ospke: structured_features.is_some_and(|leaf| (leaf.ecx & (1 << 4)) != 0),
+        has_la57: structured_features.is_some_and(|leaf| (leaf.ecx & (1 << 16)) != 0),
+        has_rdpid: structured_features.is_some_and(|leaf| (leaf.ecx & (1 << 22)) != 0),
+        has_avx: (signature.ecx & (1 << 28)) != 0,
+        has_avx2: structured_features.is_some_and(|leaf| (leaf.ebx & (1 << 5)) != 0),
+        has_avx512f: structured_features.is_some_and(|leaf| (leaf.ebx & (1 << 16)) != 0),
+        max_xsave_bytes: xsave_leaf0.map_or(0, |leaf| leaf.ebx),
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+pub fn cpu_feature_policy(cpu: &CpuFacts) -> CpuFeaturePolicy {
+    let enable_xsave = cpu.has_xsave && cpu.has_osxsave && cpu.max_xsave_bytes != 0;
+    let allow_avx_user_state = enable_xsave && cpu.has_avx;
+    let allow_avx512_user_state = allow_avx_user_state && cpu.has_avx512f;
+    match cpu.vendor_kind {
+        CpuVendor::Intel => CpuFeaturePolicy {
+            vendor: cpu.vendor_kind,
+            enable_xsave,
+            enable_x2apic: cpu.has_x2apic,
+            enable_fsgsbase: cpu.has_fsgsbase,
+            enable_pcid: cpu.has_pcid,
+            enable_invpcid: cpu.has_pcid && cpu.has_invpcid,
+            enable_smep: cpu.has_smep,
+            enable_smap: cpu.has_smap,
+            enable_umip: cpu.has_umip,
+            enable_pku: cpu.has_pku && cpu.has_ospke,
+            enable_la57: false,
+            allow_avx_user_state,
+            allow_avx512_user_state,
+        },
+        CpuVendor::Amd => CpuFeaturePolicy {
+            vendor: cpu.vendor_kind,
+            enable_xsave,
+            enable_x2apic: cpu.has_x2apic,
+            enable_fsgsbase: cpu.has_fsgsbase,
+            enable_pcid: cpu.has_pcid,
+            enable_invpcid: cpu.has_pcid && cpu.has_invpcid,
+            enable_smep: cpu.has_smep,
+            enable_smap: cpu.has_smap,
+            enable_umip: cpu.has_umip,
+            enable_pku: cpu.has_pku && cpu.has_ospke,
+            enable_la57: false,
+            allow_avx_user_state,
+            allow_avx512_user_state,
+        },
+        CpuVendor::Unknown => CpuFeaturePolicy {
+            vendor: cpu.vendor_kind,
+            enable_xsave,
+            enable_x2apic: false,
+            enable_fsgsbase: false,
+            enable_pcid: false,
+            enable_invpcid: false,
+            enable_smep: false,
+            enable_smap: false,
+            enable_umip: false,
+            enable_pku: false,
+            enable_la57: false,
+            allow_avx_user_state: false,
+            allow_avx512_user_state: false,
+        },
     }
 }
 
@@ -278,6 +455,29 @@ const fn vendor_bytes(ebx: u32, edx: u32, ecx: u32) -> [u8; 12] {
         ebx[0], ebx[1], ebx[2], ebx[3], edx[0], edx[1], edx[2], edx[3], ecx[0], ecx[1], ecx[2],
         ecx[3],
     ]
+}
+
+#[cfg(target_arch = "x86_64")]
+const fn vendor_matches(vendor: [u8; 12], expected: &[u8; 12]) -> bool {
+    let mut index = 0;
+    while index < 12 {
+        if vendor[index] != expected[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+#[cfg(target_arch = "x86_64")]
+const fn cpu_vendor(vendor: [u8; 12]) -> CpuVendor {
+    if vendor_matches(vendor, b"GenuineIntel") {
+        CpuVendor::Intel
+    } else if vendor_matches(vendor, b"AuthenticAMD") {
+        CpuVendor::Amd
+    } else {
+        CpuVendor::Unknown
+    }
 }
 
 pub fn acpi_facts(boot_info: &BootInfo<'_>) -> Option<AcpiFacts> {
@@ -554,5 +754,62 @@ mod tests {
         assert_eq!(facts.online_capable_count, 1);
         assert_eq!(facts.io_apic_count, 1);
         assert_eq!(facts.interrupt_override_count, 1);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn cpu_vendor_classifies_intel_and_amd_signatures() {
+        assert_eq!(cpu_vendor(*b"GenuineIntel"), CpuVendor::Intel);
+        assert_eq!(cpu_vendor(*b"AuthenticAMD"), CpuVendor::Amd);
+        assert_eq!(cpu_vendor(*b"UnknownVendr"), CpuVendor::Unknown);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn cpu_feature_policy_is_vendor_explicit_and_conservative() {
+        let cpu = CpuFacts {
+            vendor_kind: CpuVendor::Amd,
+            vendor: *b"AuthenticAMD",
+            max_basic_leaf: 7,
+            max_extended_leaf: 0x8000_0007,
+            family: 0x19,
+            model: 0x61,
+            stepping: 1,
+            apic_id: 0,
+            has_tsc: true,
+            has_invariant_tsc: true,
+            has_syscall_sysret: true,
+            has_nx: true,
+            has_1g_pages: true,
+            has_xsave: true,
+            has_osxsave: true,
+            has_x2apic: true,
+            has_pcid: true,
+            has_invpcid: true,
+            has_fsgsbase: true,
+            has_smep: true,
+            has_smap: true,
+            has_umip: true,
+            has_pku: true,
+            has_ospke: true,
+            has_la57: true,
+            has_rdpid: true,
+            has_avx: true,
+            has_avx2: true,
+            has_avx512f: false,
+            max_xsave_bytes: 4096,
+        };
+        let policy = cpu_feature_policy(&cpu);
+        assert_eq!(policy.vendor, CpuVendor::Amd);
+        assert!(policy.enable_xsave);
+        assert!(policy.enable_pcid);
+        assert!(policy.enable_invpcid);
+        assert!(policy.enable_smep);
+        assert!(policy.enable_smap);
+        assert!(policy.enable_umip);
+        assert!(policy.enable_pku);
+        assert!(!policy.enable_la57);
+        assert!(policy.allow_avx_user_state);
+        assert!(!policy.allow_avx512_user_state);
     }
 }

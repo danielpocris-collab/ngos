@@ -10,9 +10,38 @@ ngos-audio-translate = { path = "../audio-translate" }
 ngos-game-compat-runtime = { path = "../game-compat-runtime" }
 ngos-gfx-translate = { path = "../gfx-translate" }
 ngos-input-translate = { path = "../input-translate" }
+ngos-render3d = { path = "../render3d" }
 ngos-user-abi = { path = "../user-abi" }
 ngos-semantic-runtime = { path = "../semantic-runtime" }
 ngos-user-runtime = { path = "../user-runtime" }
+ngos-shell-types = { path = "../ngos-shell-types" }
+ngos-shell-lang = { path = "../ngos-shell-lang" }
+ngos-shell-vfs = { path = "../ngos-shell-vfs" }
+ngos-shell-proc = { path = "../ngos-shell-proc" }
+ngos-shell-ux = { path = "../ngos-shell-ux" }
+ngos-shell-session = { path = "../ngos-shell-session" }
+ngos-shell-workflow = { path = "../ngos-shell-workflow" }
+ngos-shell-repair = { path = "../ngos-shell-repair" }
+ngos-shell-game = { path = "../ngos-shell-game" }
+ngos-shell-dev = { path = "../ngos-shell-dev" }
+ngos-shell-compat-abi = { path = "../ngos-shell-compat-abi" }
+ngos-shell-rust = { path = "../ngos-shell-rust" }
+ngos-shell-project = { path = "../ngos-shell-project" }
+ngos-shell-analysis = { path = "../ngos-shell-analysis" }
+ngos-shell-code = { path = "../ngos-shell-code" }
+ngos-shell-vm = { path = "../ngos-shell-vm" }
+ngos-shell-bus = { path = "../ngos-shell-bus" }
+ngos-shell-edit = { path = "../ngos-shell-edit" }
+ngos-shell-state = { path = "../ngos-shell-state" }
+ngos-shell-support = { path = "../ngos-shell-support" }
+ngos-shell-proof = { path = "../ngos-shell-proof" }
+ngos-shell-proc-view = { path = "../ngos-shell-proc-view" }
+    ngos-shell-semantic = { path = "../ngos-shell-semantic" }
+    ngos-shell-nextmind = { path = "../ngos-shell-nextmind" }
+    ngos-shell-gpu = { path = "../ngos-shell-gpu" }
+    ngos-shell-network = { path = "../ngos-shell-network" }
+    ngos-shell-resource = { path = "../ngos-shell-resource" }
+    ngos-shell-surface = { path = "../ngos-shell-surface" }
 
 [lib]
 path = "src/lib.rs"

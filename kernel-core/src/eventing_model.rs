@@ -1,3 +1,18 @@
+//! Canonical subsystem role:
+//! - subsystem: eventing model
+//! - owner layer: Layer 1
+//! - semantic owner: `kernel-core`
+//! - truth path role: canonical event queue, watch, and lifecycle event model
+//!   for the kernel
+//!
+//! Canonical contract families defined here:
+//! - event queue contracts
+//! - event watch interest contracts
+//! - process/graphics/network/bus event model contracts
+//!
+//! This module may define canonical eventing truth. Higher layers may observe
+//! or transport it, but they must not redefine it.
+
 use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +111,22 @@ pub struct GraphicsEventInterest {
     pub lease_acquired: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BusEventKind {
+    Attached,
+    Detached,
+    Published,
+    Received,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BusEventInterest {
+    pub attached: bool,
+    pub detached: bool,
+    pub published: bool,
+    pub received: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MemoryWaitKey {
     pub namespace: u64,
@@ -140,6 +171,11 @@ pub enum EventSource {
         device_inode: u64,
         request_id: u64,
         kind: GraphicsEventKind,
+    },
+    Bus {
+        peer: BusPeerId,
+        endpoint: BusEndpointId,
+        kind: BusEventKind,
     },
 }
 
@@ -199,6 +235,14 @@ pub(crate) struct GraphicsEventRegistration {
     pub(crate) device_inode: u64,
     pub(crate) token: u64,
     pub(crate) interest: GraphicsEventInterest,
+    pub(crate) events: IoPollEvents,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BusEventRegistration {
+    pub(crate) endpoint: BusEndpointId,
+    pub(crate) token: u64,
+    pub(crate) interest: BusEventInterest,
     pub(crate) events: IoPollEvents,
 }
 
@@ -490,6 +534,7 @@ pub struct EventQueue {
     pub(crate) resource_watchers: Vec<ResourceEventRegistration>,
     pub(crate) network_watchers: Vec<NetworkEventRegistration>,
     pub(crate) graphics_watchers: Vec<GraphicsEventRegistration>,
+    pub(crate) bus_watchers: Vec<BusEventRegistration>,
     pub pending: BufRing<EventRecord>,
     pub(crate) waiters: Vec<EventQueueWaiter>,
 }
@@ -510,6 +555,7 @@ impl EventQueue {
             resource_watchers: Vec::new(),
             network_watchers: Vec::new(),
             graphics_watchers: Vec::new(),
+            bus_watchers: Vec::new(),
             pending: BufRing::with_capacity(Self::PENDING_CAPACITY),
             waiters: Vec::new(),
         }
@@ -610,6 +656,7 @@ pub enum EventQueueError {
     MemoryWatchNotFound,
     ResourceWatchNotFound,
     NetworkWatchNotFound,
+    BusWatchNotFound,
 }
 
 pub(crate) fn event_queue_descriptor_name(owner: ProcessId, queue: EventQueueId) -> String {

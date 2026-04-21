@@ -1733,3 +1733,121 @@ fn runtime_vm_global_reclaim_pressure_targets_cross_process_file_residency() {
     .unwrap();
     assert!(!vmdecisions_b.contains("agent=pressure-victim"));
 }
+
+#[test]
+fn observe_contract_gates_process_vm_procfs_reads() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let target = runtime
+        .spawn_process("vm-target", None, SchedulerClass::Interactive)
+        .unwrap();
+    let observer = runtime
+        .spawn_process("vm-observer", None, SchedulerClass::Interactive)
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            target,
+            ObjectHandle::new(Handle::new(9_401), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE,
+            "root",
+        )
+        .unwrap();
+    let lib = runtime
+        .grant_capability(
+            target,
+            ObjectHandle::new(Handle::new(9_402), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE,
+            "lib",
+        )
+        .unwrap();
+    runtime
+        .create_vfs_node("/", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/lib", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/lib/libinspect.so", ObjectKind::File, lib)
+        .unwrap();
+    let mapped = runtime
+        .map_file_memory(
+            target,
+            "/lib/libinspect.so".to_string(),
+            0x2000,
+            0xd000,
+            true,
+            false,
+            true,
+            true,
+        )
+        .unwrap();
+    runtime
+        .protect_memory(target, mapped, 0x2000, true, true, false)
+        .unwrap();
+    runtime.touch_memory(target, mapped, 0x2000, true).unwrap();
+
+    let vm_object_id = runtime
+        .resolve_vm_object_id(target, mapped, 0x2000)
+        .unwrap();
+    runtime
+        .quarantine_vm_object(target, vm_object_id, 77)
+        .unwrap();
+    assert_eq!(
+        runtime.touch_memory(target, mapped, 0x1000, true),
+        Err(RuntimeError::Process(ProcessError::MemoryQuarantined {
+            vm_object_id
+        }))
+    );
+
+    for path in [
+        format!("/proc/{}/vmobjects", target.raw()),
+        format!("/proc/{}/vmdecisions", target.raw()),
+        format!("/proc/{}/vmepisodes", target.raw()),
+    ] {
+        let denied = runtime.read_procfs_path_for(observer, &path).unwrap_err();
+        assert_eq!(
+            denied,
+            RuntimeError::NativeModel(NativeModelError::ProcessContractMissing {
+                kind: ContractKind::Observe
+            })
+        );
+    }
+
+    let domain = runtime.create_domain(observer, None, "obs").unwrap();
+    let resource = runtime
+        .create_resource(observer, domain, ResourceKind::Namespace, "inspect")
+        .unwrap();
+    runtime
+        .set_resource_contract_policy(resource, ResourceContractPolicy::Observe)
+        .unwrap();
+    let contract = runtime
+        .create_contract(observer, domain, resource, ContractKind::Observe, "observe")
+        .unwrap();
+    runtime.bind_process_contract(observer, contract).unwrap();
+
+    let vmobjects = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, &format!("/proc/{}/vmobjects", target.raw()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(vmobjects.contains("quarantined=1"));
+    assert!(vmobjects.contains("libinspect.so"));
+
+    let vmdecisions = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, &format!("/proc/{}/vmdecisions", target.raw()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(vmdecisions.contains("agent=quarantine-state"));
+    assert!(vmdecisions.contains("agent=quarantine-block"));
+
+    let vmepisodes = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, &format!("/proc/{}/vmepisodes", target.raw()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(vmepisodes.contains("kind=quarantine"));
+    assert!(vmepisodes.contains("blocked=yes"));
+}

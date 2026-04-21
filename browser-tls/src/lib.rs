@@ -2,6 +2,21 @@
 //!
 //! Uses rustls (Apache-2.0/MIT) for TLS 1.3
 //! Note: Full HTTPS implementation requires more work on connection handling.
+//!
+//! Canonical subsystem role:
+//! - subsystem: browser TLS support
+//! - owner layer: application support layer
+//! - semantic owner: `browser-tls`
+//! - truth path role: browser-facing HTTPS/TLS transport support for browser
+//!   application flows
+//!
+//! Canonical contract families defined here:
+//! - HTTPS client contracts
+//! - TLS transport support contracts
+//! - browser secure transport support contracts
+//!
+//! This crate may define browser TLS support behavior, but it must not
+//! redefine kernel, runtime, or product-level OS truth.
 
 pub use browser_core::{BrowserError, BrowserResult, Url};
 pub use browser_http::HttpResponse;

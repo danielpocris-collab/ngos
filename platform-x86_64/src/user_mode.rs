@@ -1,3 +1,18 @@
+//! Canonical subsystem role:
+//! - subsystem: x86_64 user-mode platform mediation
+//! - owner layer: platform mediation
+//! - semantic owner: `platform-x86_64`
+//! - truth path role: platform-specific user-mode launch and address-space
+//!   mediation for the real x86 path
+//!
+//! Canonical contract families handled here:
+//! - user-mode launch contracts
+//! - user address-space mapping contracts
+//! - platform user-mode validation contracts
+//!
+//! This module may mediate x86_64-specific user-mode mechanics, but it must
+//! not redefine kernel process, VM, or runtime truth.
+
 extern crate alloc;
 
 use alloc::vec::Vec;

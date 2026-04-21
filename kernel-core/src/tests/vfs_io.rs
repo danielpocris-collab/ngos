@@ -1200,8 +1200,8 @@ fn runtime_close_range_clears_readiness_registrations_for_closed_descriptors() {
             owner,
             fd,
             ReadinessInterest {
-                readable: true,
-                writable: false,
+                readable: false,
+                writable: true,
                 priority: false,
             },
         )
@@ -1248,6 +1248,7 @@ fn runtime_readiness_registration_replaces_existing_interest() {
         .create_vfs_node("/drv/render", ObjectKind::Driver, driver)
         .unwrap();
     let fd = runtime.open_path(owner, "/drv/render").unwrap();
+    runtime.write_io(owner, fd, b":ready").unwrap();
 
     runtime
         .register_readiness(
@@ -1283,13 +1284,13 @@ fn runtime_readiness_registration_replaces_existing_interest() {
         entry.agent == IoAgentKind::ReadinessAgent
             && entry.owner == owner.raw()
             && entry.fd == u64::from(fd.raw())
-            && entry.detail0 == 0b010
+            && entry.detail0 == 0b001
     }));
     assert!(io_decisions.iter().any(|entry| {
         entry.agent == IoAgentKind::ReadinessAgent
             && entry.owner == owner.raw()
             && entry.fd == u64::from(fd.raw())
-            && entry.detail0 == 0b001
+            && entry.detail0 == 0b010
     }));
 }
 
@@ -2100,6 +2101,111 @@ fn audio_device_writes_complete_immediately_without_driver_queue_residue() {
 }
 
 #[test]
+fn audio_procfs_exposes_devices_and_drivers() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process("owner", None, SchedulerClass::Interactive)
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            owner.handle(),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "root",
+        )
+        .unwrap();
+    runtime
+        .create_vfs_node("/", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/dev", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/drv", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/dev/audio0", ObjectKind::Device, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/drv/audio0", ObjectKind::Driver, root)
+        .unwrap();
+    runtime
+        .bind_device_to_driver("/dev/audio0", "/drv/audio0")
+        .unwrap();
+
+    let devices = runtime
+        .read_procfs_path("/proc/system/audio/devices")
+        .unwrap();
+    let devices_text = String::from_utf8(devices).unwrap();
+    assert!(devices_text.contains("/dev/audio0"));
+    assert!(devices_text.contains("class=audio"));
+
+    let drivers = runtime
+        .read_procfs_path("/proc/system/audio/drivers")
+        .unwrap();
+    let drivers_text = String::from_utf8(drivers).unwrap();
+    assert!(drivers_text.contains("/drv/audio0"));
+    assert!(drivers_text.contains("bound-devices=1"));
+}
+
+#[test]
+fn audio_device_tracks_multiple_streams_and_metadata() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process("owner", None, SchedulerClass::Interactive)
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            owner.handle(),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "root",
+        )
+        .unwrap();
+    runtime
+        .create_vfs_node("/", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/dev", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/drv", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/dev/audio0", ObjectKind::Device, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/drv/audio0", ObjectKind::Driver, root)
+        .unwrap();
+    runtime
+        .bind_device_to_driver("/dev/audio0", "/drv/audio0")
+        .unwrap();
+
+    let device_fd = runtime.open_path(owner, "/dev/audio0").unwrap();
+    let payload1 = b"ngos-audio-translate/v1\nstream=music-001\nsource-api=xaudio2\ntranslation=compat-to-mixer\nroute=music\ntone=lead,440,100,0.800,0.000,sine\n";
+    assert_eq!(
+        runtime.write_io(owner, device_fd, payload1).unwrap(),
+        payload1.len()
+    );
+
+    let payload2 = b"ngos-audio-translate/v1\nstream=effects-001\nsource-api=webaudio\ntranslation=native-mixer\nroute=effects\ntone=click,1000,50,0.500,0.000,square\n";
+    assert_eq!(
+        runtime.write_io(owner, device_fd, payload2).unwrap(),
+        payload2.len()
+    );
+
+    let device_info = runtime.device_info_by_path("/dev/audio0").unwrap();
+    assert_eq!(device_info.submitted_requests, 2);
+    assert_eq!(device_info.completed_requests, 2);
+    assert_eq!(device_info.queue_depth, 0);
+
+    let driver_info = runtime.driver_info_by_path("/drv/audio0").unwrap();
+    assert_eq!(driver_info.completed_requests, 2);
+    assert_eq!(driver_info.queued_requests, 0);
+    assert_eq!(driver_info.in_flight_requests, 0);
+}
+
+#[test]
 fn input_device_writes_complete_immediately_without_driver_queue_residue() {
     let mut runtime = KernelRuntime::host_runtime_default();
     let owner = runtime
@@ -2153,7 +2259,10 @@ fn input_device_writes_complete_immediately_without_driver_queue_residue() {
 #[derive(Default)]
 struct RecordingGpuHardware {
     fail_submit: bool,
+    fail_cpu_extended_state: bool,
     calls: std::sync::Arc<std::sync::Mutex<Vec<(u32, Vec<u8>)>>>,
+    cpu_saves: std::sync::Arc<std::sync::Mutex<Vec<(u64, u64, usize)>>>,
+    cpu_restores: std::sync::Arc<std::sync::Mutex<Vec<(u64, u64, usize)>>>,
 }
 
 impl HardwareProvider for RecordingGpuHardware {
@@ -2273,6 +2382,167 @@ impl HardwareProvider for RecordingGpuHardware {
     ) -> Result<Option<platform_hal::GpuTensorEvidence>, HalError> {
         Ok(None)
     }
+
+    fn save_cpu_extended_state(
+        &mut self,
+        owner_pid: ProcessId,
+        owner_tid: ThreadId,
+        image: &mut ThreadCpuExtendedStateImage,
+    ) -> Result<(), HalError> {
+        self.cpu_saves
+            .lock()
+            .unwrap()
+            .push((owner_pid.raw(), owner_tid.raw(), image.bytes.len()));
+        if self.fail_cpu_extended_state {
+            Err(HalError::Unsupported)
+        } else {
+            image.profile.last_save_marker ^= 0xfeed_0000_0000_0000;
+            Ok(())
+        }
+    }
+
+    fn restore_cpu_extended_state(
+        &mut self,
+        owner_pid: ProcessId,
+        owner_tid: ThreadId,
+        image: &ThreadCpuExtendedStateImage,
+    ) -> Result<(), HalError> {
+        self.cpu_restores.lock().unwrap().push((
+            owner_pid.raw(),
+            owner_tid.raw(),
+            image.bytes.len(),
+        ));
+        if self.fail_cpu_extended_state {
+            Err(HalError::Unsupported)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[test]
+fn cpu_extended_state_switch_uses_hardware_provider_and_reports_fallbacks() {
+    let mut policy = RuntimePolicy::host_runtime_default();
+    policy.default_thread_cpu_extended_state = ThreadCpuExtendedStateProfile {
+        owned: true,
+        xsave_managed: true,
+        save_area_bytes: 1024,
+        xcr0_mask: 0x27,
+        boot_probed: true,
+        boot_seed_marker: 0x1234_5678,
+        active_in_cpu: false,
+        save_count: 0,
+        restore_count: 0,
+        last_saved_tick: 0,
+        last_restored_tick: 0,
+        save_area_buffer_bytes: 0,
+        save_area_alignment_bytes: 0,
+        save_area_generation: 0,
+        last_save_marker: 0,
+    };
+    let mut runtime = KernelRuntime::new(policy);
+    let provider = RecordingGpuHardware::default();
+    let save_log = provider.cpu_saves.clone();
+    let restore_log = provider.cpu_restores.clone();
+    runtime.install_hardware_provider(Box::new(provider));
+
+    let init = runtime
+        .spawn_process("cpu-init", None, SchedulerClass::BestEffort)
+        .unwrap();
+    let shell = runtime
+        .spawn_process("cpu-shell", Some(init), SchedulerClass::Interactive)
+        .unwrap();
+    let shell_tid = runtime
+        .processes()
+        .get(shell)
+        .unwrap()
+        .main_thread()
+        .unwrap();
+    let init_tid = runtime
+        .processes()
+        .get(init)
+        .unwrap()
+        .main_thread()
+        .unwrap();
+
+    let first = runtime.tick().unwrap();
+    runtime.block_running().unwrap();
+    let second = runtime.tick().unwrap();
+    assert_ne!(first.tid, second.tid);
+    assert!(matches!(first.tid, tid if tid == shell_tid || tid == init_tid));
+    assert!(matches!(second.tid, tid if tid == shell_tid || tid == init_tid));
+
+    let saves = save_log.lock().unwrap().clone();
+    let restores = restore_log.lock().unwrap().clone();
+    assert_eq!(saves.len(), 1);
+    assert_eq!(restores.len(), 2);
+    let first_pid = if first.tid == shell_tid { shell } else { init };
+    let second_pid = if second.tid == shell_tid { shell } else { init };
+    assert_eq!(saves[0], (first_pid.raw(), first.tid.raw(), 1024));
+    assert_eq!(restores[0], (first_pid.raw(), first.tid.raw(), 1024));
+    assert_eq!(restores[1], (second_pid.raw(), second.tid.raw(), 1024));
+
+    let telemetry = runtime.cpu_extended_state_hardware_telemetry();
+    assert_eq!(telemetry.save_count, 1);
+    assert_eq!(telemetry.restore_count, 2);
+    assert_eq!(telemetry.fallback_count, 0);
+    assert_eq!(telemetry.last_saved_tid, Some(first.tid));
+    assert_eq!(telemetry.last_restored_tid, Some(second.tid));
+    assert_eq!(telemetry.last_error, None);
+
+    let cpu = String::from_utf8(runtime.read_procfs_path("/proc/system/cpu").unwrap()).unwrap();
+    assert!(cpu.contains("hardware-saves:\t1"));
+    assert!(cpu.contains("hardware-restores:\t2"));
+    assert!(cpu.contains("hardware-fallbacks:\t0"));
+
+    let mut failing_runtime = KernelRuntime::host_runtime_default();
+    failing_runtime.apply_cpu_extended_state_handoff(CpuExtendedStateHandoff {
+        xsave_managed: true,
+        save_area_bytes: 1024,
+        xcr0_mask: 0x27,
+        boot_probed: true,
+        boot_seed_marker: 0xabcd_0001,
+    });
+    let failing_provider = RecordingGpuHardware {
+        fail_cpu_extended_state: true,
+        ..RecordingGpuHardware::default()
+    };
+    failing_runtime.install_hardware_provider(Box::new(failing_provider));
+    let base = failing_runtime
+        .spawn_process("fallback-base", None, SchedulerClass::BestEffort)
+        .unwrap();
+    let peer = failing_runtime
+        .spawn_process("fallback-peer", Some(base), SchedulerClass::Interactive)
+        .unwrap();
+    let peer_tid = failing_runtime
+        .processes()
+        .get(peer)
+        .unwrap()
+        .main_thread()
+        .unwrap();
+
+    let first_fallback = failing_runtime.tick().unwrap();
+    failing_runtime.block_running().unwrap();
+    let second_fallback = failing_runtime.tick().unwrap();
+    assert_ne!(first_fallback.tid, second_fallback.tid);
+    let fallback = failing_runtime.cpu_extended_state_hardware_telemetry();
+    assert!(fallback.fallback_count >= 1);
+    assert_eq!(fallback.last_error, Some(HalError::Unsupported));
+    assert_eq!(fallback.last_saved_tid, None);
+    let peer_info = failing_runtime.thread_infos(peer).unwrap();
+    assert_eq!(peer_info[0].tid, peer_tid);
+    let base_info = failing_runtime.thread_infos(base).unwrap();
+    assert!(
+        peer_info[0].cpu_extended_state.save_count >= 1
+            || base_info[0].cpu_extended_state.save_count >= 1
+    );
+    let failing_cpu = String::from_utf8(
+        failing_runtime
+            .read_procfs_path("/proc/system/cpu")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(failing_cpu.contains("hardware-last-error:\tUnsupported"));
 }
 
 #[test]
@@ -2312,6 +2582,7 @@ fn graphics_buffer_submit_uses_installed_hardware_provider_when_available() {
     runtime.install_hardware_provider(Box::new(RecordingGpuHardware {
         fail_submit: false,
         calls: calls.clone(),
+        ..RecordingGpuHardware::default()
     }));
 
     let buffer_id = runtime.create_graphics_buffer(owner, 32).unwrap();
@@ -2391,6 +2662,7 @@ fn graphics_buffer_submit_falls_back_to_driver_queue_when_hardware_provider_refu
     runtime.install_hardware_provider(Box::new(RecordingGpuHardware {
         fail_submit: true,
         calls: calls.clone(),
+        ..RecordingGpuHardware::default()
     }));
 
     let buffer_id = runtime.create_graphics_buffer(owner, 32).unwrap();
@@ -2412,6 +2684,330 @@ fn graphics_buffer_submit_falls_back_to_driver_queue_when_hardware_provider_refu
     let recorded = calls.lock().unwrap();
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0].1, b"draw:fallback");
+}
+
+#[test]
+fn graphics_buffer_submit_records_translation_metadata_in_request_info() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process("gpu-metadata", None, SchedulerClass::LatencyCritical)
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(30_413), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE,
+            "root",
+        )
+        .unwrap();
+    let device = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(30_414), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE,
+            "gpu0",
+        )
+        .unwrap();
+    let driver = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(30_415), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "gpu-driver",
+        )
+        .unwrap();
+
+    runtime
+        .create_vfs_node("/", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/dev", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/drv", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/dev/gpu0", ObjectKind::Device, device)
+        .unwrap();
+    runtime
+        .create_vfs_node("/drv/gpu0", ObjectKind::Driver, driver)
+        .unwrap();
+    runtime
+        .bind_device_to_driver("/dev/gpu0", "/drv/gpu0")
+        .unwrap();
+
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    runtime.install_hardware_provider(Box::new(RecordingGpuHardware {
+        fail_submit: true,
+        calls,
+        ..RecordingGpuHardware::default()
+    }));
+
+    let buffer_id = runtime.create_graphics_buffer(owner, 256).unwrap();
+    let payload = b"ngos-gfx-translate/v1\nprofile=compat-to-vulkan\nsource-api=directx12\ntranslation=compat-to-vulkan\nsurface=1280x720\nframe=dx12-req-001\nqueue=graphics\npresent-mode=mailbox\ncompletion=fire-and-forget\nop=clear rgba=000000ff\n";
+    runtime
+        .write_graphics_buffer(owner, buffer_id, 0, payload)
+        .unwrap();
+
+    let request_id = runtime
+        .submit_graphics_buffer(owner, "/dev/gpu0", buffer_id)
+        .unwrap() as u64;
+    let info = runtime.device_request_info(request_id).unwrap();
+    assert_eq!(info.frame_tag, "dx12-req-001");
+    assert_eq!(info.source_api_name, "directx12");
+    assert_eq!(info.translation_label, "compat-to-vulkan");
+    assert_eq!(info.graphics_buffer_id, Some(buffer_id));
+    assert_eq!(info.payload_len, payload.len());
+}
+
+#[test]
+fn graphics_device_and_driver_retain_last_completed_translation_metadata_after_queue_drain() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process(
+            "gpu-retained-metadata",
+            None,
+            SchedulerClass::LatencyCritical,
+        )
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(30_416), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE,
+            "root",
+        )
+        .unwrap();
+    let device = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(30_417), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE,
+            "gpu0",
+        )
+        .unwrap();
+    let driver = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(30_418), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "gpu-driver",
+        )
+        .unwrap();
+
+    runtime
+        .create_vfs_node("/", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/dev", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/drv", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/dev/gpu0", ObjectKind::Device, device)
+        .unwrap();
+    runtime
+        .create_vfs_node("/drv/gpu0", ObjectKind::Driver, driver)
+        .unwrap();
+    runtime
+        .bind_device_to_driver("/dev/gpu0", "/drv/gpu0")
+        .unwrap();
+
+    runtime.install_hardware_provider(Box::new(RecordingGpuHardware {
+        fail_submit: true,
+        calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        ..RecordingGpuHardware::default()
+    }));
+
+    let buffer_id = runtime.create_graphics_buffer(owner, 256).unwrap();
+    let payload = b"ngos-gfx-translate/v1\nprofile=compat-to-vulkan\nsource-api=directx12\ntranslation=compat-to-vulkan\nsurface=1280x720\nframe=dx12-retained-001\nqueue=graphics\npresent-mode=mailbox\ncompletion=fire-and-forget\nop=clear rgba=000000ff\n";
+    runtime
+        .write_graphics_buffer(owner, buffer_id, 0, payload)
+        .unwrap();
+
+    let request_id = runtime
+        .submit_graphics_buffer(owner, "/dev/gpu0", buffer_id)
+        .unwrap() as u64;
+    let driver_fd = runtime.open_path(owner, "/drv/gpu0").unwrap();
+    let _ = runtime.read_io(owner, driver_fd, 512).unwrap();
+    let completion = format!("request:{request_id}\ncompleted");
+    runtime
+        .write_io(owner, driver_fd, completion.as_bytes())
+        .unwrap();
+
+    let device_fd = runtime.open_path(owner, "/dev/gpu0").unwrap();
+    let _ = runtime.read_io(owner, device_fd, 512).unwrap();
+
+    let device_info = runtime.device_info_by_path("/dev/gpu0").unwrap();
+    assert_eq!(device_info.last_completed_request_id, request_id);
+    assert_eq!(device_info.last_completed_frame_tag, "dx12-retained-001");
+    assert_eq!(device_info.last_completed_source_api_name, "directx12");
+    assert_eq!(
+        device_info.last_completed_translation_label,
+        "compat-to-vulkan"
+    );
+
+    let driver_info = runtime.driver_info_by_path("/drv/gpu0").unwrap();
+    assert_eq!(driver_info.last_completed_request_id, request_id);
+    assert_eq!(driver_info.last_completed_frame_tag, "dx12-retained-001");
+    assert_eq!(driver_info.last_completed_source_api_name, "directx12");
+    assert_eq!(
+        driver_info.last_completed_translation_label,
+        "compat-to-vulkan"
+    );
+}
+
+#[test]
+fn graphics_present_request_records_translation_metadata_in_request_info() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process(
+            "gpu-present-metadata",
+            None,
+            SchedulerClass::LatencyCritical,
+        )
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(30_419), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE,
+            "root",
+        )
+        .unwrap();
+    let device = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(30_420), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE,
+            "gpu0",
+        )
+        .unwrap();
+    let driver = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(30_421), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "gpu-driver",
+        )
+        .unwrap();
+
+    runtime
+        .create_vfs_node("/", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/dev", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/drv", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/dev/gpu0", ObjectKind::Device, device)
+        .unwrap();
+    runtime
+        .create_vfs_node("/drv/gpu0", ObjectKind::Driver, driver)
+        .unwrap();
+    runtime
+        .bind_device_to_driver("/dev/gpu0", "/drv/gpu0")
+        .unwrap();
+
+    runtime.install_hardware_provider(Box::new(RecordingGpuHardware {
+        fail_submit: true,
+        calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        ..RecordingGpuHardware::default()
+    }));
+
+    let payload = b"frame=dx12-present-001\nqueue=graphics\npresent-mode=mailbox\ncompletion=wait-complete\nsource-api=directx12\ntranslation=compat-to-vulkan";
+    let response = runtime
+        .present_graphics_frame(owner, "/dev/gpu0", payload)
+        .unwrap();
+    let request_id = (response ^ 0x4750_0001) as u64;
+    assert!(request_id > 0);
+    let info = runtime.device_request_info(request_id).unwrap();
+    assert_eq!(info.kind, DeviceRequestKind::Control);
+    assert_eq!(info.frame_tag, "dx12-present-001");
+    assert_eq!(info.source_api_name, "directx12");
+    assert_eq!(info.translation_label, "compat-to-vulkan");
+}
+
+#[test]
+fn graphics_scanout_info_reports_translation_metadata_for_presented_frame() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process(
+            "gpu-scanout-metadata",
+            None,
+            SchedulerClass::LatencyCritical,
+        )
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(30_422), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE,
+            "root",
+        )
+        .unwrap();
+    let device = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(30_423), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE,
+            "gpu0",
+        )
+        .unwrap();
+    let driver = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(30_424), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "gpu-driver",
+        )
+        .unwrap();
+
+    runtime
+        .create_vfs_node("/", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/dev", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/drv", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/dev/gpu0", ObjectKind::Device, device)
+        .unwrap();
+    runtime
+        .create_vfs_node("/drv/gpu0", ObjectKind::Driver, driver)
+        .unwrap();
+    runtime
+        .bind_device_to_driver("/dev/gpu0", "/drv/gpu0")
+        .unwrap();
+
+    runtime.install_hardware_provider(Box::new(RecordingGpuHardware {
+        fail_submit: true,
+        calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        ..RecordingGpuHardware::default()
+    }));
+
+    let payload = b"frame=dx12-scanout-001\nqueue=graphics\npresent-mode=mailbox\ncompletion=wait-complete\nsource-api=directx12\ntranslation=compat-to-vulkan";
+    let request_id = (runtime
+        .present_graphics_frame(owner, "/dev/gpu0", payload)
+        .unwrap()
+        ^ 0x4750_0001) as u64;
+    let driver_fd = runtime.open_path(owner, "/drv/gpu0").unwrap();
+    let _ = runtime.read_io(owner, driver_fd, 512).unwrap();
+    let completion = format!("request:{request_id}\n{}", String::from_utf8_lossy(payload));
+    runtime
+        .write_io(owner, driver_fd, completion.as_bytes())
+        .unwrap();
+
+    let scanout = runtime.graphics_scanout_info("/dev/gpu0").unwrap();
+    assert_eq!(scanout.presented_frames, 1);
+    assert_eq!(scanout.last_frame_tag, "dx12-scanout-001");
+    assert_eq!(scanout.last_source_api_name, "directx12");
+    assert_eq!(scanout.last_translation_label, "compat-to-vulkan");
 }
 
 #[test]
@@ -2618,6 +3214,233 @@ fn graphics_buffer_submit_falls_back_when_platform_x86_64_gpu_provider_is_not_in
     assert!(request.contains("kind=Write"));
     assert!(request.contains(&format!("buffer={buffer_id}")));
     assert!(request.contains("draw:x86-fallback"));
+}
+
+#[test]
+fn graphics_present_uses_platform_x86_64_gpu_provider_when_agent_is_initialized() {
+    let mut backend = SyntheticPciConfigBackend::new();
+    let address = PciAddress {
+        segment: 0,
+        bus: 0,
+        device: 5,
+        function: 0,
+    };
+    backend.define_device(
+        address,
+        DeviceIdentity {
+            vendor_id: 0x10de,
+            device_id: 0x2d04,
+            subsystem_vendor_id: 0x10de,
+            subsystem_device_id: 0x0001,
+            revision_id: 1,
+            base_class: 0x03,
+            sub_class: 0x00,
+            programming_interface: 0x00,
+        },
+        0x10de,
+        0x0001,
+        false,
+        9,
+        1,
+    );
+    backend.define_bar(address, 0, 0xfec0_0000, 0xffff_f000);
+    backend.define_bar(address, 1, 0xd000_0000, 0xf000_0000);
+    backend.define_capability(address, 0x50, 0x0003_0011, 0x00);
+    let mut platform = X86_64DevicePlatform::new(backend, X86_64DevicePlatformConfig::default());
+    let mut devices = platform.enumerate_devices().unwrap();
+    assert_eq!(devices.len(), 1);
+    let device = devices.remove(0);
+    assert!(device.bars.len() >= 2);
+    platform.setup_gpu_agent(device.locator).unwrap();
+
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process("gpu-x86-present-hw", None, SchedulerClass::LatencyCritical)
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(30_440), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE,
+            "root",
+        )
+        .unwrap();
+    let gpu = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(30_441), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE,
+            "gpu0",
+        )
+        .unwrap();
+    let driver = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(30_442), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "gpu-driver",
+        )
+        .unwrap();
+
+    runtime
+        .create_vfs_node("/", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/dev", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/drv", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/dev/gpu0", ObjectKind::Device, gpu)
+        .unwrap();
+    runtime
+        .create_vfs_node("/drv/gpu0", ObjectKind::Driver, driver)
+        .unwrap();
+    runtime
+        .bind_device_to_driver("/dev/gpu0", "/drv/gpu0")
+        .unwrap();
+    runtime.install_hardware_provider(Box::new(platform));
+
+    let payload = b"frame=dx12-x86-present-001\nqueue=graphics\npresent-mode=mailbox\ncompletion=wait-complete\nsource-api=directx12\ntranslation=compat-to-vulkan";
+    let response = runtime
+        .present_graphics_frame(owner, "/dev/gpu0", payload)
+        .unwrap();
+    assert_eq!(response, 0x4750_0000);
+
+    let scanout = runtime.graphics_scanout_info("/dev/gpu0").unwrap();
+    assert_eq!(scanout.presented_frames, 1);
+    assert_eq!(scanout.last_frame_tag, "dx12-x86-present-001");
+    assert_eq!(scanout.last_source_api_name, "directx12");
+    assert_eq!(scanout.last_translation_label, "compat-to-vulkan");
+    assert_eq!(
+        runtime
+            .read_graphics_scanout_frame("/dev/gpu0", 256)
+            .unwrap(),
+        payload
+    );
+
+    let display = runtime
+        .graphics_display_evidence("/dev/gpu0")
+        .unwrap()
+        .expect("x86 hardware path should expose display evidence");
+    assert_eq!(display.planned_frames, 1);
+    assert_eq!(display.last_present_offset, 0);
+    assert_eq!(display.last_present_len, payload.len() as u64);
+}
+
+#[test]
+fn graphics_present_falls_back_when_platform_x86_64_gpu_provider_is_not_initialized() {
+    let mut backend = SyntheticPciConfigBackend::new();
+    let address = PciAddress {
+        segment: 0,
+        bus: 0,
+        device: 5,
+        function: 0,
+    };
+    backend.define_device(
+        address,
+        DeviceIdentity {
+            vendor_id: 0x10de,
+            device_id: 0x2d04,
+            subsystem_vendor_id: 0x10de,
+            subsystem_device_id: 0x0001,
+            revision_id: 1,
+            base_class: 0x03,
+            sub_class: 0x00,
+            programming_interface: 0x00,
+        },
+        0x10de,
+        0x0001,
+        false,
+        9,
+        1,
+    );
+    backend.define_bar(address, 0, 0xfec0_0000, 0xffff_f000);
+    backend.define_bar(address, 1, 0xd000_0000, 0xf000_0000);
+    let mut platform = X86_64DevicePlatform::new(backend, X86_64DevicePlatformConfig::default());
+    let mut devices = platform.enumerate_devices().unwrap();
+    assert_eq!(devices.len(), 1);
+    let device = devices.remove(0);
+    assert!(device.bars.len() >= 2);
+
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process(
+            "gpu-x86-present-fallback",
+            None,
+            SchedulerClass::LatencyCritical,
+        )
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(30_450), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE,
+            "root",
+        )
+        .unwrap();
+    let gpu = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(30_451), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE,
+            "gpu0",
+        )
+        .unwrap();
+    let driver = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(30_452), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "gpu-driver",
+        )
+        .unwrap();
+
+    runtime
+        .create_vfs_node("/", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/dev", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/drv", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/dev/gpu0", ObjectKind::Device, gpu)
+        .unwrap();
+    runtime
+        .create_vfs_node("/drv/gpu0", ObjectKind::Driver, driver)
+        .unwrap();
+    runtime
+        .bind_device_to_driver("/dev/gpu0", "/drv/gpu0")
+        .unwrap();
+    runtime.install_hardware_provider(Box::new(platform));
+
+    let payload = b"frame=dx12-x86-fallback-001\nqueue=graphics\npresent-mode=mailbox\ncompletion=wait-complete\nsource-api=directx12\ntranslation=compat-to-vulkan";
+    let response = runtime
+        .present_graphics_frame(owner, "/dev/gpu0", payload)
+        .unwrap();
+    let request_id = (response ^ 0x4750_0001) as u64;
+    assert!(request_id > 0);
+
+    assert!(
+        runtime
+            .graphics_display_evidence("/dev/gpu0")
+            .unwrap()
+            .is_none(),
+        "provider without initialized GPU agent must not claim display evidence"
+    );
+
+    let driver_fd = runtime.open_path(owner, "/drv/gpu0").unwrap();
+    let request = String::from_utf8(runtime.read_io(owner, driver_fd, 256).unwrap()).unwrap();
+    assert!(request.contains("kind=Control"));
+    assert!(request.contains("opcode=Some("));
+
+    let info = runtime.device_request_info(request_id).unwrap();
+    assert_eq!(info.frame_tag, "dx12-x86-fallback-001");
+    assert_eq!(info.source_api_name, "directx12");
+    assert_eq!(info.translation_label, "compat-to-vulkan");
 }
 
 #[test]
@@ -2950,6 +3773,334 @@ fn procfs_system_network_views_render_interfaces_and_sockets() {
     assert!(sockets.contains("iface=/dev/net0"));
     assert!(sockets.contains("local=10.1.0.2:4000"));
     assert!(sockets.contains("remote=10.1.0.9:5000"));
+}
+
+#[test]
+fn observe_contract_gates_system_network_procfs_reads() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let target = runtime
+        .spawn_process("net-target", None, SchedulerClass::Interactive)
+        .unwrap();
+    let observer = runtime
+        .spawn_process("net-observer", None, SchedulerClass::Interactive)
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            target,
+            ObjectHandle::new(Handle::new(13_051), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "root",
+        )
+        .unwrap();
+    runtime
+        .create_vfs_node("/", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/dev", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/drv", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/run", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/dev/net0", ObjectKind::Device, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/drv/net0", ObjectKind::Driver, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/run/net0.sock", ObjectKind::Socket, root)
+        .unwrap();
+    runtime
+        .bind_device_to_driver("/dev/net0", "/drv/net0")
+        .unwrap();
+    runtime
+        .configure_network_interface_ipv4(
+            "/dev/net0",
+            [10, 1, 0, 2],
+            [255, 255, 255, 0],
+            [10, 1, 0, 1],
+        )
+        .unwrap();
+    runtime
+        .bind_udp_socket(
+            "/run/net0.sock",
+            target,
+            "/dev/net0",
+            4000,
+            [10, 1, 0, 9],
+            5000,
+        )
+        .unwrap();
+
+    let denied = runtime
+        .read_procfs_path_for(observer, "/proc/system/network/interfaces")
+        .unwrap_err();
+    assert_eq!(
+        denied,
+        RuntimeError::NativeModel(NativeModelError::ProcessContractMissing {
+            kind: ContractKind::Observe
+        })
+    );
+
+    let denied = runtime
+        .read_procfs_path_for(observer, "/proc/system/network/sockets")
+        .unwrap_err();
+    assert_eq!(
+        denied,
+        RuntimeError::NativeModel(NativeModelError::ProcessContractMissing {
+            kind: ContractKind::Observe
+        })
+    );
+
+    let domain = runtime.create_domain(observer, None, "obs").unwrap();
+    let resource = runtime
+        .create_resource(observer, domain, ResourceKind::Namespace, "inspect")
+        .unwrap();
+    runtime
+        .set_resource_contract_policy(resource, ResourceContractPolicy::Observe)
+        .unwrap();
+    let contract = runtime
+        .create_contract(observer, domain, resource, ContractKind::Observe, "observe")
+        .unwrap();
+    runtime.bind_process_contract(observer, contract).unwrap();
+
+    let interfaces = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, "/proc/system/network/interfaces")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(interfaces.contains("/dev/net0"));
+    assert!(interfaces.contains("driver=/drv/net0"));
+
+    let sockets = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, "/proc/system/network/sockets")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(sockets.contains("/run/net0.sock"));
+    assert!(sockets.contains("iface=/dev/net0"));
+}
+
+#[test]
+fn procfs_system_io_renders_decisions_and_fd_state() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process("io-observe", None, SchedulerClass::Interactive)
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(13_101), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "root",
+        )
+        .unwrap();
+    runtime
+        .create_vfs_node("/", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/note", ObjectKind::File, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/dev", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/dev/tty0", ObjectKind::Device, root)
+        .unwrap();
+
+    let fd = runtime.open_path(owner, "/note").unwrap();
+    let device_fd = runtime.open_path(owner, "/dev/tty0").unwrap();
+    let _ = runtime.read_io(owner, fd, 3).unwrap();
+    assert_eq!(runtime.write_io(owner, fd, b"hello").unwrap(), 5);
+    assert_eq!(runtime.write_io(owner, device_fd, b"ping").unwrap(), 4);
+    runtime
+        .register_readiness(
+            owner,
+            device_fd,
+            ReadinessInterest {
+                readable: false,
+                writable: true,
+                priority: false,
+            },
+        )
+        .unwrap();
+    let ready = runtime.collect_ready().unwrap();
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].fd, device_fd);
+
+    let system = String::from_utf8(runtime.read_procfs_path("/proc/system/io").unwrap()).unwrap();
+    assert!(system.contains("io-decisions:"));
+    assert!(system.contains("reads:"));
+    assert!(system.contains("writes:"));
+    assert!(system.contains("readiness:"));
+    assert!(system.contains("fd-total:"));
+    assert!(system.contains("ReadAgent"));
+    assert!(system.contains("WriteAgent"));
+    assert!(system.contains("ReadinessAgent"));
+
+    let proc_io = String::from_utf8(
+        runtime
+            .read_procfs_path(&format!("/proc/{}/io", owner.raw()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(proc_io.contains(&format!("pid:\t{}", owner.raw())));
+    assert!(proc_io.contains("fd-count:\t2"));
+    assert!(proc_io.contains("readiness:\t1"));
+    assert!(proc_io.contains("last:\tReadinessAgent"));
+    assert!(proc_io.contains("fd\t"));
+    assert!(proc_io.contains("state="));
+}
+
+#[test]
+fn observe_contract_gates_system_io_procfs_reads() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let target = runtime
+        .spawn_process("target", None, SchedulerClass::Interactive)
+        .unwrap();
+    let observer = runtime
+        .spawn_process("observer", None, SchedulerClass::Interactive)
+        .unwrap();
+
+    let denied = runtime
+        .read_procfs_path_for(observer, "/proc/system/io")
+        .unwrap_err();
+    assert_eq!(
+        denied,
+        RuntimeError::NativeModel(NativeModelError::ProcessContractMissing {
+            kind: ContractKind::Observe
+        })
+    );
+
+    let denied = runtime
+        .read_procfs_path_for(observer, &format!("/proc/{}/io", target.raw()))
+        .unwrap_err();
+    assert_eq!(
+        denied,
+        RuntimeError::NativeModel(NativeModelError::ProcessContractMissing {
+            kind: ContractKind::Observe
+        })
+    );
+
+    let domain = runtime.create_domain(observer, None, "obs").unwrap();
+    let resource = runtime
+        .create_resource(observer, domain, ResourceKind::Namespace, "inspect")
+        .unwrap();
+    runtime
+        .set_resource_contract_policy(resource, ResourceContractPolicy::Observe)
+        .unwrap();
+    let contract = runtime
+        .create_contract(observer, domain, resource, ContractKind::Observe, "observe")
+        .unwrap();
+    runtime.bind_process_contract(observer, contract).unwrap();
+
+    let system = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, "/proc/system/io")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(system.contains("io-decisions:"));
+
+    let target_view = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, &format!("/proc/{}/io", target.raw()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(target_view.contains(&format!("pid:\t{}", target.raw())));
+}
+
+#[test]
+fn observe_contract_gates_process_io_procfs_reads() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let target = runtime
+        .spawn_process("target-io", None, SchedulerClass::Interactive)
+        .unwrap();
+    let observer = runtime
+        .spawn_process("observer-io", None, SchedulerClass::Interactive)
+        .unwrap();
+
+    let root = runtime
+        .grant_capability(
+            target,
+            ObjectHandle::new(Handle::new(13_700), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "root",
+        )
+        .unwrap();
+    runtime
+        .create_vfs_node("/", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/note", ObjectKind::File, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/dev", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/dev/tty0", ObjectKind::Device, root)
+        .unwrap();
+
+    let fd = runtime.open_path(target, "/note").unwrap();
+    let device_fd = runtime.open_path(target, "/dev/tty0").unwrap();
+    let _ = runtime.read_io(target, fd, 3).unwrap();
+    assert_eq!(runtime.write_io(target, fd, b"hello").unwrap(), 5);
+    assert_eq!(runtime.write_io(target, device_fd, b"ping").unwrap(), 4);
+    runtime
+        .register_readiness(
+            target,
+            device_fd,
+            ReadinessInterest {
+                readable: false,
+                writable: true,
+                priority: false,
+            },
+        )
+        .unwrap();
+    let ready = runtime.collect_ready().unwrap();
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].fd, device_fd);
+
+    let denied = runtime
+        .read_procfs_path_for(observer, &format!("/proc/{}/io", target.raw()))
+        .unwrap_err();
+    assert_eq!(
+        denied,
+        RuntimeError::NativeModel(NativeModelError::ProcessContractMissing {
+            kind: ContractKind::Observe
+        })
+    );
+
+    let domain = runtime.create_domain(observer, None, "obs").unwrap();
+    let resource = runtime
+        .create_resource(observer, domain, ResourceKind::Namespace, "inspect")
+        .unwrap();
+    runtime
+        .set_resource_contract_policy(resource, ResourceContractPolicy::Observe)
+        .unwrap();
+    let contract = runtime
+        .create_contract(observer, domain, resource, ContractKind::Observe, "observe")
+        .unwrap();
+    runtime.bind_process_contract(observer, contract).unwrap();
+
+    let proc_io = String::from_utf8(
+        runtime
+            .read_procfs_path_for(observer, &format!("/proc/{}/io", target.raw()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(proc_io.contains(&format!("pid:\t{}", target.raw())));
+    assert!(proc_io.contains("fd-count:\t2"));
+    assert!(proc_io.contains("readiness:\t1"));
+    assert!(proc_io.contains("last:\tReadinessAgent"));
+    assert!(proc_io.contains("fd\t"));
+    assert!(proc_io.contains("state="));
 }
 
 #[test]
@@ -4096,3 +5247,331 @@ fn graphics_tensor_evidence_updates_after_dispatch() {
     assert_eq!(after.last_kernel_id, 77);
     assert!(!after.hardware_tensor_confirmed);
 }
+
+#[test]
+fn tcp_listen_creates_socket_with_correct_state() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process("tcp-server", None, SchedulerClass::LatencyCritical)
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(31_500), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE,
+            "root",
+        )
+        .unwrap();
+    for (path, kind) in [
+        ("/", ObjectKind::Directory),
+        ("/dev", ObjectKind::Directory),
+        ("/drv", ObjectKind::Directory),
+        ("/run", ObjectKind::Directory),
+        ("/dev/net6", ObjectKind::Device),
+        ("/drv/net6", ObjectKind::Driver),
+        ("/run/tcp-server.sock", ObjectKind::Socket),
+    ] {
+        runtime.create_vfs_node(path, kind, root).unwrap();
+    }
+    runtime
+        .bind_device_to_driver("/dev/net6", "/drv/net6")
+        .unwrap();
+    runtime
+        .configure_network_interface_ipv4(
+            "/dev/net6",
+            [10, 6, 0, 2],
+            [255, 255, 255, 0],
+            [10, 6, 0, 1],
+        )
+        .unwrap();
+
+    runtime
+        .tcp_listen("/run/tcp-server.sock", owner, "/dev/net6", 8080, 128)
+        .unwrap();
+
+    let info = runtime.network_socket_info("/run/tcp-server.sock").unwrap();
+    assert_eq!(info.local_port, 8080);
+    assert_eq!(info.socket_type, crate::device_model::SocketType::Tcp);
+    assert_eq!(info.tcp_state, Some(crate::device_model::TcpState::Listen));
+}
+
+#[test]
+fn tcp_state_machine_transitions_through_handshake() {
+    use crate::device_model::{TcpFlags, TcpSegment, TcpState};
+
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process("tcp-handshake", None, SchedulerClass::LatencyCritical)
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(31_600), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE,
+            "root",
+        )
+        .unwrap();
+    for (path, kind) in [
+        ("/", ObjectKind::Directory),
+        ("/dev", ObjectKind::Directory),
+        ("/drv", ObjectKind::Directory),
+        ("/run", ObjectKind::Directory),
+        ("/dev/net7", ObjectKind::Device),
+        ("/drv/net7", ObjectKind::Driver),
+        ("/run/tcp-client.sock", ObjectKind::Socket),
+    ] {
+        runtime.create_vfs_node(path, kind, root).unwrap();
+    }
+    runtime
+        .bind_device_to_driver("/dev/net7", "/drv/net7")
+        .unwrap();
+    runtime
+        .configure_network_interface_ipv4(
+            "/dev/net7",
+            [10, 7, 0, 2],
+            [255, 255, 255, 0],
+            [10, 7, 0, 1],
+        )
+        .unwrap();
+
+    runtime
+        .tcp_listen("/run/tcp-client.sock", owner, "/dev/net7", 9090, 16)
+        .unwrap();
+
+    let info = runtime.network_socket_info("/run/tcp-client.sock").unwrap();
+    assert_eq!(info.tcp_state, Some(TcpState::Listen));
+    assert_eq!(info.local_port, 9090);
+
+    let syn_segment = TcpSegment {
+        seq: 1000,
+        ack: 0,
+        window: 65535,
+        flags: TcpFlags {
+            syn: true,
+            ack: false,
+            fin: false,
+            rst: false,
+            psh: false,
+            urg: false,
+        },
+        payload: Vec::new(),
+        local_port: 80,
+        remote_port: 9090,
+    };
+
+    runtime
+        .tcp_process_incoming_segment(
+            "/run/tcp-client.sock",
+            owner,
+            syn_segment,
+            runtime.current_tick.wrapping_add(10),
+        )
+        .unwrap();
+
+    let info = runtime.network_socket_info("/run/tcp-client.sock").unwrap();
+    assert_eq!(info.tcp_state, Some(TcpState::SynReceived));
+}
+
+#[test]
+fn tcp_close_transitions_to_fin_wait() {
+    use crate::device_model::TcpState;
+
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process("tcp-close", None, SchedulerClass::LatencyCritical)
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(31_700), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE,
+            "root",
+        )
+        .unwrap();
+    for (path, kind) in [
+        ("/", ObjectKind::Directory),
+        ("/dev", ObjectKind::Directory),
+        ("/drv", ObjectKind::Directory),
+        ("/run", ObjectKind::Directory),
+        ("/dev/net8", ObjectKind::Device),
+        ("/drv/net8", ObjectKind::Driver),
+        ("/run/tcp-close.sock", ObjectKind::Socket),
+    ] {
+        runtime.create_vfs_node(path, kind, root).unwrap();
+    }
+    runtime
+        .bind_device_to_driver("/dev/net8", "/drv/net8")
+        .unwrap();
+    runtime
+        .configure_network_interface_ipv4(
+            "/dev/net8",
+            [10, 8, 0, 2],
+            [255, 255, 255, 0],
+            [10, 8, 0, 1],
+        )
+        .unwrap();
+    runtime
+        .tcp_listen("/run/tcp-close.sock", owner, "/dev/net8", 7070, 16)
+        .unwrap();
+
+    runtime
+        .tcp_close("/run/tcp-close.sock", owner, runtime.current_tick)
+        .unwrap();
+
+    let info = runtime.network_socket_info("/run/tcp-close.sock").unwrap();
+    assert_eq!(info.tcp_state, Some(TcpState::Closed));
+}
+
+#[test]
+fn tcp_accept_returns_connection_from_queue() {
+    use crate::device_model::{TcpFlags, TcpSegment, TcpState};
+
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let server = runtime
+        .spawn_process("tcp-server", None, SchedulerClass::LatencyCritical)
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            server,
+            ObjectHandle::new(Handle::new(31_800), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE,
+            "root",
+        )
+        .unwrap();
+    for (path, kind) in [
+        ("/", ObjectKind::Directory),
+        ("/dev", ObjectKind::Directory),
+        ("/drv", ObjectKind::Directory),
+        ("/run", ObjectKind::Directory),
+        ("/dev/net9", ObjectKind::Device),
+        ("/drv/net9", ObjectKind::Driver),
+        ("/run/tcp-server.sock", ObjectKind::Socket),
+    ] {
+        runtime.create_vfs_node(path, kind, root).unwrap();
+    }
+    runtime
+        .bind_device_to_driver("/dev/net9", "/drv/net9")
+        .unwrap();
+    runtime
+        .configure_network_interface_ipv4(
+            "/dev/net9",
+            [10, 9, 0, 2],
+            [255, 255, 255, 0],
+            [10, 9, 0, 1],
+        )
+        .unwrap();
+    runtime
+        .tcp_listen("/run/tcp-server.sock", server, "/dev/net9", 8080, 16)
+        .unwrap();
+
+    let info = runtime.network_socket_info("/run/tcp-server.sock").unwrap();
+    assert_eq!(info.tcp_state, Some(TcpState::Listen));
+
+    let syn_segment = TcpSegment {
+        seq: 5000,
+        ack: 0,
+        window: 65535,
+        flags: TcpFlags {
+            syn: true,
+            ack: false,
+            fin: false,
+            rst: false,
+            psh: false,
+            urg: false,
+        },
+        payload: Vec::new(),
+        local_port: 12345,
+        remote_port: 8080,
+    };
+
+    runtime
+        .tcp_process_incoming_segment(
+            "/run/tcp-server.sock",
+            server,
+            syn_segment,
+            runtime.current_tick,
+        )
+        .unwrap();
+
+    let info = runtime.network_socket_info("/run/tcp-server.sock").unwrap();
+    assert_eq!(info.tcp_state, Some(TcpState::SynReceived));
+}
+
+#[test]
+fn tcp_send_recv_transfers_data_bidirectionally() {
+    use crate::device_model::{TcpFlags, TcpSegment, TcpState};
+
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process("tcp-data", None, SchedulerClass::LatencyCritical)
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(31_900), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE,
+            "root",
+        )
+        .unwrap();
+    for (path, kind) in [
+        ("/", ObjectKind::Directory),
+        ("/dev", ObjectKind::Directory),
+        ("/drv", ObjectKind::Directory),
+        ("/run", ObjectKind::Directory),
+        ("/dev/net10", ObjectKind::Device),
+        ("/drv/net10", ObjectKind::Driver),
+        ("/run/tcp-data.sock", ObjectKind::Socket),
+    ] {
+        runtime.create_vfs_node(path, kind, root).unwrap();
+    }
+    runtime
+        .bind_device_to_driver("/dev/net10", "/drv/net10")
+        .unwrap();
+    runtime
+        .configure_network_interface_ipv4(
+            "/dev/net10",
+            [10, 10, 0, 2],
+            [255, 255, 255, 0],
+            [10, 10, 0, 1],
+        )
+        .unwrap();
+
+    let local_port = 12345u16;
+    runtime
+        .tcp_listen("/run/tcp-data.sock", owner, "/dev/net10", local_port, 16)
+        .unwrap();
+
+    runtime
+        .tcp_connect("/run/tcp-data.sock", owner, [10, 10, 0, 1], 80, runtime.current_tick)
+        .unwrap();
+
+    let syn_ack_segment = TcpSegment {
+        seq: 9000,
+        ack: 1,
+        window: 65535,
+        flags: TcpFlags {
+            syn: true,
+            ack: true,
+            fin: false,
+            rst: false,
+            psh: false,
+            urg: false,
+        },
+        payload: Vec::new(),
+        local_port: 80,
+        remote_port: 0,
+    };
+
+    runtime
+        .tcp_process_incoming_segment(
+            "/run/tcp-data.sock",
+            owner,
+            syn_ack_segment,
+            runtime.current_tick.wrapping_add(5),
+        )
+        .unwrap();
+
+    let info = runtime.network_socket_info("/run/tcp-data.sock").unwrap();
+    assert_eq!(info.tcp_state, Some(TcpState::Established));
+}
+

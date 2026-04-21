@@ -1,0 +1,4 @@
+cargo:rerun-if-changed=../platform-x86_64/linker/kernel-x86_64.ld
+cargo:rerun-if-changed=src/entry.S
+cargo:rerun-if-changed=src/smp_trampoline.S
+cargo:rerun-if-changed=src/traps.S

@@ -17,6 +17,6 @@ browser-html = { path = "../browser-html" }
 browser-css = { path = "../browser-css" }
 browser-dom = { path = "../browser-dom" }
 browser-layout = { path = "../browser-layout" }
-browser-paint = { path = "../browser-paint" }
+browser-paint = { path = "../browser-paint", features = ["skia"] }
 browser-ui = { path = "../browser-ui" }
 browser-js = { path = "../browser-js" }

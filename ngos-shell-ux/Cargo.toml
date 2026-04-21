@@ -1,0 +1,12 @@
+[package]
+name = "ngos-shell-ux"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "ngos_shell_ux"
+
+[dependencies]
+ngos-shell-types = { path = "../ngos-shell-types" }
+ngos-user-abi    = { path = "../user-abi" }
+ngos-user-runtime = { path = "../user-runtime" }

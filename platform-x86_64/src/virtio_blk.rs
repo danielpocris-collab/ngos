@@ -1,3 +1,18 @@
+//! Canonical subsystem role:
+//! - subsystem: x86_64 virtio block transport mediation
+//! - owner layer: platform mediation
+//! - semantic owner: `platform-x86_64`
+//! - truth path role: platform-specific virtio block hardware mechanics for
+//!   the real x86 path
+//!
+//! Canonical contract families handled here:
+//! - virtio block transport contracts
+//! - MMIO/config-space mediation contracts
+//! - block queue and interrupt mechanism contracts
+//!
+//! This module may mediate virtio block hardware behavior, but it must not
+//! redefine higher-level storage or device-runtime truth owned by `kernel-core`.
+
 use alloc::vec::Vec;
 use core::mem::size_of;
 use core::ptr::{read_volatile, write_volatile};

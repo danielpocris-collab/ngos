@@ -1,4 +1,4 @@
-use alloc::{string::String, vec::Vec};
+use alloc::{string::String, vec, vec::Vec};
 use core::str;
 
 use crate::Runtime;
@@ -10,18 +10,45 @@ const SECTION_CUSTOM: u8 = 0;
 const SECTION_TYPE: u8 = 1;
 const SECTION_IMPORT: u8 = 2;
 const SECTION_FUNCTION: u8 = 3;
+const SECTION_MEMORY: u8 = 5;
 const SECTION_EXPORT: u8 = 7;
 const SECTION_CODE: u8 = 10;
 const KIND_FUNCTION: u8 = 0x00;
+const KIND_MEMORY: u8 = 0x02;
 const VALTYPE_I32: u8 = 0x7f;
 const VALTYPE_I64: u8 = 0x7e;
 const BLOCKTYPE_EMPTY: u8 = 0x40;
-const OPCODE_CALL: u8 = 0x10;
-const OPCODE_I32_CONST: u8 = 0x41;
-const OPCODE_I64_EQZ: u8 = 0x50;
+const OPCODE_UNREACHABLE: u8 = 0x00;
+const OPCODE_NOP: u8 = 0x01;
+const OPCODE_LOOP: u8 = 0x03;
 const OPCODE_IF: u8 = 0x04;
 const OPCODE_ELSE: u8 = 0x05;
 const OPCODE_END: u8 = 0x0b;
+const OPCODE_BR: u8 = 0x0c;
+const OPCODE_BR_IF: u8 = 0x0d;
+const OPCODE_RETURN: u8 = 0x0f;
+const OPCODE_CALL: u8 = 0x10;
+const OPCODE_DROP: u8 = 0x1a;
+const OPCODE_SELECT: u8 = 0x1b;
+const OPCODE_LOCAL_GET: u8 = 0x20;
+const OPCODE_LOCAL_SET: u8 = 0x21;
+const OPCODE_LOCAL_TEE: u8 = 0x22;
+const OPCODE_I32_LOAD: u8 = 0x28;
+const OPCODE_I64_LOAD: u8 = 0x29;
+const OPCODE_I32_STORE: u8 = 0x36;
+const OPCODE_I64_STORE: u8 = 0x37;
+const OPCODE_I32_CONST: u8 = 0x41;
+const OPCODE_I64_CONST: u8 = 0x42;
+const OPCODE_I32_EQZ: u8 = 0x45;
+const OPCODE_I64_EQZ: u8 = 0x50;
+const OPCODE_I32_EQ: u8 = 0x46;
+const OPCODE_I32_NE: u8 = 0x47;
+const OPCODE_I32_LT_S: u8 = 0x48;
+const OPCODE_I32_ADD: u8 = 0x6a;
+const OPCODE_I32_SUB: u8 = 0x6b;
+const OPCODE_I32_MUL: u8 = 0x6c;
+const OPCODE_MEMORY_SIZE: u8 = 0x3f;
+const OPCODE_MEMORY_GROW: u8 = 0x40;
 const EXPORT_RUN: &str = "run";
 const IMPORT_MODULE: &str = "ngos";
 const IMPORT_OBSERVE_PROCESS_CAPABILITY_COUNT: &str = "observe-process-capability-count";
@@ -193,6 +220,9 @@ enum Value {
     I64(i64),
 }
 
+const WASM_PAGE_SIZE: usize = 65536;
+const WASM_MAX_PAGES: usize = 65536;
+
 pub fn execute_wasm_component<B: SyscallBackend>(
     runtime: &Runtime<B>,
     artifact: &[u8],
@@ -225,9 +255,15 @@ pub fn execute_wasm_component<B: SyscallBackend>(
         process_status_bytes,
         process_cwd_root,
     };
-    let mut stack = Vec::with_capacity(8);
-    let raw_verdict =
-        execute_function(&module, module.run_function_index, &observation, &mut stack)?;
+    let mut stack = Vec::with_capacity(16);
+    let mut memory = vec![0u8; WASM_PAGE_SIZE];
+    let raw_verdict = execute_function(
+        &module,
+        module.run_function_index,
+        &observation,
+        &mut stack,
+        &mut memory,
+    )?;
     let verdict = WasmVerdict::from_code(raw_verdict).ok_or(WasmExecutionError::Trap {
         reason: "unknown verdict code",
     })?;
@@ -236,6 +272,30 @@ pub fn execute_wasm_component<B: SyscallBackend>(
         verdict,
         granted_capabilities: granted_capabilities.to_vec(),
     })
+}
+
+/// Load and execute a WASM module from the filesystem.
+pub fn execute_wasm_file<B: SyscallBackend>(
+    runtime: &Runtime<B>,
+    path: &str,
+    pid: u64,
+    granted_capabilities: &[WasmCapability],
+) -> Result<WasmExecutionReport, WasmExecutionError> {
+    let fd = runtime.open_path(path).map_err(|e| match e {
+        Errno::NoEnt => WasmExecutionError::InvalidModule {
+            reason: "wasm file not found",
+        },
+        Errno::Access => WasmExecutionError::InvalidModule {
+            reason: "permission denied",
+        },
+        _ => WasmExecutionError::Syscall(e),
+    })?;
+
+    let mut buffer = [0u8; 65536];
+    let len = runtime.read(fd, &mut buffer).map_err(WasmExecutionError::Syscall)?;
+    runtime.close(fd).ok();
+
+    execute_wasm_component(runtime, &buffer[..len], pid, granted_capabilities)
 }
 
 fn capability_for_import(module: &str, name: &str) -> Result<WasmCapability, WasmExecutionError> {
@@ -436,6 +496,7 @@ fn execute_function(
     function_index: u32,
     observation: &WasmObservation,
     stack: &mut Vec<Value>,
+    memory: &mut Vec<u8>,
 ) -> Result<i32, WasmExecutionError> {
     if function_index < module.imports.len() as u32 {
         return Err(WasmExecutionError::Trap {
@@ -463,11 +524,17 @@ fn execute_function(
     }
 
     let mut offset = 0usize;
-    let local_group_count = read_uleb(function.body, &mut offset)?;
-    if local_group_count != 0 {
-        return Err(WasmExecutionError::Trap {
-            reason: "locals are unsupported in first wasm host",
-        });
+    let local_group_count = read_uleb(function.body, &mut offset)? as usize;
+    let mut locals = Vec::<Value>::new();
+    for _ in 0..local_group_count {
+        let count = read_uleb(function.body, &mut offset)? as usize;
+        let val_type = read_val_type(function.body, &mut offset)?;
+        for _ in 0..count {
+            locals.push(match val_type {
+                ValueType::I32 => Value::I32(0),
+                ValueType::I64 => Value::I64(0),
+            });
+        }
     }
     let stack_base = stack.len();
     let terminator = execute_block(
@@ -477,6 +544,8 @@ fn execute_function(
         &module.types,
         observation,
         stack,
+        &mut locals,
+        memory,
     )?;
     if terminator != BlockTerminator::End {
         return Err(WasmExecutionError::Trap {
@@ -509,20 +578,197 @@ fn execute_block(
     types: &[FunctionType],
     observation: &WasmObservation,
     stack: &mut Vec<Value>,
+    locals: &mut Vec<Value>,
+    memory: &mut Vec<u8>,
 ) -> Result<BlockTerminator, WasmExecutionError> {
     let mut offset = 0usize;
-    while offset < code.len() {
+    loop {
+        if offset >= code.len() {
+            return Err(WasmExecutionError::Trap {
+                reason: "unterminated block",
+            });
+        }
         match read_u8(code, &mut offset)? {
+            OPCODE_UNREACHABLE => {
+                return Err(WasmExecutionError::Trap {
+                    reason: "unreachable executed",
+                });
+            }
+            OPCODE_NOP => {}
+            OPCODE_DROP => {
+                stack.pop().ok_or(WasmExecutionError::Trap {
+                    reason: "stack underflow on drop",
+                })?;
+            }
+            OPCODE_SELECT => {
+                let cond = pop_i32(stack)?;
+                let val2 = stack.pop().ok_or(WasmExecutionError::Trap {
+                    reason: "stack underflow on select",
+                })?;
+                let val1 = stack.pop().ok_or(WasmExecutionError::Trap {
+                    reason: "stack underflow on select",
+                })?;
+                if cond != 0 {
+                    stack.push(val1);
+                } else {
+                    stack.push(val2);
+                }
+            }
+            OPCODE_LOCAL_GET => {
+                let index = read_uleb(code, &mut offset)? as usize;
+                let value = *locals.get(index).ok_or(WasmExecutionError::Trap {
+                    reason: "local index out of range",
+                })?;
+                stack.push(value);
+            }
+            OPCODE_LOCAL_SET => {
+                let index = read_uleb(code, &mut offset)? as usize;
+                let value = stack.pop().ok_or(WasmExecutionError::Trap {
+                    reason: "stack underflow on local.set",
+                })?;
+                if index >= locals.len() {
+                    return Err(WasmExecutionError::Trap {
+                        reason: "local index out of range",
+                    });
+                }
+                locals[index] = value;
+            }
+            OPCODE_LOCAL_TEE => {
+                let index = read_uleb(code, &mut offset)? as usize;
+                let value = *stack.last().ok_or(WasmExecutionError::Trap {
+                    reason: "stack underflow on local.tee",
+                })?;
+                if index >= locals.len() {
+                    return Err(WasmExecutionError::Trap {
+                        reason: "local index out of range",
+                    });
+                }
+                locals[index] = value;
+            }
+            OPCODE_I32_LOAD => {
+                let _align = read_uleb(code, &mut offset)?;
+                let offset_mem = read_uleb(code, &mut offset)? as usize;
+                let addr = (pop_i32(stack)? as u32) as usize + offset_mem;
+                if addr + 4 > memory.len() {
+                    return Err(WasmExecutionError::Trap {
+                        reason: "out of bounds memory access",
+                    });
+                }
+                let value = i32::from_le_bytes([
+                    memory[addr],
+                    memory[addr + 1],
+                    memory[addr + 2],
+                    memory[addr + 3],
+                ]);
+                stack.push(Value::I32(value));
+            }
+            OPCODE_I64_LOAD => {
+                let _align = read_uleb(code, &mut offset)?;
+                let offset_mem = read_uleb(code, &mut offset)? as usize;
+                let addr = (pop_i32(stack)? as u32) as usize + offset_mem;
+                if addr + 8 > memory.len() {
+                    return Err(WasmExecutionError::Trap {
+                        reason: "out of bounds memory access",
+                    });
+                }
+                let value = i64::from_le_bytes([
+                    memory[addr],
+                    memory[addr + 1],
+                    memory[addr + 2],
+                    memory[addr + 3],
+                    memory[addr + 4],
+                    memory[addr + 5],
+                    memory[addr + 6],
+                    memory[addr + 7],
+                ]);
+                stack.push(Value::I64(value));
+            }
+            OPCODE_I32_STORE => {
+                let _align = read_uleb(code, &mut offset)?;
+                let offset_mem = read_uleb(code, &mut offset)? as usize;
+                let value = pop_i32(stack)?;
+                let addr = (pop_i32(stack)? as u32) as usize + offset_mem;
+                if addr + 4 > memory.len() {
+                    return Err(WasmExecutionError::Trap {
+                        reason: "out of bounds memory access",
+                    });
+                }
+                memory[addr..addr + 4].copy_from_slice(&value.to_le_bytes());
+            }
+            OPCODE_I64_STORE => {
+                let _align = read_uleb(code, &mut offset)?;
+                let offset_mem = read_uleb(code, &mut offset)? as usize;
+                let value = pop_i64(stack)?;
+                let addr = (pop_i32(stack)? as u32) as usize + offset_mem;
+                if addr + 8 > memory.len() {
+                    return Err(WasmExecutionError::Trap {
+                        reason: "out of bounds memory access",
+                    });
+                }
+                memory[addr..addr + 8].copy_from_slice(&value.to_le_bytes());
+            }
+            OPCODE_MEMORY_SIZE => {
+                stack.push(Value::I32((memory.len() / WASM_PAGE_SIZE) as i32));
+            }
+            OPCODE_MEMORY_GROW => {
+                let delta = pop_i32(stack)? as usize;
+                let current_pages = memory.len() / WASM_PAGE_SIZE;
+                let new_pages = current_pages + delta;
+                if new_pages > WASM_MAX_PAGES {
+                    stack.push(Value::I32(-1));
+                } else {
+                    let new_len = new_pages * WASM_PAGE_SIZE;
+                    memory.resize(new_len, 0);
+                    stack.push(Value::I32(current_pages as i32));
+                }
+            }
             OPCODE_CALL => {
                 let index = read_uleb(code, &mut offset)?;
-                invoke_function(index, imports, functions, types, observation, stack)?
+                invoke_function(index, imports, functions, types, observation, stack, locals, memory)?;
+            }
+            OPCODE_I32_CONST => {
+                stack.push(Value::I32(read_sleb_i32(code, &mut offset)?));
+            }
+            OPCODE_I64_CONST => {
+                stack.push(Value::I64(read_sleb_i64(code, &mut offset)?));
+            }
+            OPCODE_I32_EQZ => {
+                let value = pop_i32(stack)?;
+                stack.push(Value::I32(i32::from(value == 0)));
             }
             OPCODE_I64_EQZ => {
                 let value = pop_i64(stack)?;
                 stack.push(Value::I32(i32::from(value == 0)));
             }
-            OPCODE_I32_CONST => {
-                stack.push(Value::I32(read_sleb_i32(code, &mut offset)?));
+            OPCODE_I32_EQ => {
+                let b = pop_i32(stack)?;
+                let a = pop_i32(stack)?;
+                stack.push(Value::I32(i32::from(a == b)));
+            }
+            OPCODE_I32_NE => {
+                let b = pop_i32(stack)?;
+                let a = pop_i32(stack)?;
+                stack.push(Value::I32(i32::from(a != b)));
+            }
+            OPCODE_I32_LT_S => {
+                let b = pop_i32(stack)?;
+                let a = pop_i32(stack)?;
+                stack.push(Value::I32(i32::from(a < b)));
+            }
+            OPCODE_I32_ADD => {
+                let b = pop_i32(stack)?;
+                let a = pop_i32(stack)?;
+                stack.push(Value::I32(a.wrapping_add(b)));
+            }
+            OPCODE_I32_SUB => {
+                let b = pop_i32(stack)?;
+                let a = pop_i32(stack)?;
+                stack.push(Value::I32(a.wrapping_sub(b)));
+            }
+            OPCODE_I32_MUL => {
+                let b = pop_i32(stack)?;
+                let a = pop_i32(stack)?;
+                stack.push(Value::I32(a.wrapping_mul(b)));
             }
             OPCODE_IF => {
                 let block_type = read_u8(code, &mut offset)?;
@@ -535,7 +781,47 @@ fn execute_block(
                     types,
                     observation,
                     stack,
+                    locals,
+                    memory,
                 )?;
+            }
+            OPCODE_LOOP => {
+                let _block_type = read_u8(code, &mut offset)?;
+                let loop_start = offset;
+                loop {
+                    let terminator = execute_block(
+                        &code[offset..],
+                        imports,
+                        functions,
+                        types,
+                        observation,
+                        stack,
+                        locals,
+                        memory,
+                    )?;
+                    offset = advance_block_offset(code, offset)?;
+                    if terminator == BlockTerminator::End {
+                        break;
+                    }
+                    offset = loop_start;
+                }
+            }
+            OPCODE_BR => {
+                let _label = read_uleb(code, &mut offset)?;
+                return Ok(BlockTerminator::End);
+            }
+            OPCODE_BR_IF => {
+                let label = read_uleb(code, &mut offset)?;
+                let cond = pop_i32(stack)?;
+                if cond != 0 {
+                    for _ in 0..label {
+                        let _ = skip_to_else_or_end(code, offset)?;
+                    }
+                    return Ok(BlockTerminator::End);
+                }
+            }
+            OPCODE_RETURN => {
+                return Ok(BlockTerminator::End);
             }
             OPCODE_ELSE => return Ok(BlockTerminator::Else),
             OPCODE_END => return Ok(BlockTerminator::End),
@@ -546,9 +832,6 @@ fn execute_block(
             }
         }
     }
-    Err(WasmExecutionError::Trap {
-        reason: "unterminated block",
-    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -561,6 +844,8 @@ fn execute_if(
     types: &[FunctionType],
     observation: &WasmObservation,
     stack: &mut Vec<Value>,
+    locals: &mut Vec<Value>,
+    memory: &mut Vec<u8>,
 ) -> Result<(), WasmExecutionError> {
     if block_type != BLOCKTYPE_EMPTY && block_type != VALTYPE_I32 {
         return Err(WasmExecutionError::Trap {
@@ -578,6 +863,8 @@ fn execute_if(
             types,
             observation,
             stack,
+            locals,
+            memory,
         )?;
         *offset = advance_block_offset(code, *offset)?;
         if branch == BlockTerminator::Else {
@@ -594,6 +881,8 @@ fn execute_if(
                     types,
                     observation,
                     stack,
+                    locals,
+                    memory,
                 )?;
                 if branch != BlockTerminator::End {
                     return Err(WasmExecutionError::Trap {
@@ -623,6 +912,8 @@ fn invoke_function(
     types: &[FunctionType],
     observation: &WasmObservation,
     stack: &mut Vec<Value>,
+    locals: &mut Vec<Value>,
+    memory: &mut Vec<u8>,
 ) -> Result<(), WasmExecutionError> {
     if function_index < imports.len() as u32 {
         let import = &imports[function_index as usize];
@@ -662,10 +953,17 @@ fn invoke_function(
         });
     }
     let mut body_offset = 0usize;
-    if read_uleb(function.body, &mut body_offset)? != 0 {
-        return Err(WasmExecutionError::Trap {
-            reason: "locals are unsupported",
-        });
+    let local_group_count = read_uleb(function.body, &mut body_offset)? as usize;
+    let mut callee_locals = Vec::<Value>::new();
+    for _ in 0..local_group_count {
+        let count = read_uleb(function.body, &mut body_offset)? as usize;
+        let val_type = read_val_type(function.body, &mut body_offset)?;
+        for _ in 0..count {
+            callee_locals.push(match val_type {
+                ValueType::I32 => Value::I32(0),
+                ValueType::I64 => Value::I64(0),
+            });
+        }
     }
     let stack_base = stack.len();
     let terminator = execute_block(
@@ -675,6 +973,8 @@ fn invoke_function(
         types,
         observation,
         stack,
+        &mut callee_locals,
+        memory,
     )?;
     if terminator != BlockTerminator::End {
         return Err(WasmExecutionError::Trap {
@@ -849,6 +1149,29 @@ fn read_sleb_i32(bytes: &[u8], offset: &mut usize) -> Result<i32, WasmExecutionE
     Ok(value)
 }
 
+fn read_sleb_i64(bytes: &[u8], offset: &mut usize) -> Result<i64, WasmExecutionError> {
+    let mut shift = 0u32;
+    let mut value = 0i64;
+    let mut byte;
+    loop {
+        byte = read_u8(bytes, offset)?;
+        value |= i64::from(byte & 0x7f) << shift;
+        shift += 7;
+        if byte & 0x80 == 0 {
+            break;
+        }
+        if shift > 63 {
+            return Err(WasmExecutionError::InvalidModule {
+                reason: "sleb too large",
+            });
+        }
+    }
+    if shift < 64 && (byte & 0x40) != 0 {
+        value |= !0 << shift;
+    }
+    Ok(value)
+}
+
 fn ensure_consumed(section: &[u8], offset: usize) -> Result<(), WasmExecutionError> {
     if offset == section.len() {
         Ok(())
@@ -1004,5 +1327,54 @@ mod tests {
         assert_eq!(report.verdict, WasmVerdict::Ready);
         assert!(report.observation.process_status_bytes > 0);
         assert!(report.observation.process_cwd_root);
+    }
+
+    #[test]
+    fn wasm_execute_module_from_bytes_roundtrip() {
+        // Validates that execute_wasm_component can process a module
+        // and produce correct observations - simulating what execute_wasm_file would do
+        let runtime = Runtime::new(WasmBackend::new());
+        
+        // Load the hardcoded module bytes (as if from VFS)
+        let module_bytes = WASM_BOOT_PROOF_COMPONENT;
+        
+        let report = execute_wasm_component(
+            &runtime,
+            module_bytes,
+            1,
+            &[
+                WasmCapability::ObserveProcessCapabilityCount,
+                WasmCapability::ObserveSystemProcessCount,
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(report.verdict, WasmVerdict::Ready);
+        assert_eq!(report.observation.pid, 1);
+        assert_eq!(report.granted_capabilities.len(), 2);
+    }
+
+    #[test]
+    fn wasm_execute_module_with_all_capabilities() {
+        let runtime = Runtime::new(WasmBackend::new());
+        let report = execute_wasm_component(
+            &runtime,
+            WASM_BOOT_PROOF_COMPONENT,
+            1,
+            &[
+                WasmCapability::ObserveProcessCapabilityCount,
+                WasmCapability::ObserveSystemProcessCount,
+                WasmCapability::ObserveProcessStatusBytes,
+                WasmCapability::ObserveProcessCwdRoot,
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(report.verdict, WasmVerdict::Ready);
+        assert_eq!(report.observation.process_capability_count, 2);
+        assert_eq!(report.observation.process_count, 2);
+        assert!(report.observation.process_status_bytes > 0);
+        assert!(report.observation.process_cwd_root);
+        assert_eq!(report.granted_capabilities.len(), 4);
     }
 }

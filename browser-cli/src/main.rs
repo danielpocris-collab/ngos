@@ -1,6 +1,20 @@
 //! NGOS Browser CLI
 //!
 //! Command-line web browser with JavaScript and HTTPS support
+//!
+//! Canonical subsystem role:
+//! - subsystem: browser CLI shell
+//! - owner layer: application surface layer
+//! - semantic owner: `browser-cli`
+//! - truth path role: operator-facing browser application entry surface
+//!
+//! Canonical contract families handled here:
+//! - browser CLI entry contracts
+//! - browser fetch/render orchestration contracts
+//! - browser command-line support contracts
+//!
+//! This crate may orchestrate browser application flows, but it must not
+//! redefine kernel, runtime, or product-level OS truth.
 
 use browser_core::Url;
 use browser_css::parse_css;
@@ -8,9 +22,10 @@ use browser_html::parse_html;
 use browser_http::HttpClient;
 use browser_js::JsRuntime;
 use browser_layout::{LayoutContext, Size, build_layout_tree};
-use browser_paint::{AsciiRenderer, FrameScriptRenderer, Renderer};
+use browser_paint::{AsciiRenderer, FrameScriptRenderer, Renderer, SkiaRenderer};
 use browser_tls::HttpsClient;
 use browser_ui::{BrowserUiSurface, BrowserViewport};
+use std::fs;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -24,6 +39,7 @@ fn main() {
         eprintln!("  --format <tui|ascii|framescript>  Output format (default: ascii)");
         eprintln!("  --width <pixels>                  Viewport width (default: 80)");
         eprintln!("  --height <pixels>                 Viewport height (default: 24)");
+        eprintln!("  --output <path>                   Output file for skia-png");
         eprintln!("  --js                              Enable JavaScript");
         eprintln!("  --help                            Show this help");
         eprintln!();
@@ -38,6 +54,7 @@ fn main() {
     let mut format = "ascii";
     let mut width = 80u32;
     let mut height = 24u32;
+    let mut output = String::from("ngos-browser.png");
     let mut enable_js = false;
     let mut url = None;
 
@@ -71,6 +88,14 @@ fn main() {
             "--js" => {
                 enable_js = true;
             }
+            "--output" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --output requires a value");
+                    std::process::exit(1);
+                }
+                output = args[i].clone();
+            }
             "--help" => {
                 println!("NGOS Browser v0.1.0 - Pragmatic Edition");
                 println!();
@@ -80,6 +105,7 @@ fn main() {
                 println!("  ✓ CSS3 Parser");
                 println!("  ✓ JavaScript (QuickJS)");
                 println!("  ✓ FrameScript Renderer (NGOS GPU)");
+                println!("  ✓ Skia PNG Renderer");
                 println!();
                 println!("Licenses:");
                 println!("  - NGOS Browser Core: Proprietary");
@@ -118,8 +144,28 @@ fn main() {
     println!("NGOS Browser v0.1.0");
     println!("Fetching: {}", url);
 
-    // Fetch page
+    // Fetch or load page
     let html = match url.scheme.as_str() {
+        "file" => {
+            let path = if cfg!(windows)
+                && url.path.starts_with('/')
+                && url.path.as_bytes().get(2) == Some(&b':')
+            {
+                &url.path[1..]
+            } else {
+                url.path.as_str()
+            };
+            match fs::read_to_string(path) {
+                Ok(contents) => {
+                    println!("Loaded local file: {}", path);
+                    contents
+                }
+                Err(e) => {
+                    eprintln!("Error reading file '{}': {:?}", path, e);
+                    std::process::exit(1);
+                }
+            }
+        }
         "http" => {
             let client = HttpClient::new();
             match client.get(&url) {
@@ -241,6 +287,14 @@ fn main() {
             if let Err(e) = renderer.present() {
                 eprintln!("Present error: {:?}", e);
             }
+        }
+        "skia-png" => {
+            let mut renderer = SkiaRenderer::new(width, height);
+            if let Err(e) = renderer.render_to_png(&tree, &output) {
+                eprintln!("Skia render error: {:?}", e);
+                std::process::exit(1);
+            }
+            println!("Skia PNG written to {}", output);
         }
         _ => {
             eprintln!("Error: Unknown format '{}'", format);

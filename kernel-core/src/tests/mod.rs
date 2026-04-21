@@ -1,6 +1,7 @@
 use super::*;
 use ngos_user_abi::{AMD64_USER_CODE_SELECTOR, AMD64_USER_STACK_SELECTOR, STACK_ALIGNMENT};
 
+mod capability_model;
 mod eventing_waits;
 mod foundation;
 mod hal_runtime;

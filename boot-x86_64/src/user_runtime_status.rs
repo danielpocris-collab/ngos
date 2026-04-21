@@ -1,5 +1,21 @@
 #![allow(dead_code)]
 
+//! Canonical subsystem role:
+//! - subsystem: first-user runtime status
+//! - owner layer: Layer 0
+//! - semantic owner: `boot-x86_64`
+//! - truth path role: authoritative status summary for the first native user
+//!   process during boot closure
+//!
+//! Canonical contract families exposed here:
+//! - first-user lifecycle status contracts
+//! - boot outcome policy contracts
+//! - CPU bootstrap status summary contracts
+//!
+//! This module may summarize first-user boot closure state, but it must not
+//! redefine the underlying kernel or ABI truths from which that summary is
+//! derived.
+
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
 use ngos_user_abi::bootstrap::BootOutcomePolicy;
@@ -50,6 +66,14 @@ pub struct FirstUserProcessStatus {
     pub boot_report_stage: u32,
     pub boot_report_code: i32,
     pub boot_report_detail: u64,
+    pub cpu_xsave_enabled: bool,
+    pub cpu_save_area_bytes: u32,
+    pub cpu_xcr0_mask: u64,
+    pub cpu_boot_seed_marker: u64,
+    pub cpu_hw_provider_installed: bool,
+    pub cpu_hw_provider_skipped: bool,
+    pub cpu_hw_provider_attempts: u64,
+    pub cpu_hw_provider_refusal_code: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,7 +114,7 @@ fn emit_terminal_summary(snapshot: FirstUserProcessStatus) {
         serial::write_stderr_bytes(b"FIRST USER PROCESS FAILURE\n");
     }
     serial::print(format_args!(
-        "ngos/x86_64: first user process report disposition={} outcome={} started={} main={} exit_code={} syscalls={} last_syscall={} stdout_writes={} stderr_writes={} bytes_written={} last_write_fd={} last_write_len={} boot_reported={} boot_report_count={} boot_status={} boot_stage={} boot_code={} boot_detail={}\n",
+        "ngos/x86_64: first user process report disposition={} outcome={} started={} main={} exit_code={} syscalls={} last_syscall={} stdout_writes={} stderr_writes={} bytes_written={} last_write_fd={} last_write_len={} boot_reported={} boot_report_count={} boot_status={} boot_stage={} boot_code={} boot_detail={} cpu_xsave={} cpu_save_area={} cpu_xcr0={:#x} cpu_boot_seed={:#x} cpu_hw_installed={} cpu_hw_skipped={} cpu_hw_attempts={} cpu_hw_refusal={}\n",
         disposition,
         outcome,
         snapshot.started,
@@ -108,7 +132,15 @@ fn emit_terminal_summary(snapshot: FirstUserProcessStatus) {
         snapshot.boot_report_status,
         snapshot.boot_report_stage,
         snapshot.boot_report_code,
-        snapshot.boot_report_detail
+        snapshot.boot_report_detail,
+        snapshot.cpu_xsave_enabled,
+        snapshot.cpu_save_area_bytes,
+        snapshot.cpu_xcr0_mask,
+        snapshot.cpu_boot_seed_marker,
+        snapshot.cpu_hw_provider_installed,
+        snapshot.cpu_hw_provider_skipped,
+        snapshot.cpu_hw_provider_attempts,
+        snapshot.cpu_hw_provider_refusal_code
     ));
     crate::diagnostics::record_user_status(snapshot);
     crate::diagnostics::emit_report();
@@ -181,6 +213,7 @@ pub fn reset() {
     BOOT_REPORT_STAGE.store(BootSessionStage::Bootstrap as u64, Ordering::SeqCst);
     BOOT_REPORT_CODE.store(0, Ordering::SeqCst);
     BOOT_REPORT_DETAIL.store(0, Ordering::SeqCst);
+    crate::cpu_runtime_status::reset();
     crate::diagnostics::record_user_status(snapshot());
 }
 
@@ -272,6 +305,7 @@ pub fn record_boot_report(report: BootSessionReport) -> Result<(), BootReportErr
 }
 
 pub fn snapshot() -> FirstUserProcessStatus {
+    let cpu = crate::cpu_runtime_status::snapshot();
     FirstUserProcessStatus {
         started: STARTED.load(Ordering::SeqCst),
         main_reached: MAIN_REACHED.load(Ordering::SeqCst),
@@ -291,6 +325,14 @@ pub fn snapshot() -> FirstUserProcessStatus {
         boot_report_stage: BOOT_REPORT_STAGE.load(Ordering::SeqCst) as u32,
         boot_report_code: BOOT_REPORT_CODE.load(Ordering::SeqCst),
         boot_report_detail: BOOT_REPORT_DETAIL.load(Ordering::SeqCst),
+        cpu_xsave_enabled: cpu.xsave_enabled,
+        cpu_save_area_bytes: cpu.save_area_bytes,
+        cpu_xcr0_mask: cpu.xcr0,
+        cpu_boot_seed_marker: cpu.probe_seed_marker,
+        cpu_hw_provider_installed: cpu.hardware_provider_installed,
+        cpu_hw_provider_skipped: cpu.hardware_provider_skipped,
+        cpu_hw_provider_attempts: cpu.hardware_provider_install_attempts,
+        cpu_hw_provider_refusal_code: cpu.hardware_provider_refusal_code,
     }
 }
 
@@ -428,20 +470,16 @@ impl FirstUserProcessStatus {
 mod tests {
     use super::*;
     use std::string::String;
-    use std::sync::{Mutex, MutexGuard};
-
-    static TEST_GUARD: Mutex<()> = Mutex::new(());
+    use std::sync::MutexGuard;
 
     struct TestGuards {
-        _state: MutexGuard<'static, ()>,
+        _cpu: MutexGuard<'static, ()>,
         _io: MutexGuard<'static, ()>,
     }
 
     fn lock_test_state() -> TestGuards {
         TestGuards {
-            _state: TEST_GUARD
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            _cpu: crate::cpu_runtime_status::lock_shared_test_state(),
             _io: crate::serial::lock_test_io(),
         }
     }
@@ -478,6 +516,14 @@ mod tests {
                 boot_report_stage: BootSessionStage::Bootstrap as u32,
                 boot_report_code: 0,
                 boot_report_detail: 0,
+                cpu_xsave_enabled: false,
+                cpu_save_area_bytes: 0,
+                cpu_xcr0_mask: 0,
+                cpu_boot_seed_marker: 0,
+                cpu_hw_provider_installed: false,
+                cpu_hw_provider_skipped: false,
+                cpu_hw_provider_attempts: 0,
+                cpu_hw_provider_refusal_code: 0,
             }
         );
     }
@@ -494,6 +540,27 @@ mod tests {
         assert!(snapshot.faulted);
         assert!(!snapshot.exited);
         assert_eq!(snapshot.disposition(), FirstUserProcessDisposition::Faulted);
+    }
+
+    #[test]
+    fn runtime_status_captures_cpu_boot_snapshot() {
+        let _guard = lock_test_state();
+        reset();
+        crate::cpu_runtime_status::record(
+            true, true, 4096, true, true, true, true, true, true, true, 0xe7,
+        );
+        crate::cpu_runtime_status::record_probe(true, true, true, 4096, 0, 0x1234_5678);
+        crate::cpu_runtime_status::record_hardware_provider_install(true, false, 0);
+
+        let snapshot = snapshot();
+        assert!(snapshot.cpu_xsave_enabled);
+        assert_eq!(snapshot.cpu_save_area_bytes, 4096);
+        assert_eq!(snapshot.cpu_xcr0_mask, 0xe7);
+        assert_eq!(snapshot.cpu_boot_seed_marker, 0x1234_5678);
+        assert!(snapshot.cpu_hw_provider_installed);
+        assert!(!snapshot.cpu_hw_provider_skipped);
+        assert_eq!(snapshot.cpu_hw_provider_attempts, 1);
+        assert_eq!(snapshot.cpu_hw_provider_refusal_code, 0);
     }
 
     #[test]

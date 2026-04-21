@@ -1,3 +1,18 @@
+//! Canonical subsystem role:
+//! - subsystem: x86_64 bootloader mediation
+//! - owner layer: platform mediation
+//! - semantic owner: `platform-x86_64`
+//! - truth path role: platform-specific Limine handoff mediation into canonical
+//!   boot structures
+//!
+//! Canonical contract families handled here:
+//! - bootloader handoff contracts
+//! - memory map mediation contracts
+//! - framebuffer/module handoff contracts
+//!
+//! This module may mediate Limine-provided boot mechanics, but it must not
+//! redefine higher-level boot or kernel semantic ownership.
+
 #[cfg(all(target_arch = "x86_64", not(test)))]
 use core::arch::asm;
 use core::ffi::CStr;
@@ -202,6 +217,61 @@ fn debug_marker(_byte: u8) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::{boxed::Box, vec::Vec};
+    use core::{
+        ffi::{CStr, c_char, c_void},
+        mem::{MaybeUninit, size_of},
+        num::NonZeroU32,
+    };
+    use limine::file::{MediaType, Uuid};
+
+    #[repr(C)]
+    struct TestFile {
+        revision: u64,
+        addr: *mut c_void,
+        size: u64,
+        path: *const c_char,
+        string: *const c_char,
+        media_type: MediaType,
+        unused: MaybeUninit<u32>,
+        tftp_ip: Option<NonZeroU32>,
+        tftp_port: Option<NonZeroU32>,
+        partition_idx: Option<NonZeroU32>,
+        mbr_disk_id: Option<NonZeroU32>,
+        gpt_disk_id: Uuid,
+        gpt_partition_id: Uuid,
+        partition_uuid: Uuid,
+    }
+
+    fn test_uuid() -> Uuid {
+        Uuid {
+            a: 0,
+            b: 0,
+            c: 0,
+            d: [0; 8],
+        }
+    }
+
+    fn test_file(path: &'static CStr) -> &'static File {
+        assert_eq!(size_of::<TestFile>(), size_of::<File>());
+        let file = Box::new(TestFile {
+            revision: 0,
+            addr: core::ptr::null_mut(),
+            size: 0x1000,
+            path: path.as_ptr(),
+            string: c"".as_ptr(),
+            media_type: MediaType::GENERIC,
+            unused: MaybeUninit::new(0),
+            tftp_ip: None,
+            tftp_port: None,
+            partition_idx: None,
+            mbr_disk_id: None,
+            gpt_disk_id: test_uuid(),
+            gpt_partition_id: test_uuid(),
+            partition_uuid: test_uuid(),
+        });
+        unsafe { &*(Box::leak(file) as *mut TestFile as *mut File) }
+    }
 
     #[test]
     fn loader_defined_handoff_preserves_physical_rsdp_address() {
@@ -224,5 +294,177 @@ mod tests {
 
         assert_eq!(handoff.rsdp, Some(rsdp_phys));
         assert_eq!(handoff.physical_memory_offset, physical_memory_offset);
+    }
+
+    #[test]
+    fn loader_defined_handoff_normalizes_empty_command_line_to_none() {
+        let mut buffers = LimineBootBuffers::new();
+        let snapshot = LimineBootSnapshot {
+            command_line: Some(c""),
+            rsdp: None,
+            memory_map: &[],
+            modules: &[],
+            framebuffer: None,
+            physical_memory_offset: 0xffff_8000_0000_0000,
+            kernel_physical_base: 0x20_0000,
+        };
+
+        let handoff = buffers
+            .build_loader_defined_handoff(snapshot, PAGE_SIZE_4K)
+            .expect("empty cmdline should normalize cleanly");
+
+        assert_eq!(handoff.command_line, None);
+    }
+
+    #[test]
+    fn loader_defined_handoff_preserves_module_path_and_physical_translation() {
+        let mut buffers = LimineBootBuffers::new();
+        let physical_memory_offset = 0u64;
+        let module_bytes = Box::leak(Vec::from([0u8; 0x2000]).into_boxed_slice());
+        let module = Box::new(TestFile {
+            revision: 0,
+            addr: module_bytes.as_mut_ptr().cast(),
+            size: module_bytes.len() as u64,
+            path: c"/kernel/ngos-userland-native".as_ptr(),
+            string: c"render3d".as_ptr(),
+            media_type: MediaType::GENERIC,
+            unused: MaybeUninit::new(0),
+            tftp_ip: None,
+            tftp_port: None,
+            partition_idx: None,
+            mbr_disk_id: None,
+            gpt_disk_id: test_uuid(),
+            gpt_partition_id: test_uuid(),
+            partition_uuid: test_uuid(),
+        });
+        let module = unsafe { &*(Box::leak(module) as *mut TestFile as *mut File) };
+        let modules: &'static [&'static File] = Box::leak(Vec::from([module]).into_boxed_slice());
+        let snapshot = LimineBootSnapshot {
+            command_line: Some(c"console=ttyS0"),
+            rsdp: None,
+            memory_map: &[],
+            modules,
+            framebuffer: None,
+            physical_memory_offset,
+            kernel_physical_base: 0x20_0000,
+        };
+
+        let handoff = buffers
+            .build_loader_defined_handoff(snapshot, 0x6000)
+            .expect("module handoff should be preserved");
+
+        assert_eq!(handoff.command_line, Some("console=ttyS0"));
+        assert_eq!(handoff.modules.len(), 1);
+        assert_eq!(handoff.modules[0].name, "/kernel/ngos-userland-native");
+        assert_eq!(
+            handoff.modules[0].physical_start,
+            module_bytes.as_ptr() as u64 - physical_memory_offset
+        );
+        assert_eq!(handoff.modules[0].len, 0x2000);
+    }
+
+    #[test]
+    fn loader_defined_handoff_rejects_too_many_memory_regions() {
+        let mut buffers = LimineBootBuffers::new();
+        let entry = Box::leak(Box::new(Entry {
+            base: 0,
+            length: PAGE_SIZE_4K,
+            entry_type: EntryType::USABLE,
+        }));
+        let memory_map: &'static [&'static Entry] = Box::leak(
+            (0..(MAX_LIMINE_MEMORY_REGIONS + 1))
+                .map(|_| &*entry)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        let snapshot = LimineBootSnapshot {
+            command_line: None,
+            rsdp: None,
+            memory_map,
+            modules: &[],
+            framebuffer: None,
+            physical_memory_offset: 0xffff_8000_0000_0000,
+            kernel_physical_base: 0x20_0000,
+        };
+
+        assert_eq!(
+            buffers.build_loader_defined_handoff(snapshot, PAGE_SIZE_4K),
+            Err(LimineHandoffError::TooManyMemoryRegions {
+                count: MAX_LIMINE_MEMORY_REGIONS + 1,
+                capacity: MAX_LIMINE_MEMORY_REGIONS,
+            })
+        );
+    }
+
+    #[test]
+    fn loader_defined_handoff_rejects_too_many_modules() {
+        let mut buffers = LimineBootBuffers::new();
+        let module = test_file(c"/kernel/ngos-userland-native");
+        let modules: &'static [&'static File] = Box::leak(
+            (0..(MAX_LIMINE_MODULES + 1))
+                .map(|_| module)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        let snapshot = LimineBootSnapshot {
+            command_line: None,
+            rsdp: None,
+            memory_map: &[],
+            modules,
+            framebuffer: None,
+            physical_memory_offset: 0xffff_8000_0000_0000,
+            kernel_physical_base: 0x20_0000,
+        };
+
+        assert_eq!(
+            buffers.build_loader_defined_handoff(snapshot, PAGE_SIZE_4K),
+            Err(LimineHandoffError::TooManyModules {
+                count: MAX_LIMINE_MODULES + 1,
+                capacity: MAX_LIMINE_MODULES,
+            })
+        );
+    }
+
+    #[test]
+    fn loader_defined_handoff_rejects_invalid_command_line_utf8() {
+        let mut buffers = LimineBootBuffers::new();
+        let invalid_cmdline = unsafe { CStr::from_bytes_with_nul_unchecked(b"console=\xc3(\0") };
+        let snapshot = LimineBootSnapshot {
+            command_line: Some(invalid_cmdline),
+            rsdp: None,
+            memory_map: &[],
+            modules: &[],
+            framebuffer: None,
+            physical_memory_offset: 0xffff_8000_0000_0000,
+            kernel_physical_base: 0x20_0000,
+        };
+
+        assert_eq!(
+            buffers.build_loader_defined_handoff(snapshot, PAGE_SIZE_4K),
+            Err(LimineHandoffError::InvalidCommandLineUtf8)
+        );
+    }
+
+    #[test]
+    fn loader_defined_handoff_rejects_invalid_module_path_utf8() {
+        let mut buffers = LimineBootBuffers::new();
+        let invalid_path =
+            unsafe { CStr::from_bytes_with_nul_unchecked(b"/kernel/ngos-userland-native\xc3(\0") };
+        let module = test_file(invalid_path);
+        let modules: &'static [&'static File] = Box::leak(Vec::from([module]).into_boxed_slice());
+        let snapshot = LimineBootSnapshot {
+            command_line: None,
+            rsdp: None,
+            memory_map: &[],
+            modules,
+            framebuffer: None,
+            physical_memory_offset: 0xffff_8000_0000_0000,
+            kernel_physical_base: 0x20_0000,
+        };
+
+        assert_eq!(
+            buffers.build_loader_defined_handoff(snapshot, PAGE_SIZE_4K),
+            Err(LimineHandoffError::InvalidModulePathUtf8 { index: 0 })
+        );
     }
 }

@@ -85,6 +85,12 @@ pub fn allocated_bytes() -> usize {
     next.saturating_sub(start)
 }
 
+pub fn capacity_bytes() -> usize {
+    let start = HEAP_START.load(Ordering::Acquire);
+    let end = HEAP_END.load(Ordering::Acquire);
+    end.saturating_sub(start)
+}
+
 const fn align_up_usize(value: usize, align: usize) -> usize {
     if align == 0 {
         value

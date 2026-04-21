@@ -1,9 +1,24 @@
 #![no_std]
 
+//! Canonical subsystem role:
+//! - subsystem: x86_64 platform mediation
+//! - owner layer: Layer 0
+//! - semantic owner: `platform-x86_64`
+//! - truth path role: provides hardware-facing mechanisms to the real system path
+//!
+//! Canonical contract families produced here:
+//! - paging/address-space mechanism contracts
+//! - interrupt/APIC mechanism contracts
+//! - device transport and discovery contracts
+//!
+//! This crate owns platform mechanics, not the semantic truth of kernel object
+//! models. `kernel-core` remains the owner of higher-level subsystem meaning.
+
 extern crate alloc;
 
 use alloc::vec::Vec;
 
+pub mod ac97_audio;
 pub mod acpi;
 pub mod device_platform;
 pub mod limine;
@@ -15,6 +30,10 @@ pub mod user_mode;
 pub mod virtio_blk;
 pub mod virtio_gpu;
 pub mod virtio_net;
+
+pub use ac97_audio::{
+    Ac97AudioController, Ac97AudioDriver, Ac97Error, Ac97FormatInfo,
+};
 
 pub use acpi::{
     AcpiProbeInfo, AcpiRootInfo, ApicTopologyInfo, InterruptSourceOverride, IoApicEntry,
@@ -62,7 +81,7 @@ pub const LOADER_DEFINED_HANDOFF_MAGIC: u64 = 0x4e47_4f53_5848_3634;
 pub const DEFAULT_KERNEL_BASE: u64 = 0xffff_ffff_8000_0000;
 pub const DEFAULT_DIRECT_MAP_BASE: u64 = 0xffff_8000_0000_0000;
 pub const DEFAULT_BOOT_STACK_BASE: u64 = 0xffff_ffff_8040_0000;
-pub const DEFAULT_BOOT_STACK_SIZE: u64 = 256 * 1024;
+pub const DEFAULT_BOOT_STACK_SIZE: u64 = 512 * 1024;
 pub const DEFAULT_DIRECT_MAP_SIZE: u64 = 512 * PAGE_SIZE_1G;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,8 +157,55 @@ pub struct BootInfo<'a> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootInfoValidationError {
+    UnalignedPhysicalMemoryOffset,
+    KernelRangeMustBeKernelImage,
+    KernelRangeMustBePageAligned,
+    KernelRangeMustBeNonEmpty,
+    MemoryRegionMustBePageAligned,
+    MemoryRegionMustBeNonEmpty,
+    MemoryRegionsOverlap,
+}
+
+impl<'a> BootInfo<'a> {
+    pub fn validate(&self) -> Result<(), BootInfoValidationError> {
+        if !self.physical_memory_offset.is_multiple_of(PAGE_SIZE_4K) {
+            return Err(BootInfoValidationError::UnalignedPhysicalMemoryOffset);
+        }
+        if self.kernel_phys_range.kind != BootMemoryRegionKind::KernelImage {
+            return Err(BootInfoValidationError::KernelRangeMustBeKernelImage);
+        }
+        if self.kernel_phys_range.len == 0 {
+            return Err(BootInfoValidationError::KernelRangeMustBeNonEmpty);
+        }
+        if !self.kernel_phys_range.is_page_aligned() {
+            return Err(BootInfoValidationError::KernelRangeMustBePageAligned);
+        }
+
+        let mut previous_end = 0u64;
+        let mut first = true;
+        for region in self.memory_regions {
+            if region.len == 0 {
+                return Err(BootInfoValidationError::MemoryRegionMustBeNonEmpty);
+            }
+            if !region.is_page_aligned() {
+                return Err(BootInfoValidationError::MemoryRegionMustBePageAligned);
+            }
+            if !first && region.start < previous_end {
+                return Err(BootInfoValidationError::MemoryRegionsOverlap);
+            }
+            previous_end = region.end();
+            first = false;
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoaderDefinedHandoffError {
     InvalidMagic,
+    InvalidBootInfo(BootInfoValidationError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,19 +269,19 @@ impl<'a> LoaderDefinedBootHandoff<'a> {
         }
     }
 
-    pub const fn validate(&self) -> Result<(), LoaderDefinedHandoffError> {
+    pub fn validate(&self) -> Result<(), LoaderDefinedHandoffError> {
         if self.magic != LOADER_DEFINED_HANDOFF_MAGIC {
             Err(LoaderDefinedHandoffError::InvalidMagic)
         } else {
-            Ok(())
+            self.as_boot_info().map(|_| ())
         }
     }
 
-    pub const fn as_boot_info(&self) -> Result<BootInfo<'a>, LoaderDefinedHandoffError> {
+    pub fn as_boot_info(&self) -> Result<BootInfo<'a>, LoaderDefinedHandoffError> {
         if self.magic != LOADER_DEFINED_HANDOFF_MAGIC {
             Err(LoaderDefinedHandoffError::InvalidMagic)
         } else {
-            Ok(BootInfo {
+            let boot_info = BootInfo {
                 protocol: self.protocol,
                 command_line: self.command_line,
                 rsdp: self.rsdp,
@@ -224,7 +290,11 @@ impl<'a> LoaderDefinedBootHandoff<'a> {
                 framebuffer: self.framebuffer,
                 physical_memory_offset: self.physical_memory_offset,
                 kernel_phys_range: self.kernel_phys_range,
-            })
+            };
+            boot_info
+                .validate()
+                .map_err(LoaderDefinedHandoffError::InvalidBootInfo)?;
+            Ok(boot_info)
         }
     }
 }
@@ -954,5 +1024,154 @@ mod tests {
 
         let boot_info = handoff.as_boot_info().unwrap();
         assert_eq!(boot_info.protocol, BootProtocol::Limine);
+    }
+
+    #[test]
+    fn boot_info_validation_rejects_unaligned_or_empty_kernel_ranges() {
+        let memory = [BootMemoryRegion {
+            start: 0,
+            len: PAGE_SIZE_2M,
+            kind: BootMemoryRegionKind::Usable,
+        }];
+        let boot_info = BootInfo {
+            protocol: BootProtocol::LoaderDefined,
+            command_line: None,
+            rsdp: None,
+            memory_regions: &memory,
+            modules: &[],
+            framebuffer: None,
+            physical_memory_offset: DEFAULT_DIRECT_MAP_BASE,
+            kernel_phys_range: BootMemoryRegion {
+                start: 0x10_0001,
+                len: 0,
+                kind: BootMemoryRegionKind::KernelImage,
+            },
+        };
+
+        assert_eq!(
+            boot_info.validate(),
+            Err(BootInfoValidationError::KernelRangeMustBeNonEmpty)
+        );
+
+        let misaligned = BootInfo {
+            kernel_phys_range: BootMemoryRegion {
+                start: 0x10_0001,
+                len: PAGE_SIZE_4K,
+                kind: BootMemoryRegionKind::KernelImage,
+            },
+            ..boot_info
+        };
+        assert_eq!(
+            misaligned.validate(),
+            Err(BootInfoValidationError::KernelRangeMustBePageAligned)
+        );
+    }
+
+    #[test]
+    fn handoff_rejects_overlapping_or_misaligned_memory_regions() {
+        let overlapping = [
+            BootMemoryRegion {
+                start: 0,
+                len: PAGE_SIZE_2M,
+                kind: BootMemoryRegionKind::Usable,
+            },
+            BootMemoryRegion {
+                start: PAGE_SIZE_4K,
+                len: PAGE_SIZE_2M,
+                kind: BootMemoryRegionKind::Reserved,
+            },
+        ];
+        let handoff = LoaderDefinedBootHandoff::new(
+            None,
+            None,
+            &overlapping,
+            &[],
+            None,
+            DEFAULT_DIRECT_MAP_BASE,
+            BootMemoryRegion {
+                start: 0x20_0000,
+                len: PAGE_SIZE_4K,
+                kind: BootMemoryRegionKind::KernelImage,
+            },
+        );
+        assert_eq!(
+            handoff.as_boot_info(),
+            Err(LoaderDefinedHandoffError::InvalidBootInfo(
+                BootInfoValidationError::MemoryRegionsOverlap
+            ))
+        );
+
+        let misaligned = [BootMemoryRegion {
+            start: 3,
+            len: PAGE_SIZE_4K,
+            kind: BootMemoryRegionKind::Usable,
+        }];
+        let handoff = LoaderDefinedBootHandoff::new(
+            None,
+            None,
+            &misaligned,
+            &[],
+            None,
+            DEFAULT_DIRECT_MAP_BASE,
+            BootMemoryRegion {
+                start: 0x20_0000,
+                len: PAGE_SIZE_4K,
+                kind: BootMemoryRegionKind::KernelImage,
+            },
+        );
+        assert_eq!(
+            handoff.validate(),
+            Err(LoaderDefinedHandoffError::InvalidBootInfo(
+                BootInfoValidationError::MemoryRegionMustBePageAligned
+            ))
+        );
+    }
+
+    #[test]
+    fn handoff_rejects_non_kernel_image_or_unaligned_physical_offset() {
+        let memory = [BootMemoryRegion {
+            start: 0,
+            len: PAGE_SIZE_2M,
+            kind: BootMemoryRegionKind::Usable,
+        }];
+        let handoff = LoaderDefinedBootHandoff::new(
+            None,
+            None,
+            &memory,
+            &[],
+            None,
+            DEFAULT_DIRECT_MAP_BASE + 1,
+            BootMemoryRegion {
+                start: 0x20_0000,
+                len: PAGE_SIZE_4K,
+                kind: BootMemoryRegionKind::Reserved,
+            },
+        );
+        assert_eq!(
+            handoff.as_boot_info(),
+            Err(LoaderDefinedHandoffError::InvalidBootInfo(
+                BootInfoValidationError::UnalignedPhysicalMemoryOffset
+            ))
+        );
+
+        let handoff = LoaderDefinedBootHandoff::new(
+            None,
+            None,
+            &memory,
+            &[],
+            None,
+            DEFAULT_DIRECT_MAP_BASE,
+            BootMemoryRegion {
+                start: 0x20_0000,
+                len: PAGE_SIZE_4K,
+                kind: BootMemoryRegionKind::Reserved,
+            },
+        );
+        assert_eq!(
+            handoff.as_boot_info(),
+            Err(LoaderDefinedHandoffError::InvalidBootInfo(
+                BootInfoValidationError::KernelRangeMustBeKernelImage
+            ))
+        );
     }
 }

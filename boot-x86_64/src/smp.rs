@@ -1,6 +1,22 @@
 #![cfg_attr(not(target_os = "none"), allow(dead_code))]
 
+//! Canonical subsystem role:
+//! - subsystem: boot SMP bring-up
+//! - owner layer: Layer 0
+//! - semantic owner: `boot-x86_64`
+//! - truth path role: boot-stage AP discovery and startup mechanics for the
+//!   real x86 path
+//!
+//! Canonical contract families handled here:
+//! - AP bootstrap contracts
+//! - SMP bring-up contracts
+//! - AP mailbox/counter bootstrap contracts
+//!
+//! This module may bring up secondary processors at boot, but it must not
+//! redefine the higher-level scheduler or runtime ownership model.
+
 use alloc::vec::Vec;
+use core::arch::asm;
 use core::mem::size_of;
 use core::ptr;
 
@@ -444,11 +460,7 @@ pub fn dispatch_startup_ipis(
         return Err(SmpLaunchError::InvalidTrampolineBase);
     }
     let startup_vector = ((prepared.layout.trampoline_base >> 12) & 0xff) as u8;
-    let mut local_apic = MmioLocalApic::new(
-        prepared
-            .local_apic_address
-            .saturating_add(boot_info.physical_memory_offset) as *mut u8,
-    );
+    let mut local_apic = boot_local_apic(boot_info, prepared.local_apic_address);
     dispatch_startup_ipis_with_access(&mut local_apic, boot_info, prepared, startup_vector)
 }
 
@@ -842,11 +854,7 @@ pub fn bring_up_secondary_processors(
     }
 
     let startup_vector = ((prepared.layout.trampoline_base >> 12) & 0xff) as u8;
-    let mut local_apic = MmioLocalApic::new(
-        prepared
-            .local_apic_address
-            .saturating_add(boot_info.physical_memory_offset) as *mut u8,
-    );
+    let mut local_apic = boot_local_apic(boot_info, prepared.local_apic_address);
     local_apic.enable_spurious_vector(0xff);
 
     let hhdm = boot_info.physical_memory_offset;
@@ -1041,6 +1049,120 @@ impl LocalApicAccess for MmioLocalApic {
         unsafe {
             core::ptr::write_volatile(self.base.add(offset as usize) as *mut u32, value);
         }
+    }
+}
+
+struct X2ApicLocalApic;
+
+impl X2ApicLocalApic {
+    const MSR_BASE: u32 = 0x800;
+    const ICR_MSR: u32 = 0x830;
+
+    fn msr_for_offset(offset: u32) -> u32 {
+        Self::MSR_BASE + (offset >> 4)
+    }
+
+    fn read_msr(msr: u32) -> u64 {
+        let low: u32;
+        let high: u32;
+        unsafe {
+            asm!(
+                "rdmsr",
+                in("ecx") msr,
+                out("eax") low,
+                out("edx") high,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+        ((high as u64) << 32) | (low as u64)
+    }
+
+    fn write_msr(msr: u32, value: u64) {
+        unsafe {
+            asm!(
+                "wrmsr",
+                in("ecx") msr,
+                in("eax") value as u32,
+                in("edx") (value >> 32) as u32,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+    }
+
+    fn write_icr(&mut self, apic_id: u32, value: u32) {
+        let icr = ((apic_id as u64) << 32) | u64::from(value);
+        Self::write_msr(Self::ICR_MSR, icr);
+    }
+}
+
+impl LocalApicAccess for X2ApicLocalApic {
+    fn read(&self, offset: u32) -> u32 {
+        Self::read_msr(Self::msr_for_offset(offset)) as u32
+    }
+
+    fn write(&mut self, offset: u32, value: u32) {
+        Self::write_msr(Self::msr_for_offset(offset), u64::from(value));
+    }
+
+    fn send_init_ipi(&mut self, apic_id: u32) {
+        self.wait_for_idle();
+        self.write_icr(apic_id, APIC_INIT_COMMAND);
+        self.wait_for_idle();
+    }
+
+    fn send_startup_ipi(&mut self, apic_id: u32, startup_vector: u8) {
+        self.wait_for_idle();
+        self.write_icr(
+            apic_id,
+            APIC_DELIVERY_MODE_STARTUP | APIC_DESTINATION_PHYSICAL | u32::from(startup_vector),
+        );
+        self.wait_for_idle();
+    }
+}
+
+enum BootLocalApic {
+    Mmio(MmioLocalApic),
+    X2(X2ApicLocalApic),
+}
+
+impl LocalApicAccess for BootLocalApic {
+    fn read(&self, offset: u32) -> u32 {
+        match self {
+            Self::Mmio(local) => local.read(offset),
+            Self::X2(local) => local.read(offset),
+        }
+    }
+
+    fn write(&mut self, offset: u32, value: u32) {
+        match self {
+            Self::Mmio(local) => local.write(offset, value),
+            Self::X2(local) => local.write(offset, value),
+        }
+    }
+
+    fn send_init_ipi(&mut self, apic_id: u32) {
+        match self {
+            Self::Mmio(local) => local.send_init_ipi(apic_id),
+            Self::X2(local) => local.send_init_ipi(apic_id),
+        }
+    }
+
+    fn send_startup_ipi(&mut self, apic_id: u32, startup_vector: u8) {
+        match self {
+            Self::Mmio(local) => local.send_startup_ipi(apic_id, startup_vector),
+            Self::X2(local) => local.send_startup_ipi(apic_id, startup_vector),
+        }
+    }
+}
+
+fn boot_local_apic(boot_info: &BootInfo<'_>, local_apic_address: u64) -> BootLocalApic {
+    let mode = crate::cpu_apic::enable_preferred_local_apic_mode();
+    crate::cpu_runtime_status::record_local_apic_mode(mode as u32);
+    match mode {
+        crate::cpu_apic::LocalApicMode::X2Apic => BootLocalApic::X2(X2ApicLocalApic),
+        crate::cpu_apic::LocalApicMode::XApic => BootLocalApic::Mmio(MmioLocalApic::new(
+            local_apic_address.saturating_add(boot_info.physical_memory_offset) as *mut u8,
+        )),
     }
 }
 

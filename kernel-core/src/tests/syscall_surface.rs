@@ -76,8 +76,30 @@ fn syscall_surface_dispatches_runtime_operations() {
 
     match surface.dispatch(context, Syscall::Snapshot).unwrap() {
         SyscallResult::Snapshot(snapshot) => {
+            let report = surface.runtime().verify_core();
             assert_eq!(snapshot.process_count, 2);
             assert_eq!(snapshot.capability_count, 2);
+            assert_eq!(snapshot.verified_core_ok, report.is_verified());
+            assert_eq!(
+                snapshot.verified_core_violation_count,
+                report.violations.len()
+            );
+            assert_eq!(
+                snapshot.capability_model_verified,
+                report.capability_model_verified
+            );
+            assert_eq!(
+                snapshot.vfs_invariants_verified,
+                report.vfs_invariants_verified
+            );
+            assert_eq!(
+                snapshot.scheduler_state_machine_verified,
+                report.scheduler_state_machine_verified
+            );
+            assert_eq!(
+                snapshot.cpu_extended_state_lifecycle_verified,
+                report.cpu_extended_state_lifecycle_verified
+            );
         }
         other => panic!("unexpected syscall result: {other:?}"),
     }
@@ -181,6 +203,1808 @@ fn syscall_surface_creates_and_inspects_native_model_entities() {
 }
 
 #[test]
+fn syscall_surface_routes_bus_messages_and_reports_procfs_state() {
+    let mut surface = KernelSyscallSurface::host_runtime_default();
+    let bootstrap = surface
+        .runtime
+        .spawn_process("bootstrap", None, SchedulerClass::LatencyCritical)
+        .unwrap();
+    let observer = surface
+        .runtime
+        .spawn_process("observer", None, SchedulerClass::Interactive)
+        .unwrap();
+    let context = SyscallContext::kernel(bootstrap);
+
+    let domain = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateDomain(CreateDomain {
+                owner: bootstrap,
+                parent: None,
+                name: String::from("bus"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::DomainCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let resource = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateResource(CreateResource {
+                creator: bootstrap,
+                domain,
+                kind: ResourceKind::Channel,
+                name: String::from("render-bus"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::ResourceCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+
+    let root = surface
+        .runtime
+        .grant_capability(
+            bootstrap,
+            bootstrap.handle(),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "ipc-root",
+        )
+        .unwrap();
+    surface
+        .runtime
+        .create_vfs_node("/ipc", ObjectKind::Directory, root)
+        .unwrap();
+    surface
+        .runtime
+        .create_vfs_node("/ipc/render", ObjectKind::Channel, root)
+        .unwrap();
+
+    let peer = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateBusPeer(CreateBusPeer {
+                owner: bootstrap,
+                domain,
+                name: String::from("renderer"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusPeerCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let endpoint = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateBusEndpoint(CreateBusEndpoint {
+                domain,
+                resource,
+                path: String::from("/ipc/render"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusEndpointCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+
+    match surface
+        .dispatch(
+            context.clone(),
+            Syscall::AttachBusPeer(AttachBusPeer { peer, endpoint }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusPeerAttached {
+            peer: attached_peer,
+            endpoint: attached_endpoint,
+        } => {
+            assert_eq!(attached_peer, peer);
+            assert_eq!(attached_endpoint, endpoint);
+        }
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+
+    match surface
+        .dispatch(context.clone(), Syscall::InspectBusPeer { id: peer })
+        .unwrap()
+    {
+        SyscallResult::BusPeerInfo(info) => {
+            assert_eq!(info.owner, bootstrap);
+            assert_eq!(info.domain, domain);
+            assert_eq!(info.name, "renderer");
+            assert_eq!(info.attached_endpoints, vec![endpoint]);
+        }
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+
+    match surface
+        .dispatch(
+            context.clone(),
+            Syscall::InspectBusEndpoint { id: endpoint },
+        )
+        .unwrap()
+    {
+        SyscallResult::BusEndpointInfo(info) => {
+            assert_eq!(info.domain, domain);
+            assert_eq!(info.resource, resource);
+            assert_eq!(info.kind, BusEndpointKind::Channel);
+            assert_eq!(info.path, "/ipc/render");
+            assert_eq!(info.attached_peers, vec![peer]);
+        }
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+
+    match surface
+        .dispatch(context.clone(), Syscall::ListBusPeers)
+        .unwrap()
+    {
+        SyscallResult::BusPeerList(entries) => {
+            assert!(entries.iter().any(|entry| entry.id == peer));
+        }
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+    match surface
+        .dispatch(context.clone(), Syscall::ListBusEndpoints)
+        .unwrap()
+    {
+        SyscallResult::BusEndpointList(entries) => {
+            assert!(entries.iter().any(|entry| entry.id == endpoint));
+        }
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+
+    match surface
+        .dispatch(
+            context.clone(),
+            Syscall::PublishBusMessage(PublishBusMessage {
+                peer,
+                endpoint,
+                bytes: b"hello-bus".to_vec(),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusMessagePublished {
+            peer: published_peer,
+            endpoint: published_endpoint,
+            bytes,
+        } => {
+            assert_eq!(published_peer, peer);
+            assert_eq!(published_endpoint, endpoint);
+            assert_eq!(bytes, 9);
+        }
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+
+    match surface
+        .dispatch(
+            context.clone(),
+            Syscall::ReceiveBusMessage(ReceiveBusMessage { peer, endpoint }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusMessageReceived {
+            peer: received_peer,
+            endpoint: received_endpoint,
+            bytes,
+        } => {
+            assert_eq!(received_peer, peer);
+            assert_eq!(received_endpoint, endpoint);
+            assert_eq!(bytes, b"hello-bus");
+        }
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+
+    let observe_domain = surface
+        .runtime
+        .create_domain(observer, None, "obs")
+        .unwrap();
+    let observe_resource = surface
+        .runtime
+        .create_resource(
+            observer,
+            observe_domain,
+            ResourceKind::Namespace,
+            "inspect-bus",
+        )
+        .unwrap();
+    surface
+        .runtime
+        .set_resource_contract_policy(observe_resource, ResourceContractPolicy::Observe)
+        .unwrap();
+    let observe_contract = surface
+        .runtime
+        .create_contract(
+            observer,
+            observe_domain,
+            observe_resource,
+            ContractKind::Observe,
+            "observe-bus",
+        )
+        .unwrap();
+    surface
+        .runtime
+        .bind_process_contract(observer, observe_contract)
+        .unwrap();
+
+    match surface
+        .dispatch(
+            SyscallContext::kernel(observer),
+            Syscall::ReadProcFs {
+                path: String::from("/proc/system/bus"),
+            },
+        )
+        .unwrap()
+    {
+        SyscallResult::ProcFsBytes(bytes) => {
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(text.contains("bus-peers:\t1"));
+            assert!(text.contains("bus-endpoints:\t1"));
+            assert!(text.contains("path=/ipc/render"));
+            assert!(text.contains("publishes=1"));
+            assert!(text.contains("receives=1"));
+        }
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+}
+
+#[test]
+fn syscall_surface_bus_refuses_unattached_publish_and_recovers_after_reattach() {
+    let mut surface = KernelSyscallSurface::host_runtime_default();
+    let bootstrap = surface
+        .runtime
+        .spawn_process("bootstrap", None, SchedulerClass::LatencyCritical)
+        .unwrap();
+    let context = SyscallContext::kernel(bootstrap);
+
+    let domain = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateDomain(CreateDomain {
+                owner: bootstrap,
+                parent: None,
+                name: String::from("bus"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::DomainCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let resource = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateResource(CreateResource {
+                creator: bootstrap,
+                domain,
+                kind: ResourceKind::Channel,
+                name: String::from("render-bus"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::ResourceCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+
+    let root = surface
+        .runtime
+        .grant_capability(
+            bootstrap,
+            bootstrap.handle(),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "ipc-root",
+        )
+        .unwrap();
+    surface
+        .runtime
+        .create_vfs_node("/ipc", ObjectKind::Directory, root)
+        .unwrap();
+    surface
+        .runtime
+        .create_vfs_node("/ipc/render", ObjectKind::Channel, root)
+        .unwrap();
+
+    let peer = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateBusPeer(CreateBusPeer {
+                owner: bootstrap,
+                domain,
+                name: String::from("renderer"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusPeerCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let endpoint = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateBusEndpoint(CreateBusEndpoint {
+                domain,
+                resource,
+                path: String::from("/ipc/render"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusEndpointCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+
+    surface
+        .dispatch(
+            context.clone(),
+            Syscall::AttachBusPeer(AttachBusPeer { peer, endpoint }),
+        )
+        .unwrap();
+    match surface
+        .dispatch(
+            context.clone(),
+            Syscall::DetachBusPeer(DetachBusPeer { peer, endpoint }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusPeerDetached {
+            peer: detached_peer,
+            endpoint: detached_endpoint,
+        } => {
+            assert_eq!(detached_peer, peer);
+            assert_eq!(detached_endpoint, endpoint);
+        }
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+
+    assert_eq!(
+        surface.dispatch(
+            context.clone(),
+            Syscall::PublishBusMessage(PublishBusMessage {
+                peer,
+                endpoint,
+                bytes: b"blocked".to_vec(),
+            }),
+        ),
+        Err(SyscallError::Runtime(RuntimeError::NativeModel(
+            NativeModelError::BusPeerNotAttached { peer, endpoint }
+        )))
+    );
+
+    surface
+        .dispatch(
+            context,
+            Syscall::AttachBusPeer(AttachBusPeer { peer, endpoint }),
+        )
+        .unwrap();
+    match surface
+        .dispatch(
+            SyscallContext::kernel(bootstrap),
+            Syscall::PublishBusMessage(PublishBusMessage {
+                peer,
+                endpoint,
+                bytes: b"rebound".to_vec(),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusMessagePublished { bytes, .. } => assert_eq!(bytes, 7),
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+}
+
+#[test]
+fn syscall_surface_bus_io_contract_policy_refuses_until_bound_and_then_recovers() {
+    let mut surface = KernelSyscallSurface::host_runtime_default();
+    let bootstrap = surface
+        .runtime
+        .spawn_process("bootstrap", None, SchedulerClass::LatencyCritical)
+        .unwrap();
+    let context = SyscallContext::kernel(bootstrap);
+
+    let domain = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateDomain(CreateDomain {
+                owner: bootstrap,
+                parent: None,
+                name: String::from("bus"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::DomainCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let resource = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateResource(CreateResource {
+                creator: bootstrap,
+                domain,
+                kind: ResourceKind::Channel,
+                name: String::from("render-bus"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::ResourceCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    surface
+        .runtime
+        .set_resource_contract_policy(resource, ResourceContractPolicy::Io)
+        .unwrap();
+
+    let root = surface
+        .runtime
+        .grant_capability(
+            bootstrap,
+            bootstrap.handle(),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "ipc-root",
+        )
+        .unwrap();
+    surface
+        .runtime
+        .create_vfs_node("/ipc", ObjectKind::Directory, root)
+        .unwrap();
+    surface
+        .runtime
+        .create_vfs_node("/ipc/policy", ObjectKind::Channel, root)
+        .unwrap();
+
+    let peer = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateBusPeer(CreateBusPeer {
+                owner: bootstrap,
+                domain,
+                name: String::from("renderer"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusPeerCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let endpoint = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateBusEndpoint(CreateBusEndpoint {
+                domain,
+                resource,
+                path: String::from("/ipc/policy"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusEndpointCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+
+    assert_eq!(
+        surface.dispatch(
+            context.clone(),
+            Syscall::AttachBusPeer(AttachBusPeer { peer, endpoint }),
+        ),
+        Err(SyscallError::Runtime(RuntimeError::NativeModel(
+            NativeModelError::ProcessContractMissing {
+                kind: ContractKind::Io
+            }
+        )))
+    );
+
+    let foreign_resource = surface
+        .runtime
+        .create_resource(bootstrap, domain, ResourceKind::Channel, "wrong-bus")
+        .unwrap();
+    surface
+        .runtime
+        .set_resource_contract_policy(foreign_resource, ResourceContractPolicy::Io)
+        .unwrap();
+    let foreign_contract = surface
+        .runtime
+        .create_contract(
+            bootstrap,
+            domain,
+            foreign_resource,
+            ContractKind::Io,
+            "wrong-io",
+        )
+        .unwrap();
+    surface
+        .runtime
+        .bind_process_contract(bootstrap, foreign_contract)
+        .unwrap();
+    assert_eq!(
+        surface.dispatch(
+            context.clone(),
+            Syscall::AttachBusPeer(AttachBusPeer { peer, endpoint }),
+        ),
+        Err(SyscallError::Runtime(RuntimeError::NativeModel(
+            NativeModelError::ResourceBindingMismatch
+        )))
+    );
+
+    let bus_contract = surface
+        .runtime
+        .create_contract(
+            bootstrap,
+            domain,
+            resource,
+            ContractKind::Io,
+            "render-bus-io",
+        )
+        .unwrap();
+    surface
+        .runtime
+        .bind_process_contract(bootstrap, bus_contract)
+        .unwrap();
+    surface
+        .dispatch(
+            context.clone(),
+            Syscall::AttachBusPeer(AttachBusPeer { peer, endpoint }),
+        )
+        .unwrap();
+    match surface
+        .dispatch(
+            context,
+            Syscall::PublishBusMessage(PublishBusMessage {
+                peer,
+                endpoint,
+                bytes: b"policy-ok".to_vec(),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusMessagePublished { bytes, .. } => assert_eq!(bytes, 9),
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+}
+
+#[test]
+fn syscall_surface_bus_endpoint_capability_delegates_and_revocation_restores_denial() {
+    let mut surface = KernelSyscallSurface::host_runtime_default();
+    let bootstrap = surface
+        .runtime
+        .spawn_process("bootstrap", None, SchedulerClass::LatencyCritical)
+        .unwrap();
+    let delegate = surface
+        .runtime
+        .spawn_process("delegate", None, SchedulerClass::Interactive)
+        .unwrap();
+    let context = SyscallContext::kernel(bootstrap);
+
+    let domain = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateDomain(CreateDomain {
+                owner: bootstrap,
+                parent: None,
+                name: String::from("bus"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::DomainCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let resource = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateResource(CreateResource {
+                creator: bootstrap,
+                domain,
+                kind: ResourceKind::Channel,
+                name: String::from("render-bus"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::ResourceCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+
+    let root = surface
+        .runtime
+        .grant_capability(
+            bootstrap,
+            bootstrap.handle(),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "ipc-root",
+        )
+        .unwrap();
+    surface
+        .runtime
+        .create_vfs_node("/ipc", ObjectKind::Directory, root)
+        .unwrap();
+    surface
+        .runtime
+        .create_vfs_node("/ipc/delegated", ObjectKind::Channel, root)
+        .unwrap();
+
+    let peer = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateBusPeer(CreateBusPeer {
+                owner: delegate,
+                domain,
+                name: String::from("delegate-peer"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusPeerCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let endpoint = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateBusEndpoint(CreateBusEndpoint {
+                domain,
+                resource,
+                path: String::from("/ipc/delegated"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusEndpointCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+
+    assert_eq!(
+        surface.dispatch(
+            SyscallContext::kernel(delegate),
+            Syscall::AttachBusPeer(AttachBusPeer { peer, endpoint }),
+        ),
+        Err(SyscallError::Runtime(RuntimeError::NativeModel(
+            NativeModelError::BusAccessDenied {
+                owner: delegate,
+                endpoint,
+                required: CapabilityRights::ADMIN,
+            }
+        )))
+    );
+
+    let root_cap = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::GrantCapability(GrantCapability {
+                owner: bootstrap,
+                target: endpoint.handle(),
+                rights: CapabilityRights::READ
+                    | CapabilityRights::WRITE
+                    | CapabilityRights::DUPLICATE
+                    | CapabilityRights::ADMIN,
+                label: String::from("bus-endpoint-root"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::CapabilityGranted(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    match surface
+        .dispatch(
+            context.clone(),
+            Syscall::DuplicateCapability(DuplicateCapability {
+                capability: root_cap,
+                new_owner: delegate,
+                rights: CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::ADMIN,
+                label: String::from("bus-endpoint-delegate"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::CapabilityDuplicated(id) => {
+            surface
+                .dispatch(
+                    SyscallContext::kernel(delegate),
+                    Syscall::AttachBusPeer(AttachBusPeer { peer, endpoint }),
+                )
+                .unwrap();
+            surface
+                .dispatch(
+                    SyscallContext::kernel(delegate),
+                    Syscall::PublishBusMessage(PublishBusMessage {
+                        peer,
+                        endpoint,
+                        bytes: b"delegated".to_vec(),
+                    }),
+                )
+                .unwrap();
+            surface.runtime.revoke_capability(id).unwrap();
+        }
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+
+    assert_eq!(
+        surface.dispatch(
+            SyscallContext::kernel(delegate),
+            Syscall::PublishBusMessage(PublishBusMessage {
+                peer,
+                endpoint,
+                bytes: b"blocked".to_vec(),
+            }),
+        ),
+        Err(SyscallError::Runtime(RuntimeError::NativeModel(
+            NativeModelError::BusAccessDenied {
+                owner: delegate,
+                endpoint,
+                required: CapabilityRights::WRITE,
+            }
+        )))
+    );
+}
+
+#[test]
+fn syscall_surface_bus_queue_capacity_refuses_overflow_and_recovers_after_receive() {
+    let mut surface = KernelSyscallSurface::host_runtime_default();
+    let bootstrap = surface
+        .runtime
+        .spawn_process("bootstrap", None, SchedulerClass::LatencyCritical)
+        .unwrap();
+    let observer = surface
+        .runtime
+        .spawn_process("observer", None, SchedulerClass::Interactive)
+        .unwrap();
+    let context = SyscallContext::kernel(bootstrap);
+
+    let domain = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateDomain(CreateDomain {
+                owner: bootstrap,
+                parent: None,
+                name: String::from("bus"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::DomainCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let resource = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateResource(CreateResource {
+                creator: bootstrap,
+                domain,
+                kind: ResourceKind::Channel,
+                name: String::from("render-bus"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::ResourceCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let root = surface
+        .runtime
+        .grant_capability(
+            bootstrap,
+            bootstrap.handle(),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "ipc-root",
+        )
+        .unwrap();
+    surface
+        .runtime
+        .create_vfs_node("/ipc", ObjectKind::Directory, root)
+        .unwrap();
+    surface
+        .runtime
+        .create_vfs_node("/ipc/capacity", ObjectKind::Channel, root)
+        .unwrap();
+
+    let peer = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateBusPeer(CreateBusPeer {
+                owner: bootstrap,
+                domain,
+                name: String::from("renderer"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusPeerCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let endpoint = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateBusEndpoint(CreateBusEndpoint {
+                domain,
+                resource,
+                path: String::from("/ipc/capacity"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusEndpointCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    surface
+        .dispatch(
+            context.clone(),
+            Syscall::AttachBusPeer(AttachBusPeer { peer, endpoint }),
+        )
+        .unwrap();
+    let capacity = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::InspectBusEndpoint { id: endpoint },
+        )
+        .unwrap()
+    {
+        SyscallResult::BusEndpointInfo(info) => {
+            assert_eq!(info.queue_capacity, 64);
+            assert_eq!(info.peak_queue_depth, 0);
+            assert_eq!(info.overflow_count, 0);
+            info.queue_capacity
+        }
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    for index in 0..capacity {
+        let payload = format!("msg-{index}").into_bytes();
+        match surface
+            .dispatch(
+                context.clone(),
+                Syscall::PublishBusMessage(PublishBusMessage {
+                    peer,
+                    endpoint,
+                    bytes: payload.clone(),
+                }),
+            )
+            .unwrap()
+        {
+            SyscallResult::BusMessagePublished { bytes, .. } => assert_eq!(bytes, payload.len()),
+            other => panic!("unexpected syscall result: {other:?}"),
+        }
+    }
+    assert_eq!(
+        surface.dispatch(
+            context.clone(),
+            Syscall::PublishBusMessage(PublishBusMessage {
+                peer,
+                endpoint,
+                bytes: b"overflow".to_vec(),
+            }),
+        ),
+        Err(SyscallError::Runtime(RuntimeError::NativeModel(
+            NativeModelError::BusQueueFull { endpoint, capacity }
+        )))
+    );
+    match surface
+        .dispatch(
+            context.clone(),
+            Syscall::InspectBusEndpoint { id: endpoint },
+        )
+        .unwrap()
+    {
+        SyscallResult::BusEndpointInfo(info) => {
+            assert_eq!(info.queue_depth, info.queue_capacity);
+            assert_eq!(info.peak_queue_depth, info.queue_capacity);
+            assert_eq!(info.overflow_count, 1);
+        }
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+    match surface
+        .dispatch(
+            context.clone(),
+            Syscall::ReceiveBusMessage(ReceiveBusMessage { peer, endpoint }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusMessageReceived { bytes, .. } => assert_eq!(bytes, b"msg-0"),
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+    match surface
+        .dispatch(
+            context.clone(),
+            Syscall::PublishBusMessage(PublishBusMessage {
+                peer,
+                endpoint,
+                bytes: b"recovered".to_vec(),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusMessagePublished { bytes, .. } => assert_eq!(bytes, 9),
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+
+    let observe_domain = surface
+        .runtime
+        .create_domain(observer, None, "obs")
+        .unwrap();
+    let observe_resource = surface
+        .runtime
+        .create_resource(
+            observer,
+            observe_domain,
+            ResourceKind::Namespace,
+            "inspect-bus",
+        )
+        .unwrap();
+    surface
+        .runtime
+        .set_resource_contract_policy(observe_resource, ResourceContractPolicy::Observe)
+        .unwrap();
+    let observe_contract = surface
+        .runtime
+        .create_contract(
+            observer,
+            observe_domain,
+            observe_resource,
+            ContractKind::Observe,
+            "observe-bus",
+        )
+        .unwrap();
+    surface
+        .runtime
+        .bind_process_contract(observer, observe_contract)
+        .unwrap();
+    match surface
+        .dispatch(
+            SyscallContext::kernel(observer),
+            Syscall::ReadProcFs {
+                path: String::from("/proc/system/bus"),
+            },
+        )
+        .unwrap()
+    {
+        SyscallResult::ProcFsBytes(bytes) => {
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(text.contains("path=/ipc/capacity"));
+            assert!(text.contains("queue-capacity=64"));
+            assert!(text.contains("queue-peak=64"));
+            assert!(text.contains("overflows=1"));
+        }
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+}
+
+#[test]
+fn syscall_surface_bus_shared_endpoint_preserves_fifo_and_detach_isolates_one_peer() {
+    let mut surface = KernelSyscallSurface::host_runtime_default();
+    let bootstrap = surface
+        .runtime
+        .spawn_process("bootstrap", None, SchedulerClass::LatencyCritical)
+        .unwrap();
+    let observer = surface
+        .runtime
+        .spawn_process("observer", None, SchedulerClass::Interactive)
+        .unwrap();
+    let context = SyscallContext::kernel(bootstrap);
+
+    let domain = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateDomain(CreateDomain {
+                owner: bootstrap,
+                parent: None,
+                name: String::from("bus"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::DomainCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let resource = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateResource(CreateResource {
+                creator: bootstrap,
+                domain,
+                kind: ResourceKind::Channel,
+                name: String::from("render-bus"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::ResourceCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let root = surface
+        .runtime
+        .grant_capability(
+            bootstrap,
+            bootstrap.handle(),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "ipc-root",
+        )
+        .unwrap();
+    surface
+        .runtime
+        .create_vfs_node("/ipc", ObjectKind::Directory, root)
+        .unwrap();
+    surface
+        .runtime
+        .create_vfs_node("/ipc/shared", ObjectKind::Channel, root)
+        .unwrap();
+    let peer_a = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateBusPeer(CreateBusPeer {
+                owner: bootstrap,
+                domain,
+                name: String::from("renderer-a"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusPeerCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let peer_b = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateBusPeer(CreateBusPeer {
+                owner: bootstrap,
+                domain,
+                name: String::from("renderer-b"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusPeerCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let endpoint = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateBusEndpoint(CreateBusEndpoint {
+                domain,
+                resource,
+                path: String::from("/ipc/shared"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusEndpointCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    surface
+        .dispatch(
+            context.clone(),
+            Syscall::AttachBusPeer(AttachBusPeer {
+                peer: peer_a,
+                endpoint,
+            }),
+        )
+        .unwrap();
+    surface
+        .dispatch(
+            context.clone(),
+            Syscall::AttachBusPeer(AttachBusPeer {
+                peer: peer_b,
+                endpoint,
+            }),
+        )
+        .unwrap();
+
+    for (peer, bytes) in [
+        (peer_a, b"a-1".to_vec()),
+        (peer_b, b"b-1".to_vec()),
+        (peer_a, b"a-2".to_vec()),
+    ] {
+        match surface
+            .dispatch(
+                context.clone(),
+                Syscall::PublishBusMessage(PublishBusMessage {
+                    peer,
+                    endpoint,
+                    bytes: bytes.clone(),
+                }),
+            )
+            .unwrap()
+        {
+            SyscallResult::BusMessagePublished { bytes: count, .. } => {
+                assert_eq!(count, bytes.len())
+            }
+            other => panic!("unexpected syscall result: {other:?}"),
+        }
+    }
+    match surface
+        .dispatch(
+            context.clone(),
+            Syscall::ReceiveBusMessage(ReceiveBusMessage {
+                peer: peer_b,
+                endpoint,
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusMessageReceived { bytes, .. } => assert_eq!(bytes, b"a-1"),
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+    match surface
+        .dispatch(
+            context.clone(),
+            Syscall::ReceiveBusMessage(ReceiveBusMessage {
+                peer: peer_a,
+                endpoint,
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusMessageReceived { bytes, .. } => assert_eq!(bytes, b"b-1"),
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+
+    surface
+        .dispatch(
+            context.clone(),
+            Syscall::DetachBusPeer(DetachBusPeer {
+                peer: peer_a,
+                endpoint,
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        surface.dispatch(
+            context.clone(),
+            Syscall::PublishBusMessage(PublishBusMessage {
+                peer: peer_a,
+                endpoint,
+                bytes: b"blocked-a".to_vec(),
+            }),
+        ),
+        Err(SyscallError::Runtime(RuntimeError::NativeModel(
+            NativeModelError::BusPeerNotAttached {
+                peer: peer_a,
+                endpoint
+            }
+        )))
+    );
+    surface
+        .dispatch(
+            context.clone(),
+            Syscall::PublishBusMessage(PublishBusMessage {
+                peer: peer_b,
+                endpoint,
+                bytes: b"b-2".to_vec(),
+            }),
+        )
+        .unwrap();
+    match surface
+        .dispatch(
+            context.clone(),
+            Syscall::ReceiveBusMessage(ReceiveBusMessage {
+                peer: peer_b,
+                endpoint,
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusMessageReceived { bytes, .. } => assert_eq!(bytes, b"a-2"),
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+    match surface
+        .dispatch(
+            context.clone(),
+            Syscall::ReceiveBusMessage(ReceiveBusMessage {
+                peer: peer_b,
+                endpoint,
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusMessageReceived { bytes, .. } => assert_eq!(bytes, b"b-2"),
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+    match surface
+        .dispatch(
+            context.clone(),
+            Syscall::InspectBusEndpoint { id: endpoint },
+        )
+        .unwrap()
+    {
+        SyscallResult::BusEndpointInfo(info) => {
+            assert_eq!(info.attached_peers, vec![peer_b]);
+            assert_eq!(info.publish_count, 4);
+            assert_eq!(info.receive_count, 4);
+            assert_eq!(info.last_peer, Some(peer_b));
+        }
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+
+    let observe_domain = surface
+        .runtime
+        .create_domain(observer, None, "obs")
+        .unwrap();
+    let observe_resource = surface
+        .runtime
+        .create_resource(
+            observer,
+            observe_domain,
+            ResourceKind::Namespace,
+            "inspect-bus",
+        )
+        .unwrap();
+    surface
+        .runtime
+        .set_resource_contract_policy(observe_resource, ResourceContractPolicy::Observe)
+        .unwrap();
+    let observe_contract = surface
+        .runtime
+        .create_contract(
+            observer,
+            observe_domain,
+            observe_resource,
+            ContractKind::Observe,
+            "observe-bus",
+        )
+        .unwrap();
+    surface
+        .runtime
+        .bind_process_contract(observer, observe_contract)
+        .unwrap();
+    match surface
+        .dispatch(
+            SyscallContext::kernel(observer),
+            Syscall::ReadProcFs {
+                path: String::from("/proc/system/bus"),
+            },
+        )
+        .unwrap()
+    {
+        SyscallResult::ProcFsBytes(bytes) => {
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(text.contains("path=/ipc/shared"));
+            assert!(text.contains(&format!("peers=[{}]", peer_b.raw())));
+        }
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+}
+
+#[test]
+fn syscall_surface_bus_isolates_parallel_endpoints_for_shared_and_distinct_peers() {
+    let mut surface = KernelSyscallSurface::host_runtime_default();
+    let bootstrap = surface
+        .runtime
+        .spawn_process("bootstrap", None, SchedulerClass::LatencyCritical)
+        .unwrap();
+    let peer_process = surface
+        .runtime
+        .spawn_process("peer-process", None, SchedulerClass::Interactive)
+        .unwrap();
+    let observer = surface
+        .runtime
+        .spawn_process("observer", None, SchedulerClass::Interactive)
+        .unwrap();
+    let context = SyscallContext::kernel(bootstrap);
+
+    let domain = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateDomain(CreateDomain {
+                owner: bootstrap,
+                parent: None,
+                name: String::from("bus"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::DomainCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let resource_a = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateResource(CreateResource {
+                creator: bootstrap,
+                domain,
+                kind: ResourceKind::Channel,
+                name: String::from("render-a"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::ResourceCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let resource_b = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateResource(CreateResource {
+                creator: bootstrap,
+                domain,
+                kind: ResourceKind::Channel,
+                name: String::from("render-b"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::ResourceCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let root = surface
+        .runtime
+        .grant_capability(
+            bootstrap,
+            bootstrap.handle(),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "ipc-root",
+        )
+        .unwrap();
+    surface
+        .runtime
+        .create_vfs_node("/ipc", ObjectKind::Directory, root)
+        .unwrap();
+    surface
+        .runtime
+        .create_vfs_node("/ipc/render-a", ObjectKind::Channel, root)
+        .unwrap();
+    surface
+        .runtime
+        .create_vfs_node("/ipc/render-b", ObjectKind::Channel, root)
+        .unwrap();
+
+    let peer_shared = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateBusPeer(CreateBusPeer {
+                owner: bootstrap,
+                domain,
+                name: String::from("shared"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusPeerCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let peer_other = match surface
+        .dispatch(
+            SyscallContext::kernel(peer_process),
+            Syscall::CreateBusPeer(CreateBusPeer {
+                owner: peer_process,
+                domain,
+                name: String::from("other"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusPeerCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let endpoint_a = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateBusEndpoint(CreateBusEndpoint {
+                domain,
+                resource: resource_a,
+                path: String::from("/ipc/render-a"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusEndpointCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let endpoint_b = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::CreateBusEndpoint(CreateBusEndpoint {
+                domain,
+                resource: resource_b,
+                path: String::from("/ipc/render-b"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::BusEndpointCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let endpoint_b_root = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::GrantCapability(GrantCapability {
+                owner: bootstrap,
+                target: endpoint_b.handle(),
+                rights: CapabilityRights::READ
+                    | CapabilityRights::WRITE
+                    | CapabilityRights::DUPLICATE
+                    | CapabilityRights::ADMIN,
+                label: String::from("render-b-root"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::CapabilityGranted(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let endpoint_a_root = match surface
+        .dispatch(
+            context.clone(),
+            Syscall::GrantCapability(GrantCapability {
+                owner: bootstrap,
+                target: endpoint_a.handle(),
+                rights: CapabilityRights::READ
+                    | CapabilityRights::WRITE
+                    | CapabilityRights::ADMIN,
+                label: String::from("render-a-root"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::CapabilityGranted(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    match surface
+        .dispatch(
+            context.clone(),
+            Syscall::DuplicateCapability(DuplicateCapability {
+                capability: endpoint_b_root,
+                new_owner: peer_process,
+                rights: CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::ADMIN,
+                label: String::from("render-b-delegate"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::CapabilityDuplicated(_) => {}
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+    for (caller, peer, endpoint) in [
+        (bootstrap, peer_shared, endpoint_a),
+        (bootstrap, peer_shared, endpoint_b),
+        (peer_process, peer_other, endpoint_b),
+    ] {
+        surface
+            .dispatch(
+                SyscallContext::kernel(caller),
+                Syscall::AttachBusPeer(AttachBusPeer { peer, endpoint }),
+            )
+            .unwrap();
+    }
+    for (caller, peer, endpoint, bytes) in [
+        (bootstrap, peer_shared, endpoint_a, b"a-1".to_vec()),
+        (bootstrap, peer_shared, endpoint_b, b"b-1".to_vec()),
+        (peer_process, peer_other, endpoint_b, b"b-2".to_vec()),
+    ] {
+        match surface
+            .dispatch(
+                SyscallContext::kernel(caller),
+                Syscall::PublishBusMessage(PublishBusMessage {
+                    peer,
+                    endpoint,
+                    bytes: bytes.clone(),
+                }),
+            )
+            .unwrap()
+        {
+            SyscallResult::BusMessagePublished { bytes: count, .. } => {
+                assert_eq!(count, bytes.len())
+            }
+            other => panic!("unexpected syscall result: {other:?}"),
+        }
+    }
+    for (caller, peer, endpoint, expected) in [
+        (bootstrap, peer_shared, endpoint_a, b"a-1".as_slice()),
+        (bootstrap, peer_shared, endpoint_a, b"".as_slice()),
+        (peer_process, peer_other, endpoint_b, b"b-1".as_slice()),
+        (bootstrap, peer_shared, endpoint_b, b"b-2".as_slice()),
+    ] {
+        match surface
+            .dispatch(
+                SyscallContext::kernel(caller),
+                Syscall::ReceiveBusMessage(ReceiveBusMessage { peer, endpoint }),
+            )
+            .unwrap()
+        {
+            SyscallResult::BusMessageReceived { bytes, .. } => assert_eq!(bytes, expected),
+            other => panic!("unexpected syscall result: {other:?}"),
+        }
+    }
+    match surface
+        .dispatch(
+            context.clone(),
+            Syscall::InspectBusEndpoint { id: endpoint_a },
+        )
+        .unwrap()
+    {
+        SyscallResult::BusEndpointInfo(info) => {
+            assert_eq!(info.publish_count, 1);
+            assert_eq!(info.receive_count, 2);
+            assert_eq!(info.queue_depth, 0);
+        }
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+    match surface
+        .dispatch(
+            context.clone(),
+            Syscall::InspectBusEndpoint { id: endpoint_b },
+        )
+        .unwrap()
+    {
+        SyscallResult::BusEndpointInfo(info) => {
+            assert_eq!(info.publish_count, 2);
+            assert_eq!(info.receive_count, 2);
+            assert_eq!(info.queue_depth, 0);
+            assert_eq!(info.attached_peers, vec![peer_shared, peer_other]);
+        }
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+
+    let observe_domain = surface
+        .runtime
+        .create_domain(observer, None, "obs")
+        .unwrap();
+    let observe_resource = surface
+        .runtime
+        .create_resource(
+            observer,
+            observe_domain,
+            ResourceKind::Namespace,
+            "inspect-bus",
+        )
+        .unwrap();
+    surface
+        .runtime
+        .set_resource_contract_policy(observe_resource, ResourceContractPolicy::Observe)
+        .unwrap();
+    let observe_contract = surface
+        .runtime
+        .create_contract(
+            observer,
+            observe_domain,
+            observe_resource,
+            ContractKind::Observe,
+            "observe-bus",
+        )
+        .unwrap();
+    surface
+        .runtime
+        .bind_process_contract(observer, observe_contract)
+        .unwrap();
+    match surface
+        .dispatch(
+            SyscallContext::kernel(observer),
+            Syscall::ReadProcFs {
+                path: String::from("/proc/system/bus"),
+            },
+        )
+        .unwrap()
+    {
+        SyscallResult::ProcFsBytes(bytes) => {
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(text.contains("path=/ipc/render-a"));
+            assert!(text.contains("path=/ipc/render-b"));
+        }
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+}
+
+#[test]
+fn syscall_surface_records_dispatch_trace_and_refusal_paths() {
+    let mut surface = KernelSyscallSurface::host_runtime_default();
+    let bootstrap = surface
+        .runtime
+        .spawn_process("bootstrap", None, SchedulerClass::LatencyCritical)
+        .unwrap();
+    let full_context = SyscallContext::kernel(bootstrap);
+    let read_only_context = SyscallContext {
+        caller: bootstrap,
+        tid: ThreadId::from_process_id(bootstrap),
+        authority: CapabilityRights::READ,
+    };
+    let write_only_context = SyscallContext {
+        caller: bootstrap,
+        tid: ThreadId::from_process_id(bootstrap),
+        authority: CapabilityRights::WRITE,
+    };
+
+    let domain = match surface
+        .dispatch(
+            full_context.clone(),
+            Syscall::CreateDomain(CreateDomain {
+                owner: bootstrap,
+                parent: None,
+                name: String::from("trace"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::DomainCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let resource = match surface
+        .dispatch(
+            full_context.clone(),
+            Syscall::CreateResource(CreateResource {
+                creator: bootstrap,
+                domain,
+                kind: ResourceKind::Namespace,
+                name: String::from("inspect"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::ResourceCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+    let contract = match surface
+        .dispatch(
+            full_context.clone(),
+            Syscall::CreateContract(CreateContract {
+                issuer: bootstrap,
+                domain,
+                resource,
+                kind: ContractKind::Observe,
+                label: String::from("trace"),
+            }),
+        )
+        .unwrap()
+    {
+        SyscallResult::ContractCreated(id) => id,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+
+    match surface
+        .dispatch(full_context.clone(), Syscall::Tick)
+        .unwrap()
+    {
+        SyscallResult::Scheduled(process) => assert_eq!(process.pid, bootstrap),
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+    match surface
+        .dispatch(full_context.clone(), Syscall::ListDomains)
+        .unwrap()
+    {
+        SyscallResult::DomainList(domains) => {
+            assert!(domains.iter().any(|entry| entry.id == domain));
+        }
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+    match surface
+        .dispatch(full_context.clone(), Syscall::InspectDomain { id: domain })
+        .unwrap()
+    {
+        SyscallResult::DomainInfo(info) => {
+            assert_eq!(info.id, domain);
+            assert_eq!(info.name, "trace");
+        }
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+    match surface
+        .dispatch(full_context.clone(), Syscall::Snapshot)
+        .unwrap()
+    {
+        SyscallResult::Snapshot(snapshot) => {
+            let report = surface.runtime().verify_core();
+            assert!(snapshot.domain_count >= 1);
+            assert!(snapshot.resource_count >= 1);
+            assert!(snapshot.contract_count >= 1);
+            assert_eq!(snapshot.verified_core_ok, report.is_verified());
+            assert_eq!(
+                snapshot.verified_core_violation_count,
+                report.violations.len()
+            );
+        }
+        other => panic!("unexpected syscall result: {other:?}"),
+    }
+
+    assert_eq!(
+        surface.dispatch(read_only_context, Syscall::Tick),
+        Err(SyscallError::AccessDenied)
+    );
+    assert_eq!(
+        surface.dispatch(
+            write_only_context.clone(),
+            Syscall::InspectProcess { pid: bootstrap }
+        ),
+        Err(SyscallError::AccessDenied)
+    );
+    assert_eq!(
+        surface.dispatch(
+            SyscallContext {
+                caller: bootstrap,
+                tid: ThreadId::from_process_id(bootstrap),
+                authority: CapabilityRights::READ,
+            },
+            Syscall::SetContractState(SetContractState {
+                id: contract,
+                state: ContractState::Suspended,
+            }),
+        ),
+        Err(SyscallError::AccessDenied)
+    );
+    assert_eq!(
+        surface.dispatch(write_only_context.clone(), Syscall::InspectSystem),
+        Err(SyscallError::AccessDenied)
+    );
+
+    let system = match surface
+        .dispatch(full_context, Syscall::InspectSystem)
+        .unwrap()
+    {
+        SyscallResult::SystemIntrospection(system) => system,
+        other => panic!("unexpected syscall result: {other:?}"),
+    };
+
+    assert!(
+        system
+            .syscall_dispatches
+            .iter()
+            .any(|entry| entry.syscall.contains("CreateDomain") && entry.outcome == "ok")
+    );
+    assert!(
+        system
+            .syscall_dispatches
+            .iter()
+            .any(|entry| entry.syscall.contains("CreateResource") && entry.outcome == "ok")
+    );
+    assert!(
+        system
+            .syscall_dispatches
+            .iter()
+            .any(|entry| entry.syscall.contains("CreateContract") && entry.outcome == "ok")
+    );
+    assert!(
+        system
+            .syscall_dispatches
+            .iter()
+            .any(|entry| entry.syscall.contains("ListDomains") && entry.outcome == "ok")
+    );
+    assert!(
+        system
+            .syscall_dispatches
+            .iter()
+            .any(|entry| entry.syscall.contains("InspectDomain") && entry.outcome == "ok")
+    );
+    assert!(
+        system
+            .syscall_dispatches
+            .iter()
+            .any(|entry| entry.syscall.contains("Snapshot") && entry.outcome == "ok")
+    );
+    assert!(
+        system
+            .syscall_dispatches
+            .iter()
+            .any(|entry| entry.syscall.contains("Tick") && entry.outcome == "ok")
+    );
+    assert!(
+        system
+            .syscall_dispatches
+            .iter()
+            .any(|entry| entry.syscall.contains("Tick") && entry.outcome == "access-denied")
+    );
+    assert!(
+        system
+            .syscall_dispatches
+            .iter()
+            .any(|entry| entry.syscall.contains("InspectProcess")
+                && entry.outcome == "access-denied")
+    );
+    assert!(
+        system
+            .syscall_dispatches
+            .iter()
+            .any(|entry| entry.syscall.contains("InspectSystem") && entry.outcome == "ok")
+    );
+    assert!(
+        system.syscall_dispatches.iter().any(
+            |entry| entry.syscall.contains("InspectSystem") && entry.outcome == "access-denied"
+        )
+    );
+    assert!(system.syscall_dispatches.iter().any(
+        |entry| entry.syscall.contains("SetContractState") && entry.outcome == "access-denied"
+    ));
+}
+
+#[test]
 fn syscall_surface_lists_native_model_entities_and_system_snapshot_counts() {
     let mut surface = KernelSyscallSurface::host_runtime_default();
     let bootstrap = surface
@@ -234,9 +2058,15 @@ fn syscall_surface_lists_native_model_entities_and_system_snapshot_counts() {
 
     match surface.dispatch(context, Syscall::InspectSystem).unwrap() {
         SyscallResult::SystemIntrospection(system) => {
+            let report = surface.runtime().verify_core();
             assert!(system.snapshot.domain_count >= 1);
             assert!(system.snapshot.resource_count >= 1);
             assert!(system.snapshot.contract_count >= 1);
+            assert_eq!(system.snapshot.verified_core_ok, report.is_verified());
+            assert_eq!(
+                system.snapshot.verified_core_violation_count,
+                report.violations.len()
+            );
             assert!(system.domains.iter().any(|entry| entry.id == domain));
             assert!(system.resources.iter().any(|entry| entry.id == resource));
             assert!(system.contracts.iter().any(|entry| entry.id == contract));

@@ -1,0 +1,12 @@
+[package]
+name = "ngos-shell-proof"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ngos-user-abi = { path = "../user-abi" }
+ngos-user-runtime = { path = "../user-runtime" }
+
+[lib]
+name = "ngos_shell_proof"

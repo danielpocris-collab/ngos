@@ -18,6 +18,32 @@ fn kernel_state_bootstrap_marks_vfs_ready() {
 }
 
 #[test]
+fn runtime_policy_scheduler_topology_updates_cpu_count() {
+    let mut policy = RuntimePolicy::host_runtime_default();
+    policy.apply_scheduler_cpu_topology(vec![
+        SchedulerCpuTopologyEntry {
+            apic_id: 17,
+            package_id: 0,
+            core_group: 0,
+            sibling_group: 0,
+            inferred: false,
+        },
+        SchedulerCpuTopologyEntry {
+            apic_id: 29,
+            package_id: 0,
+            core_group: 0,
+            sibling_group: 1,
+            inferred: false,
+        },
+    ]);
+
+    assert_eq!(policy.scheduler_logical_cpu_count, 2);
+    assert_eq!(policy.scheduler_cpu_topology.len(), 2);
+    assert_eq!(policy.scheduler_cpu_topology[0].apic_id, 17);
+    assert!(!policy.scheduler_cpu_topology[1].inferred);
+}
+
+#[test]
 fn handle_space_allocates_in_order_and_reuses_released_handles() {
     let mut handles = HandleSpace::new(10, 14);
     let a = handles.allocate().unwrap();
@@ -328,6 +354,192 @@ fn scheduler_rotates_process_after_budget_expires() {
 }
 
 #[test]
+fn scheduler_prevents_background_starvation_under_interactive_pressure() {
+    let mut processes = ProcessTable::new(1, 16);
+    let bg = processes.spawn("bg", None).unwrap();
+    let ui_a = processes.spawn("ui-a", None).unwrap();
+    let ui_b = processes.spawn("ui-b", None).unwrap();
+    let mut scheduler = Scheduler::new(1);
+
+    scheduler
+        .enqueue(&mut processes, bg, SchedulerClass::Background)
+        .unwrap();
+    scheduler
+        .enqueue(&mut processes, ui_a, SchedulerClass::Interactive)
+        .unwrap();
+    scheduler
+        .enqueue(&mut processes, ui_b, SchedulerClass::Interactive)
+        .unwrap();
+
+    let mut saw_background = false;
+    for _ in 0..12 {
+        let scheduled = scheduler.tick(&mut processes).unwrap();
+        if scheduled.pid == bg {
+            saw_background = true;
+            break;
+        }
+    }
+
+    assert!(saw_background, "background queue should make progress");
+}
+
+#[test]
+fn scheduler_uses_lag_debt_to_avoid_interactive_token_domination() {
+    let mut processes = ProcessTable::new(1, 16);
+    let ui_a = processes.spawn("ui-a", None).unwrap();
+    let ui_b = processes.spawn("ui-b", None).unwrap();
+    let be = processes.spawn("be", None).unwrap();
+    let mut scheduler = Scheduler::new(1);
+
+    scheduler
+        .enqueue(&mut processes, ui_a, SchedulerClass::Interactive)
+        .unwrap();
+    scheduler
+        .enqueue(&mut processes, ui_b, SchedulerClass::Interactive)
+        .unwrap();
+    scheduler
+        .enqueue(&mut processes, be, SchedulerClass::BestEffort)
+        .unwrap();
+
+    let first = scheduler.tick(&mut processes).unwrap();
+    assert_eq!(first.class, SchedulerClass::Interactive);
+
+    let second = scheduler.tick(&mut processes).unwrap();
+    assert_eq!(second.pid, be);
+    assert_eq!(second.class, SchedulerClass::BestEffort);
+    assert!(
+        scheduler.class_lag_debt()[SchedulerClass::BestEffort.index()]
+            <= scheduler.class_lag_debt()[SchedulerClass::Interactive.index()]
+    );
+}
+
+#[test]
+fn scheduler_tracks_service_distribution_by_class() {
+    let mut processes = ProcessTable::new(1, 16);
+    let ui = processes.spawn("ui", None).unwrap();
+    let bg = processes.spawn("bg", None).unwrap();
+    let mut scheduler = Scheduler::new(1);
+
+    scheduler
+        .enqueue(&mut processes, ui, SchedulerClass::Interactive)
+        .unwrap();
+    scheduler
+        .enqueue(&mut processes, bg, SchedulerClass::Background)
+        .unwrap();
+
+    let mut saw_background_dispatch = false;
+    let mut saw_background_runtime = false;
+    for _ in 0..8 {
+        let scheduled = scheduler.tick(&mut processes).unwrap();
+        if scheduled.class == SchedulerClass::Background {
+            saw_background_dispatch = true;
+        }
+        let runtime_ticks = scheduler.class_runtime_ticks();
+        if runtime_ticks[SchedulerClass::Background.index()] > 0 {
+            saw_background_runtime = true;
+            break;
+        }
+    }
+
+    let dispatches = scheduler.class_dispatch_counts();
+    let runtime_ticks = scheduler.class_runtime_ticks();
+    assert!(dispatches[SchedulerClass::Interactive.index()] >= 1);
+    assert!(saw_background_dispatch);
+    assert!(dispatches[SchedulerClass::Background.index()] >= 1);
+    assert!(runtime_ticks[SchedulerClass::Interactive.index()] >= 1);
+    assert!(saw_background_runtime);
+    assert!(runtime_ticks[SchedulerClass::Background.index()] >= 1);
+}
+
+#[test]
+fn scheduler_reschedules_quickly_when_higher_priority_work_arrives() {
+    let mut processes = ProcessTable::new(1, 16);
+    let bg = processes.spawn("bg", None).unwrap();
+    let ui = processes.spawn("ui", None).unwrap();
+    let mut scheduler = Scheduler::new(4);
+
+    scheduler
+        .enqueue(&mut processes, bg, SchedulerClass::Background)
+        .unwrap();
+    let first = scheduler.tick(&mut processes).unwrap();
+    assert_eq!(first.pid, bg);
+    assert_eq!(first.budget, 4);
+
+    scheduler
+        .enqueue(&mut processes, ui, SchedulerClass::Interactive)
+        .unwrap();
+
+    let resumed = scheduler.running().unwrap().clone();
+    assert_eq!(resumed.pid, bg);
+    assert_eq!(resumed.budget, 1);
+
+    let next = scheduler.tick(&mut processes).unwrap();
+    assert_eq!(next.pid, ui);
+    assert_eq!(next.class, SchedulerClass::Interactive);
+}
+
+#[test]
+fn scheduler_prioritizes_woken_work_within_the_same_class() {
+    let mut processes = ProcessTable::new(1, 16);
+    let a = processes.spawn("a", None).unwrap();
+    let b = processes.spawn("b", None).unwrap();
+    let mut scheduler = Scheduler::new(1);
+
+    scheduler
+        .enqueue(&mut processes, a, SchedulerClass::Interactive)
+        .unwrap();
+    scheduler
+        .enqueue(&mut processes, b, SchedulerClass::Interactive)
+        .unwrap();
+
+    assert_eq!(scheduler.tick(&mut processes).unwrap().pid, a);
+    assert_eq!(scheduler.block_running(&mut processes).unwrap(), a);
+
+    scheduler
+        .wake(&mut processes, a, SchedulerClass::Interactive)
+        .unwrap();
+
+    let queued = scheduler.queued_threads_by_class();
+    assert_eq!(
+        queued[SchedulerClass::Interactive.index()],
+        vec![
+            processes.get(a).unwrap().main_thread().unwrap(),
+            processes.get(b).unwrap().main_thread().unwrap()
+        ]
+    );
+
+    let next = scheduler.tick(&mut processes).unwrap();
+    assert_eq!(next.pid, a);
+    assert_eq!(next.class, SchedulerClass::Interactive);
+    assert_eq!(scheduler.queued_urgent_len_by_class(), [0, 0, 0, 0]);
+}
+
+#[test]
+fn scheduler_exposes_urgent_queue_policy_state() {
+    let mut processes = ProcessTable::new(1, 16);
+    let a = processes.spawn("a", None).unwrap();
+    let b = processes.spawn("b", None).unwrap();
+    let mut scheduler = Scheduler::new(1);
+
+    scheduler
+        .enqueue(&mut processes, a, SchedulerClass::Interactive)
+        .unwrap();
+    scheduler
+        .enqueue(&mut processes, b, SchedulerClass::Interactive)
+        .unwrap();
+    assert_eq!(scheduler.tick(&mut processes).unwrap().pid, a);
+    assert_eq!(scheduler.block_running(&mut processes).unwrap(), a);
+    scheduler
+        .wake(&mut processes, a, SchedulerClass::Interactive)
+        .unwrap();
+
+    assert_eq!(scheduler.queued_len_by_class(), [0, 2, 0, 0]);
+    assert_eq!(scheduler.queued_urgent_len_by_class(), [0, 1, 0, 0]);
+    assert_eq!(scheduler.starved_classes(), [false, false, false, false]);
+    assert_eq!(scheduler.starvation_guard_ticks(), 8);
+}
+
+#[test]
 fn scheduler_can_block_and_wake_processes() {
     let mut processes = ProcessTable::new(1, 16);
     let pid = processes.spawn("io", None).unwrap();
@@ -397,6 +609,28 @@ fn scheduler_records_rotation_and_rebind_decisions() {
 }
 
 #[test]
+fn scheduler_rebind_updates_visible_queue_membership_without_duplicates() {
+    let mut processes = ProcessTable::new(1, 16);
+    let pid = processes.spawn("moved", None).unwrap();
+    let mut scheduler = Scheduler::new(1);
+
+    scheduler
+        .enqueue(&mut processes, pid, SchedulerClass::BestEffort)
+        .unwrap();
+    scheduler
+        .rebind_process(&processes, pid, SchedulerClass::Interactive, 3)
+        .unwrap();
+
+    let queued = scheduler.queued_threads_by_class();
+    assert!(queued[SchedulerClass::BestEffort.index()].is_empty());
+    assert_eq!(
+        queued[SchedulerClass::Interactive.index()],
+        vec![processes.get(pid).unwrap().main_thread().unwrap()]
+    );
+    assert_eq!(scheduler.queued_len_by_class(), [0, 1, 0, 0]);
+}
+
+#[test]
 fn scheduler_rejects_duplicate_or_invalid_queueing() {
     let mut processes = ProcessTable::new(1, 16);
     let pid = processes.spawn("dup", None).unwrap();
@@ -434,5 +668,167 @@ fn scheduler_reports_queue_capacity_exhaustion_explicitly() {
     assert_eq!(
         scheduler.enqueue(&mut processes, overflow, SchedulerClass::BestEffort),
         Err(SchedulerError::QueueFull)
+    );
+}
+
+#[test]
+fn scheduler_balances_threads_across_logical_cpus_and_respects_affinity() {
+    let mut processes = ProcessTable::new(1, 16);
+    let a = processes.spawn("a", None).unwrap();
+    let b = processes.spawn("b", None).unwrap();
+    let c = processes.spawn("c", None).unwrap();
+    let a_tid = processes.get(a).unwrap().main_thread().unwrap();
+    let b_tid = processes.get(b).unwrap().main_thread().unwrap();
+    let c_tid = processes.get(c).unwrap().main_thread().unwrap();
+    let mut scheduler = Scheduler::new_with_cpus(1, 2);
+
+    scheduler.set_thread_affinity(a_tid, 0b01).unwrap();
+    scheduler.set_thread_affinity(b_tid, 0b10).unwrap();
+    scheduler
+        .enqueue(&mut processes, a, SchedulerClass::BestEffort)
+        .unwrap();
+    scheduler
+        .enqueue(&mut processes, b, SchedulerClass::BestEffort)
+        .unwrap();
+    scheduler
+        .enqueue(&mut processes, c, SchedulerClass::BestEffort)
+        .unwrap();
+
+    assert_eq!(scheduler.cpu_queued_loads(), &[2, 1]);
+    assert_eq!(scheduler.thread_assignment(a_tid), Some((0, 0b01)));
+    assert_eq!(scheduler.thread_assignment(b_tid), Some((1, 0b10)));
+    assert_eq!(
+        scheduler.thread_assignment(c_tid).map(|entry| entry.0),
+        Some(0)
+    );
+}
+
+#[test]
+fn scheduler_rejects_empty_affinity_and_recovers_with_valid_cpu_mask() {
+    let mut processes = ProcessTable::new(1, 16);
+    let pid = processes.spawn("affinity", None).unwrap();
+    let tid = processes.get(pid).unwrap().main_thread().unwrap();
+    let mut scheduler = Scheduler::new_with_cpus(1, 2);
+
+    assert_eq!(
+        scheduler.set_thread_affinity(tid, 0),
+        Err(SchedulerError::InvalidCpuAffinity)
+    );
+
+    scheduler.set_thread_affinity(tid, 0b10).unwrap();
+    scheduler
+        .enqueue(&mut processes, pid, SchedulerClass::Interactive)
+        .unwrap();
+    assert_eq!(scheduler.thread_assignment(tid), Some((1, 0b10)));
+    assert_eq!(scheduler.cpu_queued_loads(), &[0, 1]);
+}
+
+#[test]
+fn scheduler_rebalances_queued_threads_when_affinity_allows_migration() {
+    let mut processes = ProcessTable::new(1, 16);
+    let a = processes.spawn("a", None).unwrap();
+    let b = processes.spawn("b", None).unwrap();
+    let c = processes.spawn("c", None).unwrap();
+    let d = processes.spawn("d", None).unwrap();
+    let mut scheduler = Scheduler::new_with_cpus(1, 2);
+
+    for pid in [a, b, c, d] {
+        scheduler
+            .set_thread_affinity(processes.get(pid).unwrap().main_thread().unwrap(), 0b01)
+            .unwrap();
+        scheduler
+            .enqueue(&mut processes, pid, SchedulerClass::BestEffort)
+            .unwrap();
+    }
+    scheduler
+        .set_thread_affinity(processes.get(d).unwrap().main_thread().unwrap(), 0b11)
+        .unwrap();
+    let d_tid = processes.get(d).unwrap().main_thread().unwrap();
+
+    assert_eq!(scheduler.cpu_queued_loads(), &[4, 0]);
+    let running = scheduler.tick(&mut processes).unwrap();
+    assert_eq!(scheduler.thread_assignment(d_tid), Some((1, 0b11)));
+    assert_eq!(scheduler.cpu_queued_loads().iter().sum::<usize>(), 3);
+    assert!(running.cpu == 1 || scheduler.cpu_queued_loads()[1] == 1);
+    assert!(scheduler.rebalance_migrations() >= 1);
+    assert!(scheduler.last_rebalance_migrations() >= 1);
+}
+
+#[test]
+fn scheduler_does_not_rebalance_when_affinity_forbids_other_cpu() {
+    let mut processes = ProcessTable::new(1, 16);
+    let a = processes.spawn("a", None).unwrap();
+    let b = processes.spawn("b", None).unwrap();
+    let c = processes.spawn("c", None).unwrap();
+    let d = processes.spawn("d", None).unwrap();
+    let mut scheduler = Scheduler::new_with_cpus(1, 2);
+    for pid in [a, b, c, d] {
+        scheduler
+            .set_thread_affinity(processes.get(pid).unwrap().main_thread().unwrap(), 0b01)
+            .unwrap();
+        scheduler
+            .enqueue(&mut processes, pid, SchedulerClass::BestEffort)
+            .unwrap();
+    }
+
+    assert_eq!(scheduler.cpu_queued_loads(), &[4, 0]);
+    let _ = scheduler.tick(&mut processes).unwrap();
+    assert_eq!(scheduler.cpu_queued_loads()[1], 0);
+    assert_eq!(scheduler.last_rebalance_migrations(), 0);
+}
+
+#[test]
+fn scheduler_exposes_per_cpu_class_queue_distribution() {
+    let mut processes = ProcessTable::new(1, 16);
+    let lc = processes.spawn("lc", None).unwrap();
+    let ui = processes.spawn("ui", None).unwrap();
+    let bg = processes.spawn("bg", None).unwrap();
+    let mut scheduler = Scheduler::new_with_cpus(1, 2);
+
+    let lc_tid = processes.get(lc).unwrap().main_thread().unwrap();
+    let ui_tid = processes.get(ui).unwrap().main_thread().unwrap();
+    let bg_tid = processes.get(bg).unwrap().main_thread().unwrap();
+
+    scheduler.set_thread_affinity(lc_tid, 0b01).unwrap();
+    scheduler.set_thread_affinity(ui_tid, 0b10).unwrap();
+    scheduler.set_thread_affinity(bg_tid, 0b10).unwrap();
+
+    scheduler
+        .enqueue(&mut processes, lc, SchedulerClass::LatencyCritical)
+        .unwrap();
+    scheduler
+        .enqueue(&mut processes, ui, SchedulerClass::Interactive)
+        .unwrap();
+    scheduler
+        .enqueue(&mut processes, bg, SchedulerClass::Background)
+        .unwrap();
+
+    assert_eq!(
+        scheduler.cpu_class_queued_loads(),
+        vec![[1, 0, 0, 0], [0, 1, 0, 1]]
+    );
+    assert_eq!(
+        scheduler
+            .queued_threads_for_cpu_and_class(0, SchedulerClass::LatencyCritical)
+            .into_iter()
+            .map(|tid| tid.raw())
+            .collect::<Vec<_>>(),
+        vec![lc_tid.raw()]
+    );
+    assert_eq!(
+        scheduler
+            .queued_threads_for_cpu_and_class(1, SchedulerClass::Interactive)
+            .into_iter()
+            .map(|tid| tid.raw())
+            .collect::<Vec<_>>(),
+        vec![ui_tid.raw()]
+    );
+    assert_eq!(
+        scheduler
+            .queued_threads_for_cpu_and_class(1, SchedulerClass::Background)
+            .into_iter()
+            .map(|tid| tid.raw())
+            .collect::<Vec<_>>(),
+        vec![bg_tid.raw()]
     );
 }

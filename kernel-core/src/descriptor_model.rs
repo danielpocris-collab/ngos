@@ -1,3 +1,18 @@
+//! Canonical subsystem role:
+//! - subsystem: descriptor and object model
+//! - owner layer: Layer 1
+//! - semantic owner: `kernel-core`
+//! - truth path role: canonical descriptor/object identity model for kernel and
+//!   syscall-visible handles
+//!
+//! Canonical contract families defined here:
+//! - descriptor contracts
+//! - object kind contracts
+//! - handle identity contracts
+//!
+//! This module may define canonical descriptor truth. Higher layers may inspect
+//! or transport it, but they must not redefine it.
+
 use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

@@ -4,7 +4,30 @@
 //! Rust. The host runtime exists to validate `ngos` semantics and
 //! architecture incrementally while preserving a path toward a complete,
 //! complex operating system with its own identity.
+//!
+//! Canonical subsystem role:
+//! - subsystem: kernel semantic core
+//! - owner layer: Layer 1
+//! - semantic owner: `kernel-core`
+//! - truth path: `boot-x86_64 -> platform-x86_64 -> kernel-core -> user-runtime -> userland-native -> QEMU`
+//!
+//! Canonical contract families exposed from this crate:
+//! - kernel object contracts
+//! - process inspection contracts
+//! - procfs / observability contracts
+//! - syscall contracts
+//! - verified-core contracts
+//!
+//! This crate is allowed to define system truth.
+//! Higher layers may transport, classify, inspect, or operate that truth, but
+//! they must not redefine it.
 
+#![cfg_attr(target_os = "none", no_std)]
+
+#[macro_use]
+extern crate alloc;
+
+mod bus_model;
 mod core_objects;
 mod descriptor_io_dispatch;
 mod descriptor_io_runtime;
@@ -31,9 +54,11 @@ mod syscall_surface;
 mod user_launch;
 mod user_memory_runtime;
 mod user_syscall_runtime;
+mod verified_core;
 mod vfs_model;
 mod vm_model;
 
+pub use bus_model::{BusEndpointInfo, BusEndpointKind, BusPeerInfo};
 pub use core_objects::{
     Capability, CapabilityError, CapabilityId, CapabilityRights, CapabilityTable, Handle,
     HandleError, HandleSpace, KernelObjectTable, ObjectError, ObjectHandle,
@@ -57,20 +82,27 @@ pub use eventing_model::{
     ProcessLifecycleEventKind, ProcessLifecycleInterest, ReadinessInterest, ReadinessRegistration,
     ResourceEventInterest, ResourceEventKind, SignalDisposition, SleepQueueId,
 };
+pub use foundation::{
+    ActiveCpuExtendedStateSlot, BusEndpointId, BusPeerId, CpuExtendedStateHandoff,
+    CpuExtendedStateHardwareTelemetry, RuntimePolicy, SchedulerCpuTopologyEntry,
+};
 pub use native_model::{
     ContractInfo, ContractKind, ContractState, DomainInfo, ResourceClaimResult, ResourceInfo,
     ResourceKind, ResourceReleaseResult,
 };
 pub use process_model::{
-    AddressSpace, AddressSpaceId, AddressSpaceInfo, AddressSpaceRegionInfo, AuxiliaryVectorEntry,
-    ExecutableImage, Process, ProcessError, ProcessId, ProcessInfo, ProcessIntrospection,
-    ProcessMemoryRegion, ProcessState, Thread, ThreadId, ThreadInfo, ThreadState,
+    AddressSpace, AddressSpaceId, AddressSpaceInfo, AddressSpaceRegionInfo,
+    AlignedCpuExtendedStateBuffer, AuxiliaryVectorEntry, ExecutableImage, Process,
+    ProcessAbiProfile, ProcessError, ProcessId, ProcessInfo, ProcessIntrospection,
+    ProcessMemoryRegion, ProcessState, Thread, ThreadCpuExtendedStateImage,
+    ThreadCpuExtendedStateProfile, ThreadId, ThreadInfo, ThreadState,
     project_hal_address_space_layout, project_hal_page_mappings,
 };
 pub use process_table::ProcessTable;
 pub use scheduler::{ScheduledProcess, Scheduler, SchedulerClass, SchedulerError};
 pub use syscall_surface::*;
 pub use user_launch::{UserLaunchArgs, UserLaunchPlan};
+pub use verified_core::{VerifiedCoreFamily, VerifiedCoreReport, VerifiedCoreViolation};
 pub use vfs_model::{MountPoint, VfsError, VfsNamespace, VfsNode};
 pub use vm_model::{
     MemoryAdvice, MemoryTouchStats, VmManager, VmObject, VmObjectKind, VmObjectLayoutInfo,
@@ -130,6 +162,24 @@ pub trait HardwareProvider: Send {
     fn primary_gpu_tensor_evidence(
         &mut self,
     ) -> Result<Option<platform_hal::GpuTensorEvidence>, HalError>;
+
+    fn save_cpu_extended_state(
+        &mut self,
+        _owner_pid: ProcessId,
+        _owner_tid: ThreadId,
+        _image: &mut ThreadCpuExtendedStateImage,
+    ) -> Result<(), HalError> {
+        Err(HalError::Unsupported)
+    }
+
+    fn restore_cpu_extended_state(
+        &mut self,
+        _owner_pid: ProcessId,
+        _owner_tid: ThreadId,
+        _image: &ThreadCpuExtendedStateImage,
+    ) -> Result<(), HalError> {
+        Err(HalError::Unsupported)
+    }
 }
 
 impl<T> HardwareProvider for T
@@ -252,10 +302,16 @@ where
     }
 }
 
+pub(crate) use alloc::borrow::ToOwned;
+pub(crate) use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+pub(crate) use alloc::format;
+pub(crate) use alloc::string::{String, ToString};
+pub(crate) use alloc::vec;
+pub(crate) use alloc::vec::Vec;
+use core::fmt::Write;
 use native_model::{ContractTable, DomainTable, ResourceTable};
 use process_model::{default_auxiliary_vector, default_memory_map, executable_image_from_status};
-use std::collections::BTreeMap;
-use std::fmt::Write;
 
 pub(crate) use descriptor_model::{
     FiledescShareGroup, QueueDescriptorTarget, filedesc_kind_code, io_capabilities_for_kind,

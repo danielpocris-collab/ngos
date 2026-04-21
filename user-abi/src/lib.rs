@@ -1,5 +1,19 @@
 #![no_std]
 
+//! Canonical subsystem role:
+//! - subsystem: user ABI
+//! - owner layer: Layer 2
+//! - semantic owner: `user-abi`
+//! - truth path role: canonical transport between `kernel-core` and user mode
+//!
+//! Canonical contract families in this crate:
+//! - bootstrap contracts
+//! - runtime snapshot contracts
+//! - syscall transport contracts
+//!
+//! This crate may transport canonical system truth, but it must not invent a
+//! higher-level replacement for the kernel model it carries.
+
 extern crate alloc;
 
 use core::fmt;
@@ -46,6 +60,11 @@ pub const BOOT_ENV_MODULE_PHYS_END_PREFIX: &str = "NGOS_BOOT_MODULE_PHYS_END=";
 pub const BOOT_ENV_CMDLINE_PREFIX: &str = "NGOS_BOOT_CMDLINE=";
 pub const BOOT_ENV_PROOF_PREFIX: &str = "NGOS_BOOT_PROOF=";
 pub const BOOT_ENV_OUTCOME_POLICY_PREFIX: &str = "NGOS_BOOT_OUTCOME_POLICY=";
+pub const BOOT_ENV_CPU_XSAVE_PREFIX: &str = "NGOS_BOOT_CPU_XSAVE=";
+pub const BOOT_ENV_CPU_SAVE_AREA_PREFIX: &str = "NGOS_BOOT_CPU_SAVE_AREA=";
+pub const BOOT_ENV_CPU_XCR0_PREFIX: &str = "NGOS_BOOT_CPU_XCR0=";
+pub const BOOT_ENV_CPU_BOOT_SEED_PREFIX: &str = "NGOS_BOOT_CPU_BOOT_SEED=";
+pub const BOOT_ENV_CPU_HW_PROVIDER_PREFIX: &str = "NGOS_BOOT_CPU_HW_PROVIDER=";
 pub const PROCESS_NAME_ENV_PREFIX: &str = "NGOS_PROCESS_NAME=";
 pub const IMAGE_PATH_ENV_PREFIX: &str = "NGOS_IMAGE_PATH=";
 pub const CWD_ENV_PREFIX: &str = "NGOS_CWD=";
@@ -119,6 +138,50 @@ pub const SYS_SYMLINK_PATH: SyscallNumber = 47;
 pub const SYS_RENAME_PATH: SyscallNumber = 48;
 pub const SYS_UNLINK_PATH: SyscallNumber = 49;
 pub const SYS_LIST_PATH: SyscallNumber = 50;
+pub const SYS_TRUNCATE_PATH: SyscallNumber = 146;
+pub const SYS_LINK_PATH: SyscallNumber = 147;
+pub const SYS_INSPECT_MOUNT: SyscallNumber = 148;
+pub const SYS_SET_MOUNT_PROPAGATION: SyscallNumber = 149;
+pub const SYS_GET_PROCESS_ROOT: SyscallNumber = 150;
+pub const SYS_SET_PROCESS_ROOT: SyscallNumber = 151;
+pub const SYS_GET_PROCESS_IDENTITY: SyscallNumber = 152;
+pub const SYS_SET_PROCESS_IDENTITY: SyscallNumber = 153;
+pub const SYS_WATCH_VFS_EVENTS: SyscallNumber = 154;
+pub const SYS_REMOVE_VFS_EVENTS: SyscallNumber = 155;
+pub const SYS_STAT_PATH_AT: SyscallNumber = 156;
+pub const SYS_LSTAT_PATH_AT: SyscallNumber = 157;
+pub const SYS_OPEN_PATH_AT: SyscallNumber = 158;
+pub const SYS_READLINK_PATH_AT: SyscallNumber = 159;
+pub const SYS_MKDIR_PATH_AT: SyscallNumber = 160;
+pub const SYS_MKFILE_PATH_AT: SyscallNumber = 161;
+pub const SYS_SYMLINK_PATH_AT: SyscallNumber = 162;
+pub const SYS_RENAME_PATH_AT: SyscallNumber = 163;
+pub const SYS_UNLINK_PATH_AT: SyscallNumber = 164;
+pub const SYS_LIST_PATH_AT: SyscallNumber = 165;
+pub const SYS_TRUNCATE_PATH_AT: SyscallNumber = 166;
+pub const SYS_LINK_PATH_AT: SyscallNumber = 167;
+pub const SYS_CHMOD_PATH_AT: SyscallNumber = 168;
+pub const SYS_CHOWN_PATH_AT: SyscallNumber = 169;
+pub const SYS_WATCH_VFS_EVENTS_AT: SyscallNumber = 170;
+pub const SYS_REMOVE_VFS_EVENTS_AT: SyscallNumber = 171;
+pub const SYS_GET_PROCESS_SECURITY_LABEL: SyscallNumber = 172;
+pub const SYS_SET_PROCESS_SECURITY_LABEL: SyscallNumber = 173;
+pub const SYS_INSPECT_PATH_SECURITY_CONTEXT: SyscallNumber = 174;
+pub const SYS_SET_PATH_SECURITY_LABEL: SyscallNumber = 175;
+pub const SYS_SET_FD_RIGHTS: SyscallNumber = 176;
+pub const SYS_CREATE_BUS_PEER: SyscallNumber = 189;
+pub const SYS_SET_PROCESS_AFFINITY: SyscallNumber = 178;
+pub const SYS_CREATE_BUS_ENDPOINT: SyscallNumber = 190;
+pub const SYS_ATTACH_BUS_PEER: SyscallNumber = 191;
+pub const SYS_DETACH_BUS_PEER: SyscallNumber = 192;
+pub const SYS_LIST_BUS_PEERS: SyscallNumber = 193;
+pub const SYS_INSPECT_BUS_PEER: SyscallNumber = 194;
+pub const SYS_LIST_BUS_ENDPOINTS: SyscallNumber = 195;
+pub const SYS_INSPECT_BUS_ENDPOINT: SyscallNumber = 196;
+pub const SYS_PUBLISH_BUS_MESSAGE: SyscallNumber = 197;
+pub const SYS_RECEIVE_BUS_MESSAGE: SyscallNumber = 198;
+pub const SYS_WATCH_BUS_EVENTS: SyscallNumber = 199;
+pub const SYS_REMOVE_BUS_EVENTS: SyscallNumber = 200;
 pub const SYS_SEND_SIGNAL: SyscallNumber = 51;
 pub const SYS_PENDING_SIGNALS: SyscallNumber = 52;
 pub const SYS_BLOCKED_PENDING_SIGNALS: SyscallNumber = 53;
@@ -144,6 +207,17 @@ pub const SYS_CONNECT_UDP_SOCKET: SyscallNumber = 72;
 pub const SYS_SENDTO_UDP_SOCKET: SyscallNumber = 73;
 pub const SYS_RECVFROM_UDP_SOCKET: SyscallNumber = 74;
 pub const SYS_COMPLETE_NET_TX: SyscallNumber = 75;
+pub const SYS_TCP_LISTEN: SyscallNumber = 200;
+pub const SYS_TCP_CONNECT: SyscallNumber = 201;
+pub const SYS_TCP_ACCEPT: SyscallNumber = 202;
+pub const SYS_TCP_SEND: SyscallNumber = 203;
+pub const SYS_TCP_RECV: SyscallNumber = 204;
+pub const SYS_TCP_CLOSE: SyscallNumber = 205;
+pub const SYS_TCP_RESET: SyscallNumber = 206;
+pub const SYS_ICMP_ECHO_REQUEST: SyscallNumber = 207;
+pub const SYS_CPU_ONLINE: SyscallNumber = 208;
+pub const SYS_CPU_OFFLINE: SyscallNumber = 209;
+pub const SYS_CPU_INFO: SyscallNumber = 210;
 pub const SYS_WATCH_PROCESS_EVENTS: SyscallNumber = 76;
 pub const SYS_REMOVE_PROCESS_EVENTS: SyscallNumber = 77;
 pub const SYS_WATCH_RESOURCE_EVENTS: SyscallNumber = 78;
@@ -198,6 +272,18 @@ pub const SYS_RECLAIM_MEMORY_PRESSURE_GLOBAL: SyscallNumber = 132;
 pub const SYS_MAP_FILE_MEMORY: SyscallNumber = 133;
 pub const SYS_SPAWN_PROCESS_COPY_VM: SyscallNumber = 134;
 pub const SYS_BIND_PROCESS_CONTRACT: SyscallNumber = 135;
+pub const SYS_INSPECT_PROCESS_COMPAT: SyscallNumber = 136;
+pub const SYS_INSPECT_STORAGE_VOLUME: SyscallNumber = 137;
+pub const SYS_PREPARE_STORAGE_COMMIT: SyscallNumber = 138;
+pub const SYS_RECOVER_STORAGE_VOLUME: SyscallNumber = 139;
+pub const SYS_MOUNT_STORAGE_VOLUME: SyscallNumber = 140;
+pub const SYS_UNMOUNT_STORAGE_VOLUME: SyscallNumber = 141;
+pub const SYS_REPAIR_STORAGE_SNAPSHOT: SyscallNumber = 142;
+pub const SYS_INSPECT_STORAGE_LINEAGE: SyscallNumber = 177;
+pub const NATIVE_STORAGE_LINEAGE_DEPTH: usize = 8;
+pub const SYS_CHMOD_PATH: SyscallNumber = 143;
+pub const SYS_CHOWN_PATH: SyscallNumber = 144;
+pub const SYS_SEEK: SyscallNumber = 145;
 pub const SYS_BIND_DEVICE_DRIVER: SyscallNumber = 108;
 pub const SYS_UNBIND_DEVICE_DRIVER: SyscallNumber = 109;
 pub const SYS_SET_PROCESS_ARGS: SyscallNumber = 104;
@@ -237,6 +323,25 @@ pub enum Errno {
     Range = 34,
     NotSup = 95,
     TimedOut = 110,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum SeekWhence {
+    Set = 0,
+    Cur = 1,
+    End = 2,
+}
+
+impl SeekWhence {
+    pub const fn from_raw(raw: u32) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Set),
+            1 => Some(Self::Cur),
+            2 => Some(Self::End),
+            _ => None,
+        }
+    }
 }
 
 impl Errno {
@@ -1295,9 +1400,12 @@ impl Amd64UserEntryRegisters {
             rdi: frame.argc,
             rsi: frame.argv as usize,
             rdx: frame.envp as usize,
-            rcx: frame.auxv as usize,
+            // The syscall switch path returns with SYSRETQ, which consumes RCX as
+            // the user RIP. Keep AUXV in R9 so both direct IRETQ launch and
+            // syscall-driven child launch observe the same bootstrap payload.
+            rcx: 0,
             r8: frame.stack_alignment,
-            r9: 0,
+            r9: frame.auxv as usize,
         }
     }
 }
@@ -1317,6 +1425,13 @@ pub enum FcntlCmd {
     GetFd,
     SetFl { nonblock: bool },
     SetFd { cloexec: bool },
+    QueryLock,
+    TryLockExclusive { token: u16 },
+    UnlockExclusive { token: u16 },
+    TryLockShared { token: u16 },
+    UnlockShared { token: u16 },
+    UpgradeLockExclusive { token: u16 },
+    DowngradeLockShared { token: u16 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1344,6 +1459,25 @@ pub enum NativeObjectKind {
     Channel = 8,
     EventQueue = 9,
     SleepQueue = 10,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum NativeMountPropagationMode {
+    Private = 0,
+    Shared = 1,
+    Slave = 2,
+}
+
+impl NativeMountPropagationMode {
+    pub const fn from_raw(raw: u32) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Private),
+            1 => Some(Self::Shared),
+            2 => Some(Self::Slave),
+            _ => None,
+        }
+    }
 }
 
 impl NativeObjectKind {
@@ -1609,6 +1743,41 @@ pub struct NativeContractRecord {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
+pub struct NativeBusPeerRecord {
+    pub id: u64,
+    pub owner: u64,
+    pub domain: u64,
+    pub attached_endpoint_count: u64,
+    pub readable_endpoint_count: u64,
+    pub writable_endpoint_count: u64,
+    pub publish_count: u64,
+    pub receive_count: u64,
+    pub last_endpoint: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct NativeBusEndpointRecord {
+    pub id: u64,
+    pub domain: u64,
+    pub resource: u64,
+    pub kind: u32,
+    pub reserved: u32,
+    pub attached_peer_count: u64,
+    pub readable_peer_count: u64,
+    pub writable_peer_count: u64,
+    pub publish_count: u64,
+    pub receive_count: u64,
+    pub byte_count: u64,
+    pub queue_depth: u64,
+    pub queue_capacity: u64,
+    pub peak_queue_depth: u64,
+    pub overflow_count: u64,
+    pub last_peer: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
 pub struct NativeResourceClaimRecord {
     pub resource: u64,
     pub holder_contract: u64,
@@ -1640,12 +1809,17 @@ pub struct NativeResourceCancelRecord {
 #[repr(C)]
 pub struct NativeFileStatusRecord {
     pub inode: u64,
+    pub link_count: u64,
     pub size: u64,
     pub kind: u32,
     pub cloexec: u32,
     pub nonblock: u32,
     pub readable: u32,
     pub writable: u32,
+    pub executable: u32,
+    pub owner_uid: u32,
+    pub group_gid: u32,
+    pub mode: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1655,6 +1829,72 @@ pub struct NativeFileSystemStatusRecord {
     pub node_count: u64,
     pub read_only: u32,
     pub reserved: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct NativeMountRecord {
+    pub id: u64,
+    pub parent_mount_id: u64,
+    pub peer_group: u64,
+    pub master_group: u64,
+    pub layer: u64,
+    pub entry_count: u64,
+    pub propagation_mode: u32,
+    pub created_mount_root: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct NativeStorageVolumeRecord {
+    pub valid: u32,
+    pub dirty: u32,
+    pub payload_len: u64,
+    pub generation: u64,
+    pub parent_generation: u64,
+    pub replay_generation: u64,
+    pub payload_checksum: u64,
+    pub superblock_sector: u64,
+    pub journal_sector: u64,
+    pub data_sector: u64,
+    pub index_sector: u64,
+    pub alloc_sector: u64,
+    pub data_start_sector: u64,
+    pub prepared_commit_count: u64,
+    pub recovered_commit_count: u64,
+    pub repaired_snapshot_count: u64,
+    pub allocation_total_blocks: u64,
+    pub allocation_used_blocks: u64,
+    pub mapped_file_count: u64,
+    pub mapped_extent_count: u64,
+    pub mapped_directory_count: u64,
+    pub mapped_symlink_count: u64,
+    pub volume_id: [u8; 32],
+    pub state_label: [u8; 32],
+    pub last_commit_tag: [u8; 32],
+    pub payload_preview: [u8; 32],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct NativeStorageLineageEntry {
+    pub generation: u64,
+    pub parent_generation: u64,
+    pub payload_checksum: u64,
+    pub kind_label: [u8; 16],
+    pub state_label: [u8; 16],
+    pub tag_label: [u8; 32],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct NativeStorageLineageRecord {
+    pub valid: u32,
+    pub lineage_contiguous: u32,
+    pub count: u64,
+    pub newest_generation: u64,
+    pub oldest_generation: u64,
+    pub entries: [NativeStorageLineageEntry; NATIVE_STORAGE_LINEAGE_DEPTH],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1738,6 +1978,8 @@ pub enum NativeEventSourceKind {
     Resource = 5,
     Network = 6,
     Graphics = 7,
+    Bus = 8,
+    Vfs = 9,
 }
 
 impl NativeEventSourceKind {
@@ -1751,6 +1993,47 @@ impl NativeEventSourceKind {
             5 => Some(Self::Resource),
             6 => Some(Self::Network),
             7 => Some(Self::Graphics),
+            8 => Some(Self::Bus),
+            9 => Some(Self::Vfs),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum NativeVfsEventKind {
+    Created = 0,
+    Opened = 1,
+    Closed = 2,
+    Written = 3,
+    Renamed = 4,
+    Unlinked = 5,
+    Mounted = 6,
+    Unmounted = 7,
+    LockAcquired = 8,
+    LockRefused = 9,
+    PermissionRefused = 10,
+    Truncated = 11,
+    Linked = 12,
+}
+
+impl NativeVfsEventKind {
+    pub const fn from_raw(raw: u32) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Created),
+            1 => Some(Self::Opened),
+            2 => Some(Self::Closed),
+            3 => Some(Self::Written),
+            4 => Some(Self::Renamed),
+            5 => Some(Self::Unlinked),
+            6 => Some(Self::Mounted),
+            7 => Some(Self::Unmounted),
+            8 => Some(Self::LockAcquired),
+            9 => Some(Self::LockRefused),
+            10 => Some(Self::PermissionRefused),
+            11 => Some(Self::Truncated),
+            12 => Some(Self::Linked),
             _ => None,
         }
     }
@@ -1798,6 +2081,18 @@ pub struct NativeResourceEventWatchConfig {
     pub released: u32,
     pub handed_off: u32,
     pub revoked: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct NativeBusEventWatchConfig {
+    pub token: u64,
+    pub poll_events: u32,
+    pub attached: u32,
+    pub detached: u32,
+    pub published: u32,
+    pub received: u32,
+    pub reserved: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1889,6 +2184,27 @@ pub struct NativeGraphicsEventWatchConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
+pub struct NativeVfsEventWatchConfig {
+    pub token: u64,
+    pub poll_events: u32,
+    pub subtree: u32,
+    pub created: u32,
+    pub opened: u32,
+    pub closed: u32,
+    pub written: u32,
+    pub renamed: u32,
+    pub unlinked: u32,
+    pub mounted: u32,
+    pub unmounted: u32,
+    pub lock_acquired: u32,
+    pub lock_refused: u32,
+    pub permission_refused: u32,
+    pub truncated: u32,
+    pub linked: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
 pub struct NativeEventRecord {
     pub token: u64,
     pub events: u32,
@@ -1975,6 +2291,16 @@ pub struct NativeDeviceRecord {
     pub block_size: u32,
     pub reserved2: u32,
     pub capacity_bytes: u64,
+    pub last_completed_request_id: u64,
+    pub last_completed_frame_tag: [u8; 64],
+    pub last_completed_source_api_name: [u8; 24],
+    pub last_completed_translation_label: [u8; 32],
+    pub last_terminal_request_id: u64,
+    pub last_terminal_state: u32,
+    pub reserved3: u32,
+    pub last_terminal_frame_tag: [u8; 64],
+    pub last_terminal_source_api_name: [u8; 24],
+    pub last_terminal_translation_label: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1986,6 +2312,16 @@ pub struct NativeDriverRecord {
     pub queued_requests: u64,
     pub in_flight_requests: u64,
     pub completed_requests: u64,
+    pub last_completed_request_id: u64,
+    pub last_completed_frame_tag: [u8; 64],
+    pub last_completed_source_api_name: [u8; 24],
+    pub last_completed_translation_label: [u8; 32],
+    pub last_terminal_request_id: u64,
+    pub last_terminal_state: u32,
+    pub reserved1: u32,
+    pub last_terminal_frame_tag: [u8; 64],
+    pub last_terminal_source_api_name: [u8; 24],
+    pub last_terminal_translation_label: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2001,6 +2337,9 @@ pub struct NativeDeviceRequestRecord {
     pub submitted_tick: u64,
     pub started_tick: u64,
     pub completed_tick: u64,
+    pub frame_tag: [u8; 64],
+    pub source_api_name: [u8; 24],
+    pub translation_label: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2017,8 +2356,9 @@ pub struct NativeGpuBufferRecord {
 pub struct NativeGpuScanoutRecord {
     pub presented_frames: u64,
     pub last_frame_len: u64,
-    pub reserved0: u64,
-    pub reserved1: u64,
+    pub last_frame_tag: [u8; 64],
+    pub last_source_api_name: [u8; 24],
+    pub last_translation_label: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2159,6 +2499,16 @@ pub struct NativeSpawnProcessConfig {
     pub envp_ptr: usize,
     pub envp_len: usize,
     pub envp_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(C)]
+pub struct NativeProcessIdentityRecord {
+    pub uid: u32,
+    pub gid: u32,
+    pub umask: u32,
+    pub supplemental_count: u32,
+    pub supplemental_gids: [u32; 8],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2369,6 +2719,29 @@ pub struct NativeProcessRecord {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeProcessCompatRecord {
+    pub pid: u64,
+    pub target: [u8; 16],
+    pub route_class: [u8; 32],
+    pub handle_profile: [u8; 32],
+    pub path_profile: [u8; 32],
+    pub scheduler_profile: [u8; 32],
+    pub sync_profile: [u8; 32],
+    pub timer_profile: [u8; 32],
+    pub module_profile: [u8; 32],
+    pub event_profile: [u8; 32],
+    pub requires_kernel_abi_shims: u32,
+    pub prefix: [u8; 64],
+    pub executable_path: [u8; 64],
+    pub working_dir: [u8; 64],
+    pub loader_route_class: [u8; 32],
+    pub loader_launch_mode: [u8; 32],
+    pub loader_entry_profile: [u8; 32],
+    pub loader_requires_compat_shims: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NativeSystemSnapshotRecord {
     pub current_tick: u64,
     pub busy_ticks: u64,
@@ -2380,6 +2753,29 @@ pub struct NativeSystemSnapshotRecord {
     pub queued_interactive: u64,
     pub queued_normal: u64,
     pub queued_background: u64,
+    pub queued_urgent_latency_critical: u64,
+    pub queued_urgent_interactive: u64,
+    pub queued_urgent_normal: u64,
+    pub queued_urgent_background: u64,
+    pub lag_debt_latency_critical: i64,
+    pub lag_debt_interactive: i64,
+    pub lag_debt_normal: i64,
+    pub lag_debt_background: i64,
+    pub dispatch_count_latency_critical: u64,
+    pub dispatch_count_interactive: u64,
+    pub dispatch_count_normal: u64,
+    pub dispatch_count_background: u64,
+    pub runtime_ticks_latency_critical: u64,
+    pub runtime_ticks_interactive: u64,
+    pub runtime_ticks_normal: u64,
+    pub runtime_ticks_background: u64,
+    pub scheduler_cpu_count: u64,
+    pub scheduler_running_cpu: u64,
+    pub scheduler_cpu_load_imbalance: u64,
+    pub starved_latency_critical: u64,
+    pub starved_interactive: u64,
+    pub starved_normal: u64,
+    pub starved_background: u64,
     pub deferred_task_count: u64,
     pub sleeping_processes: u64,
     pub total_event_queue_count: u64,
@@ -2395,6 +2791,81 @@ pub struct NativeSystemSnapshotRecord {
     pub running_pid: u64,
     pub reserved0: u64,
     pub reserved1: u64,
+}
+
+impl NativeSystemSnapshotRecord {
+    pub const VERIFIED_CORE_OK_FALSE: u64 = 0;
+    pub const VERIFIED_CORE_OK_TRUE: u64 = 1;
+    pub const SCHEDULER_POLICY_FALSE: u64 = 0;
+    pub const SCHEDULER_POLICY_TRUE: u64 = 1;
+
+    pub const fn verified_core_ok(&self) -> bool {
+        self.reserved0 == Self::VERIFIED_CORE_OK_TRUE
+    }
+
+    pub const fn verified_core_violation_count(&self) -> u64 {
+        self.reserved1
+    }
+
+    pub const fn starved_any(&self) -> bool {
+        self.starved_latency_critical == Self::SCHEDULER_POLICY_TRUE
+            || self.starved_interactive == Self::SCHEDULER_POLICY_TRUE
+            || self.starved_normal == Self::SCHEDULER_POLICY_TRUE
+            || self.starved_background == Self::SCHEDULER_POLICY_TRUE
+    }
+
+    pub const fn queued_urgent_total(&self) -> u64 {
+        self.queued_urgent_latency_critical
+            + self.queued_urgent_interactive
+            + self.queued_urgent_normal
+            + self.queued_urgent_background
+    }
+
+    pub const fn scheduler_lag_debt_total(&self) -> i64 {
+        self.lag_debt_latency_critical
+            + self.lag_debt_interactive
+            + self.lag_debt_normal
+            + self.lag_debt_background
+    }
+
+    pub const fn scheduler_dispatch_total(&self) -> u64 {
+        self.dispatch_count_latency_critical
+            + self.dispatch_count_interactive
+            + self.dispatch_count_normal
+            + self.dispatch_count_background
+    }
+
+    pub const fn scheduler_runtime_ticks_total(&self) -> u64 {
+        self.runtime_ticks_latency_critical
+            + self.runtime_ticks_interactive
+            + self.runtime_ticks_normal
+            + self.runtime_ticks_background
+    }
+
+    pub fn scheduler_runtime_imbalance(&self) -> u64 {
+        let values = [
+            self.runtime_ticks_latency_critical,
+            self.runtime_ticks_interactive,
+            self.runtime_ticks_normal,
+            self.runtime_ticks_background,
+        ];
+        let mut min = u64::MAX;
+        let mut max = 0u64;
+        let mut seen = false;
+        for value in values {
+            if value == 0 {
+                continue;
+            }
+            seen = true;
+            min = min.min(value);
+            max = max.max(value);
+        }
+        if seen { max.saturating_sub(min) } else { 0 }
+    }
+
+    pub const fn scheduler_has_running_cpu(&self) -> bool {
+        self.scheduler_running_cpu != u64::MAX
+    }
 }
 
 #[cfg(test)]
@@ -2473,6 +2944,8 @@ mod tests {
         assert_eq!(SYS_GET_PROCESS_NAME, 57);
         assert_eq!(SYS_GET_PROCESS_IMAGE_PATH, 58);
         assert_eq!(SYS_GET_PROCESS_CWD, 59);
+        assert_eq!(SYS_GET_PROCESS_ROOT, 150);
+        assert_eq!(SYS_GET_PROCESS_IDENTITY, 152);
         assert_eq!(SYS_CHDIR_PATH, 60);
         assert_eq!(SYS_MKSOCK_PATH, 61);
         assert_eq!(SYS_CONFIGURE_NETIF_IPV4, 62);
@@ -2489,6 +2962,13 @@ mod tests {
         assert_eq!(SYS_SENDTO_UDP_SOCKET, 73);
         assert_eq!(SYS_RECVFROM_UDP_SOCKET, 74);
         assert_eq!(SYS_COMPLETE_NET_TX, 75);
+        assert_eq!(SYS_TCP_LISTEN, 97);
+        assert_eq!(SYS_TCP_CONNECT, 98);
+        assert_eq!(SYS_TCP_ACCEPT, 99);
+        assert_eq!(SYS_TCP_SEND, 100);
+        assert_eq!(SYS_TCP_RECV, 101);
+        assert_eq!(SYS_TCP_CLOSE, 102);
+        assert_eq!(SYS_TCP_RESET, 103);
         assert_eq!(SYS_WATCH_PROCESS_EVENTS, 76);
         assert_eq!(SYS_REMOVE_PROCESS_EVENTS, 77);
         assert_eq!(SYS_WATCH_RESOURCE_EVENTS, 78);
@@ -2520,6 +3000,33 @@ mod tests {
         assert_eq!(SYS_SET_PROCESS_ARGS, 104);
         assert_eq!(SYS_SET_PROCESS_ENV, 105);
         assert_eq!(SYS_SET_PROCESS_CWD, 106);
+        assert_eq!(SYS_SET_PROCESS_ROOT, 151);
+        assert_eq!(SYS_SET_PROCESS_IDENTITY, 153);
+        assert_eq!(SYS_WATCH_VFS_EVENTS, 154);
+        assert_eq!(SYS_REMOVE_VFS_EVENTS, 155);
+        assert_eq!(SYS_STAT_PATH_AT, 156);
+        assert_eq!(SYS_LSTAT_PATH_AT, 157);
+        assert_eq!(SYS_OPEN_PATH_AT, 158);
+        assert_eq!(SYS_READLINK_PATH_AT, 159);
+        assert_eq!(SYS_MKDIR_PATH_AT, 160);
+        assert_eq!(SYS_MKFILE_PATH_AT, 161);
+        assert_eq!(SYS_SYMLINK_PATH_AT, 162);
+        assert_eq!(SYS_RENAME_PATH_AT, 163);
+        assert_eq!(SYS_UNLINK_PATH_AT, 164);
+        assert_eq!(SYS_LIST_PATH_AT, 165);
+        assert_eq!(SYS_TRUNCATE_PATH_AT, 166);
+        assert_eq!(SYS_LINK_PATH_AT, 167);
+        assert_eq!(SYS_CHMOD_PATH_AT, 168);
+        assert_eq!(SYS_CHOWN_PATH_AT, 169);
+        assert_eq!(SYS_WATCH_VFS_EVENTS_AT, 170);
+        assert_eq!(SYS_REMOVE_VFS_EVENTS_AT, 171);
+        assert_eq!(SYS_GET_PROCESS_SECURITY_LABEL, 172);
+        assert_eq!(SYS_SET_PROCESS_SECURITY_LABEL, 173);
+        assert_eq!(SYS_INSPECT_PATH_SECURITY_CONTEXT, 174);
+        assert_eq!(SYS_SET_PATH_SECURITY_LABEL, 175);
+        assert_eq!(SYS_SET_FD_RIGHTS, 176);
+        assert_eq!(SYS_INSPECT_STORAGE_LINEAGE, 177);
+        assert_eq!(SYS_SET_PROCESS_AFFINITY, 178);
         assert_eq!(SYS_MKCHAN_PATH, 107);
         assert_eq!(SYS_BIND_DEVICE_DRIVER, 108);
         assert_eq!(SYS_UNBIND_DEVICE_DRIVER, 109);
@@ -2549,6 +3056,81 @@ mod tests {
         assert_eq!(SYS_MAP_FILE_MEMORY, 133);
         assert_eq!(SYS_SPAWN_PROCESS_COPY_VM, 134);
         assert_eq!(SYS_BIND_PROCESS_CONTRACT, 135);
+        assert_eq!(SYS_CREATE_BUS_PEER, 189);
+        assert_eq!(SYS_CREATE_BUS_ENDPOINT, 190);
+        assert_eq!(SYS_ATTACH_BUS_PEER, 191);
+        assert_eq!(SYS_DETACH_BUS_PEER, 192);
+        assert_eq!(SYS_LIST_BUS_PEERS, 193);
+        assert_eq!(SYS_INSPECT_BUS_PEER, 194);
+        assert_eq!(SYS_LIST_BUS_ENDPOINTS, 195);
+        assert_eq!(SYS_INSPECT_BUS_ENDPOINT, 196);
+        assert_eq!(SYS_PUBLISH_BUS_MESSAGE, 197);
+        assert_eq!(SYS_RECEIVE_BUS_MESSAGE, 198);
+        assert_eq!(SYS_WATCH_BUS_EVENTS, 199);
+        assert_eq!(SYS_REMOVE_BUS_EVENTS, 200);
+    }
+
+    #[test]
+    fn system_snapshot_record_exposes_verified_core_fields() {
+        let record = NativeSystemSnapshotRecord {
+            current_tick: 0,
+            busy_ticks: 0,
+            process_count: 0,
+            active_process_count: 0,
+            blocked_process_count: 0,
+            queued_processes: 0,
+            queued_latency_critical: 0,
+            queued_interactive: 0,
+            queued_normal: 0,
+            queued_background: 0,
+            queued_urgent_latency_critical: 0,
+            queued_urgent_interactive: 0,
+            queued_urgent_normal: 0,
+            queued_urgent_background: 0,
+            lag_debt_latency_critical: 0,
+            lag_debt_interactive: 2,
+            lag_debt_normal: 0,
+            lag_debt_background: 1,
+            dispatch_count_latency_critical: 1,
+            dispatch_count_interactive: 2,
+            dispatch_count_normal: 0,
+            dispatch_count_background: 1,
+            runtime_ticks_latency_critical: 0,
+            runtime_ticks_interactive: 3,
+            runtime_ticks_normal: 0,
+            runtime_ticks_background: 1,
+            scheduler_cpu_count: 2,
+            scheduler_running_cpu: 1,
+            scheduler_cpu_load_imbalance: 2,
+            starved_latency_critical: NativeSystemSnapshotRecord::SCHEDULER_POLICY_FALSE,
+            starved_interactive: NativeSystemSnapshotRecord::SCHEDULER_POLICY_TRUE,
+            starved_normal: NativeSystemSnapshotRecord::SCHEDULER_POLICY_FALSE,
+            starved_background: NativeSystemSnapshotRecord::SCHEDULER_POLICY_FALSE,
+            deferred_task_count: 0,
+            sleeping_processes: 0,
+            total_event_queue_count: 0,
+            total_event_queue_pending: 0,
+            total_event_queue_waiters: 0,
+            total_socket_count: 0,
+            saturated_socket_count: 0,
+            total_socket_rx_depth: 0,
+            total_socket_rx_limit: 0,
+            max_socket_rx_depth: 0,
+            total_network_tx_dropped: 0,
+            total_network_rx_dropped: 0,
+            running_pid: 0,
+            reserved0: NativeSystemSnapshotRecord::VERIFIED_CORE_OK_TRUE,
+            reserved1: 3,
+        };
+
+        assert!(record.verified_core_ok());
+        assert_eq!(record.verified_core_violation_count(), 3);
+        assert!(record.starved_any());
+        assert_eq!(record.queued_urgent_total(), 0);
+        assert_eq!(record.scheduler_lag_debt_total(), 3);
+        assert_eq!(record.scheduler_dispatch_total(), 4);
+        assert_eq!(record.scheduler_runtime_ticks_total(), 4);
+        assert!(record.scheduler_has_running_cpu());
     }
 
     #[test]

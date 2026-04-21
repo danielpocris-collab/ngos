@@ -1,3 +1,18 @@
+//! Canonical subsystem role:
+//! - subsystem: x86_64 paging mediation
+//! - owner layer: platform mediation
+//! - semantic owner: `platform-x86_64`
+//! - truth path role: platform-specific paging plan and page-table mediation
+//!   for the real x86 path
+//!
+//! Canonical contract families handled here:
+//! - early paging contracts
+//! - page-table mediation contracts
+//! - x86_64 mapping translation contracts
+//!
+//! This module may mediate x86_64 paging mechanics, but it must not redefine
+//! the higher-level VM truth owned by `kernel-core`.
+
 use core::marker::PhantomData;
 
 use platform_hal::{CachePolicy, MemoryPermissions, PageMapping};

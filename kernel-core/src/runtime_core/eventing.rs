@@ -1,5 +1,5 @@
 use super::*;
-use crate::eventing_model::GraphicsEventInterest;
+use crate::eventing_model::{BusEventInterest, GraphicsEventInterest};
 
 impl KernelRuntime {
     pub fn create_sleep_queue(&mut self, owner: ProcessId) -> Result<SleepQueueId, RuntimeError> {
@@ -698,6 +698,30 @@ impl KernelRuntime {
             socket_inode,
             token,
         )
+    }
+
+    pub fn watch_bus_events_descriptor(
+        &mut self,
+        owner: ProcessId,
+        queue_fd: Descriptor,
+        endpoint: BusEndpointId,
+        token: u64,
+        interest: BusEventInterest,
+        events: IoPollEvents,
+    ) -> Result<(), RuntimeError> {
+        event_queue_runtime::watch_bus_events_descriptor(
+            self, owner, queue_fd, endpoint, token, interest, events,
+        )
+    }
+
+    pub fn remove_bus_events_descriptor(
+        &mut self,
+        owner: ProcessId,
+        queue_fd: Descriptor,
+        endpoint: BusEndpointId,
+        token: u64,
+    ) -> Result<(), RuntimeError> {
+        event_queue_runtime::remove_bus_events_descriptor(self, owner, queue_fd, endpoint, token)
     }
 
     pub fn watch_graphics_events_descriptor(

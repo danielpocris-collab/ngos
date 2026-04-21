@@ -8,7 +8,7 @@ If a local implementation choice conflicts with repository rules, the repository
 Any agent working in this repository must treat these rules as project law and follow them in full.
 
 ## Project Structure & Module Organization
-This repository is a Rust workspace for `Next Gen OS`, an original operating system with its own kernel, ABI, and internal architecture. Core crates live at the top level: `kernel-core` contains kernel logic, `platform-hal` defines platform contracts, `platform-host-runtime` provides the host runtime backend, and `host-runtime` is the main runnable entry point. The active workspace is `ngos`-native only. Use [docs/proprietary-transition.md](C:/Users/pocri/OneDrive/Desktop/experiment/docs/proprietary-transition.md) for origin and ownership policy. Ignore `target/` and temporary `.pdb` outputs.
+This repository is a Rust workspace for `Next Gen OS`, an original operating system with its own kernel, ABI, and internal architecture. Core crates live at the top level: `kernel-core` contains kernel logic, `platform-hal` defines platform contracts, `platform-host-runtime` provides the host runtime backend, and `host-runtime` is the main runnable entry point. The active workspace is `ngos`-native only. Use [docs/proprietary-transition.md](C:/Users/pocri/OneDrive/Desktop/experiment/docs/proprietary-transition.md) for origin and ownership policy. Use [docs/ngos-os-fill-order.md](C:/Users/pocri/OneDrive/Desktop/experiment/docs/ngos-os-fill-order.md) for the mandatory nested OS execution order: cell -> tissue -> organ -> apparatus -> organism. Ignore `target/` and temporary `.pdb` outputs.
 
 ## Build, Test, and Development Commands
 - `cargo run -p ngos-host-runtime`: run the host runtime kernel/runtime.
@@ -73,6 +73,236 @@ This checkout does not include `.git`, so project-specific commit history is una
 - The primary subsystem-closure path is `QEMU` and then physical hardware, not `host-runtime`.
 - `QEMU` is the first acceptable full-system truth surface for real boot/platform/kernel execution; `host-runtime` is not.
 - A subsystem that has not been demonstrated on the `QEMU` path remains open, even if host-side validation is strong.
+
+## Swarm Nano-Semantic Law For LLMs
+
+This rule is mandatory for any LLM, agent, contributor, script, or automation working in this repository.
+
+`ngos` must be built as a swarm of nano-semantic agents, not as a monolithic control surface with helper modules.
+
+### Core Rule
+
+It is not sufficient for code to contain files, types, or modules named `agent`.
+
+A subsystem is considered swarm-based only if:
+
+- responsibility is split across multiple narrow semantic agents
+- each agent owns a small, explicit behavioral family
+- mutation is localized to the smallest reasonable authority surface
+- orchestration remains thin
+- no single large file or module retains the real semantic authority for the subsystem
+
+If the real logic, dispatch, mutation, or subsystem knowledge remains concentrated in one large file or one large module, then the subsystem is still monolithic, even if helper agents exist around it.
+
+### Mandatory Rule For New Code
+
+Any new implementation work must be introduced in nano-semantic swarm form by default.
+
+That means:
+
+- new behavior must be added as a new semantic agent or a narrowly scoped extension of an existing semantic agent
+- new behavior must not be added into a large central file merely because that file already exists
+- the existence of a legacy monolithic file does not authorize continued growth of that file
+- new code must reduce architectural concentration, not deepen it
+
+Absolute rule:
+
+- do not add new subsystem families into `lib.rs`, `main.rs`, `user_syscall.rs`, or any equivalent central file if a dedicated semantic agent or module can reasonably be created instead
+
+### Thin Orchestrator Rule
+
+Orchestrators are allowed only as thin composition layers.
+
+They may do only the following:
+
+- route requests
+- sequence existing semantic agents
+- assemble outputs
+- expose integration boundaries
+
+They must not become:
+
+- the place where most subsystem decisions live
+- the place where most subsystem mutation lives
+- the only location that understands the whole subsystem
+- the hidden authority center of the subsystem
+
+If an orchestrator starts accumulating subsystem semantics, it must be split immediately.
+
+### What Counts As A Monolith
+
+A file or module must be treated as monolithic if it does one or more of the following:
+
+- dispatches many unrelated semantic families
+- performs mutation across multiple domains
+- owns too many subsystem decisions
+- contains proof logic, runtime logic, command logic, and recovery logic together
+- acts as the practical control center of the subsystem
+- must be edited for most new work in that subsystem
+
+If removing one file would collapse most of the subsystem's control behavior, that subsystem is not yet swarm-based.
+
+### Forbidden LLM Reasoning
+
+The following reasoning is forbidden:
+
+- "the file is already large, so I can add a bit more here"
+- "there are already agent files nearby, so this is swarm-based enough"
+- "I will add it centrally now and refactor later"
+- "I kept the existing style of the large orchestrator"
+- "I created helper functions, therefore the subsystem is no longer monolithic"
+
+These are invalid in this repository.
+
+### Required LLM Decision Process
+
+Before adding new code, the LLM must evaluate:
+
+1. Is this a new semantic family?
+2. Can this be implemented as a narrow semantic agent?
+3. Can orchestration remain thin if I place this outside the central file?
+4. Would adding this here increase subsystem concentration?
+
+If the answer to `2` is yes, the LLM must create or extend a narrow semantic agent instead of enlarging the central module.
+
+If the answer to `4` is yes, the LLM must not place the new code in the central module.
+
+### Signs Of Non-Compliant Architecture
+
+The subsystem is non-compliant if:
+
+- `lib.rs` or equivalent keeps growing as the main behavioral surface
+- command dispatch and subsystem mutation remain in the same large file
+- proof fronts and real runtime logic are mixed together
+- semantic agents exist, but the real authority stays centralized
+- most new work still requires editing the same central file
+
+### Repository Law
+
+For `ngos`, swarm nano-semantic structure is not optional style.
+
+It is a mandatory implementation rule.
+
+A subsystem that works functionally but remains architecturally centralized is not considered aligned with repository law.
+
+## Micro-Organism Architecture Law
+
+This rule is mandatory for any LLM, agent, contributor, script, or automation working in this repository.
+
+`ngos` must evolve as a living micro-organism swarm, not as a central organism with helper limbs.
+
+### Core Rule
+
+It is not sufficient to split one large crate into many files if the semantic authority still flows back into one central body.
+
+A subsystem is considered a real micro-organism only if:
+
+- it owns one narrow behavioral family end-to-end
+- it carries its own logic, state transitions, observability, proof flow, and tests
+- it collaborates with other organisms through explicit contracts
+- it does not depend on `userland-native` as its default growth surface
+
+### Userland-Native Law
+
+`userland-native` is an orchestration membrane, not a universal organ.
+
+It may:
+
+- route requests
+- launch proof flows
+- compose outputs
+- report final observable outcomes
+
+It must not:
+
+- become the default home for new subsystem families
+- accumulate semantic ownership of networking, storage, shell, compat, graphics, workflow, or other full subsystem families
+- redefine kernel truth, runtime truth, or subsystem truth that belongs elsewhere
+
+### Real Decomposition Rule
+
+Adding a new `*_agents.rs` file inside `userland-native` does not by itself count as real architectural decomposition.
+
+If a behavioral family can reasonably live as:
+
+- its own crate
+- a dedicated subsystem module outside the central orchestrator
+- or an existing subsystem owner
+
+then it must be moved there instead of growing `userland-native`.
+
+### Test Ownership Rule
+
+Tests must live with the organism that owns the behavior.
+
+Absolute rules:
+
+- do not grow central catch-all test files for behavior owned by a subsystem organism
+- do not treat `userland-native` tests as the default landing zone for subsystem validation
+- proof flows must belong to the subsystem they validate, not to a generic central controller
+
+### Architectural Regression Rule
+
+Any change that increases dependency gravity toward `userland-native` is architectural regression.
+
+Examples of regression:
+
+- new subsystem logic added directly to `userland-native`
+- new proof families added only as `userland-native` internals
+- new tests for subsystem behavior added only to central `userland-native` test surfaces
+- file splits that preserve the same central semantic authority
+
+### Mandatory Design Formula
+
+The architecture direction is:
+
+- `kernel-core` = base metabolism
+- `user-runtime` = transport and access nervous system
+- subsystem crates = organs
+- `userland-native` = membrane and coordinator, not universal body
+
+Repository law:
+
+- smaller owners
+- thinner orchestrators
+- stronger contracts
+
+The system is aligned only when behavior is distributed across many small real owners that collaborate without a hidden center of semantic control.
+
+## Review Gate For Anti-Centralization
+
+Every review that touches architecture, proof flow, shell flow, control flow, or subsystem growth must answer these questions explicitly.
+
+### Mandatory Review Questions
+
+1. What semantic family is being added or expanded?
+2. Why is the current owner the correct owner for that family?
+3. Could this behavior live in a dedicated crate or existing subsystem owner instead of `userland-native`?
+4. Does this change increase semantic authority inside a central orchestrator?
+5. Are logic, observability, proof flow, and tests staying with the same semantic owner?
+6. Does this change reduce concentration, preserve it, or increase it?
+
+### Mandatory Review Outcomes
+
+The change must be rejected or reworked if:
+
+- the owner is justified only by convenience
+- `userland-native` is used as the default landing zone for a new subsystem family
+- tests are centralized away from the real owner
+- proof flow is centralized away from the real owner
+- the change adds wiring and semantic authority to the same central place
+- decomposition is only file-level while ownership remains centralized
+
+### Preferred Review Outcome
+
+The preferred outcome is:
+
+- a smaller semantic owner
+- a thinner orchestrator
+- a clearer subsystem boundary
+- local observability
+- local proof ownership
+- local tests
 
 ## Execution Contract
 

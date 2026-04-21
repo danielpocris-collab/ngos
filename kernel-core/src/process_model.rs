@@ -1,8 +1,26 @@
+//! Canonical subsystem role:
+//! - subsystem: process and thread object model
+//! - owner layer: Layer 1
+//! - semantic owner: `kernel-core`
+//! - truth path role: canonical process/thread state and identity model for
+//!   the kernel
+//!
+//! Canonical contract families defined here:
+//! - process model contracts
+//! - thread model contracts
+//! - CPU extended-state ownership contracts
+//! - process inspection record contracts
+//!
+//! This module may define canonical process and thread truth. Higher layers may
+//! inspect or transport it, but they must not redefine it.
+
 use super::*;
 use ngos_user_abi::{
     AT_ENTRY, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM, AT_PLATFORM, BootSessionReport,
     BootSessionStage, BootSessionStatus,
 };
+
+const DEFAULT_USER_STACK_BYTES: u64 = 128 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuxiliaryVectorEntry {
@@ -88,6 +106,27 @@ impl ProcessMemoryRegion {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessAbiProfile {
+    pub target: String,
+    pub route_class: String,
+    pub handle_profile: String,
+    pub path_profile: String,
+    pub scheduler_profile: String,
+    pub sync_profile: String,
+    pub timer_profile: String,
+    pub module_profile: String,
+    pub event_profile: String,
+    pub requires_kernel_abi_shims: bool,
+    pub prefix: String,
+    pub executable_path: String,
+    pub working_dir: String,
+    pub loader_route_class: String,
+    pub loader_launch_mode: String,
+    pub loader_entry_profile: String,
+    pub loader_requires_compat_shims: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessInfo {
     pub pid: ProcessId,
     pub parent: Option<ProcessId>,
@@ -96,6 +135,7 @@ pub struct ProcessInfo {
     pub name: String,
     pub image_path: String,
     pub executable_image: ExecutableImage,
+    pub root: String,
     pub cwd: String,
     pub state: ProcessState,
     pub exit_code: Option<i32>,
@@ -115,6 +155,7 @@ pub struct ProcessInfo {
     pub session_stage: u32,
     pub session_code: i32,
     pub session_detail: u64,
+    pub abi_profile: ProcessAbiProfile,
     pub contract_bindings: ProcessContractBindings,
     pub scheduler_override: Option<SchedulerPolicyInfo>,
     pub scheduler_policy: SchedulerPolicyInfo,
@@ -129,6 +170,162 @@ pub struct ThreadInfo {
     pub state: ThreadState,
     pub is_main: bool,
     pub exit_code: Option<i32>,
+    pub cpu_extended_state: ThreadCpuExtendedStateProfile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThreadCpuExtendedStateProfile {
+    pub owned: bool,
+    pub xsave_managed: bool,
+    pub save_area_bytes: u32,
+    pub xcr0_mask: u64,
+    pub boot_probed: bool,
+    pub boot_seed_marker: u64,
+    pub active_in_cpu: bool,
+    pub save_count: u64,
+    pub restore_count: u64,
+    pub last_saved_tick: u64,
+    pub last_restored_tick: u64,
+    pub save_area_buffer_bytes: u32,
+    pub save_area_alignment_bytes: u32,
+    pub save_area_generation: u64,
+    pub last_save_marker: u64,
+}
+
+#[derive(Debug)]
+pub struct AlignedCpuExtendedStateBuffer {
+    storage: Vec<u8>,
+    offset: usize,
+    len: usize,
+}
+
+impl AlignedCpuExtendedStateBuffer {
+    pub const ALIGNMENT: usize = 64;
+
+    pub const fn new() -> Self {
+        Self {
+            storage: Vec::new(),
+            offset: 0,
+            len: 0,
+        }
+    }
+
+    pub fn zeroed(len: usize) -> Self {
+        if len == 0 {
+            return Self::new();
+        }
+        let storage = vec![0; len.saturating_add(Self::ALIGNMENT - 1)];
+        let base = storage.as_ptr() as usize;
+        let aligned = (base + (Self::ALIGNMENT - 1)) & !(Self::ALIGNMENT - 1);
+        let offset = aligned.saturating_sub(base);
+        Self {
+            storage,
+            offset,
+            len,
+        }
+    }
+
+    pub fn from_slice(bytes: &[u8]) -> Self {
+        let mut buffer = Self::zeroed(bytes.len());
+        if !bytes.is_empty() {
+            buffer.as_mut_slice().copy_from_slice(bytes);
+        }
+        buffer
+    }
+
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn clear(&mut self) {
+        self.storage.clear();
+        self.offset = 0;
+        self.len = 0;
+    }
+
+    pub fn fill(&mut self, value: u8) {
+        self.as_mut_slice().fill(value);
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        let end = self.offset + self.len;
+        &self.storage[self.offset..end]
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        let end = self.offset + self.len;
+        &mut self.storage[self.offset..end]
+    }
+
+    pub fn is_aligned(&self) -> bool {
+        !self.is_empty() && (self.as_slice().as_ptr() as usize) % Self::ALIGNMENT == 0
+    }
+}
+
+impl Clone for AlignedCpuExtendedStateBuffer {
+    fn clone(&self) -> Self {
+        Self::from_slice(self.as_slice())
+    }
+}
+
+impl Default for AlignedCpuExtendedStateBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PartialEq for AlignedCpuExtendedStateBuffer {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for AlignedCpuExtendedStateBuffer {}
+
+impl core::ops::Deref for AlignedCpuExtendedStateBuffer {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl core::ops::DerefMut for AlignedCpuExtendedStateBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.as_mut_slice()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadCpuExtendedStateImage {
+    pub profile: ThreadCpuExtendedStateProfile,
+    pub bytes: AlignedCpuExtendedStateBuffer,
+}
+
+impl ThreadCpuExtendedStateProfile {
+    pub const fn bootstrap_default() -> Self {
+        Self {
+            owned: true,
+            xsave_managed: false,
+            save_area_bytes: 0,
+            xcr0_mask: 0,
+            boot_probed: false,
+            boot_seed_marker: 0,
+            active_in_cpu: false,
+            save_count: 0,
+            restore_count: 0,
+            last_saved_tick: 0,
+            last_restored_tick: 0,
+            save_area_buffer_bytes: 0,
+            save_area_alignment_bytes: 0,
+            save_area_generation: 0,
+            last_save_marker: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -308,7 +505,7 @@ pub(crate) fn default_memory_map(image: &ExecutableImage) -> Vec<ProcessMemoryRe
     let rodata_start = text_start + 0x2000;
     let data_start = rodata_start + 0x1000;
     let heap_start = data_start + 0x1000;
-    let stack_start = image.stack_top.saturating_sub(0x8000);
+    let stack_start = image.stack_top.saturating_sub(DEFAULT_USER_STACK_BYTES);
 
     vec![
         ProcessMemoryRegion {
@@ -512,6 +709,7 @@ pub struct Process {
     pub(crate) name: String,
     pub(crate) image_path: String,
     pub(crate) executable_image: ExecutableImage,
+    pub(crate) root: String,
     pub(crate) cwd: String,
     pub(crate) argv: Vec<String>,
     pub(crate) envp: Vec<String>,
@@ -549,6 +747,7 @@ impl Process {
             address_space: None,
             image_path: name.clone(),
             executable_image: ExecutableImage::from_path_defaults(&name),
+            root: String::from("/"),
             cwd: String::from("/"),
             argv: vec![name.clone()],
             envp: Vec::new(),
@@ -605,6 +804,10 @@ impl Process {
 
     pub const fn executable_image(&self) -> &ExecutableImage {
         &self.executable_image
+    }
+
+    pub fn root(&self) -> &str {
+        &self.root
     }
 
     pub fn cwd(&self) -> &str {
@@ -968,6 +1171,10 @@ impl Process {
 
     pub(crate) fn set_cwd(&mut self, cwd: String) {
         self.cwd = cwd;
+    }
+
+    pub(crate) fn set_root(&mut self, root: String) {
+        self.root = root;
     }
 
     pub(crate) fn attach_address_space(&mut self, id: AddressSpaceId) {
@@ -1553,6 +1760,8 @@ pub struct Thread {
     state: ThreadState,
     is_main: bool,
     exit_code: Option<i32>,
+    cpu_extended_state: ThreadCpuExtendedStateProfile,
+    cpu_extended_state_buffer: AlignedCpuExtendedStateBuffer,
 }
 
 impl Thread {
@@ -1564,6 +1773,33 @@ impl Thread {
             state: ThreadState::Created,
             is_main: true,
             exit_code: None,
+            cpu_extended_state: ThreadCpuExtendedStateProfile::bootstrap_default(),
+            cpu_extended_state_buffer: AlignedCpuExtendedStateBuffer::new(),
+        }
+    }
+
+    pub(crate) fn set_cpu_extended_state(&mut self, profile: ThreadCpuExtendedStateProfile) {
+        self.cpu_extended_state = profile;
+        let buffer_len = if profile.xsave_managed && profile.save_area_bytes != 0 {
+            profile.save_area_bytes as usize
+        } else {
+            0
+        };
+        self.cpu_extended_state_buffer = AlignedCpuExtendedStateBuffer::zeroed(buffer_len);
+        self.cpu_extended_state.save_area_buffer_bytes = buffer_len as u32;
+        self.cpu_extended_state.save_area_alignment_bytes = if buffer_len == 0 {
+            0
+        } else {
+            AlignedCpuExtendedStateBuffer::ALIGNMENT as u32
+        };
+        self.cpu_extended_state.save_area_generation = 0;
+        self.cpu_extended_state.last_save_marker = 0;
+        if buffer_len != 0 && profile.boot_seed_marker != 0 {
+            let seed_bytes = profile.boot_seed_marker.to_le_bytes();
+            let copy_len = core::cmp::min(seed_bytes.len(), self.cpu_extended_state_buffer.len());
+            self.cpu_extended_state_buffer[..copy_len].copy_from_slice(&seed_bytes[..copy_len]);
+            self.cpu_extended_state.save_area_generation = 1;
+            self.cpu_extended_state.last_save_marker = profile.boot_seed_marker;
         }
     }
 
@@ -1600,6 +1836,111 @@ impl Thread {
     pub const fn exit_code(&self) -> Option<i32> {
         self.exit_code
     }
+
+    pub const fn cpu_extended_state(&self) -> ThreadCpuExtendedStateProfile {
+        self.cpu_extended_state
+    }
+
+    pub fn cpu_extended_state_image(&self) -> Result<ThreadCpuExtendedStateImage, ProcessError> {
+        if !self.cpu_extended_state.xsave_managed || self.cpu_extended_state_buffer.is_empty() {
+            return Err(ProcessError::CpuExtendedStateUnavailable);
+        }
+        Ok(ThreadCpuExtendedStateImage {
+            profile: self.cpu_extended_state,
+            bytes: self.cpu_extended_state_buffer.clone(),
+        })
+    }
+
+    pub(crate) fn mark_cpu_extended_state_saved(&mut self, tick: u64) {
+        self.cpu_extended_state.active_in_cpu = false;
+        self.cpu_extended_state.save_count = self.cpu_extended_state.save_count.saturating_add(1);
+        self.cpu_extended_state.last_saved_tick = tick;
+        if !self.cpu_extended_state_buffer.is_empty() {
+            let marker = tick ^ self.cpu_extended_state.xcr0_mask ^ u64::from(self.tid.raw());
+            let marker_bytes = marker.to_le_bytes();
+            let copy_len = core::cmp::min(marker_bytes.len(), self.cpu_extended_state_buffer.len());
+            self.cpu_extended_state_buffer[..copy_len].copy_from_slice(&marker_bytes[..copy_len]);
+            self.cpu_extended_state.save_area_generation = self
+                .cpu_extended_state
+                .save_area_generation
+                .saturating_add(1);
+            self.cpu_extended_state.last_save_marker = marker;
+        }
+    }
+
+    pub(crate) fn mark_cpu_extended_state_restored(&mut self, tick: u64) {
+        self.cpu_extended_state.active_in_cpu = true;
+        self.cpu_extended_state.restore_count =
+            self.cpu_extended_state.restore_count.saturating_add(1);
+        self.cpu_extended_state.last_restored_tick = tick;
+        self.cpu_extended_state.save_area_buffer_bytes =
+            self.cpu_extended_state_buffer.len() as u32;
+        self.cpu_extended_state.save_area_alignment_bytes =
+            if self.cpu_extended_state_buffer.is_empty() {
+                0
+            } else {
+                AlignedCpuExtendedStateBuffer::ALIGNMENT as u32
+            };
+    }
+
+    pub(crate) fn restore_cpu_extended_state_boot_seed(&mut self) -> Result<(), ProcessError> {
+        if !self.cpu_extended_state.xsave_managed || self.cpu_extended_state_buffer.is_empty() {
+            return Err(ProcessError::CpuExtendedStateUnavailable);
+        }
+        if self.cpu_extended_state.boot_seed_marker == 0 {
+            return Err(ProcessError::CpuExtendedStateUnavailable);
+        }
+        self.cpu_extended_state_buffer.fill(0);
+        let seed_bytes = self.cpu_extended_state.boot_seed_marker.to_le_bytes();
+        let copy_len = core::cmp::min(seed_bytes.len(), self.cpu_extended_state_buffer.len());
+        self.cpu_extended_state_buffer[..copy_len].copy_from_slice(&seed_bytes[..copy_len]);
+        self.cpu_extended_state.active_in_cpu = false;
+        self.cpu_extended_state.save_area_generation = 1;
+        self.cpu_extended_state.last_save_marker = self.cpu_extended_state.boot_seed_marker;
+        self.cpu_extended_state.save_area_buffer_bytes =
+            self.cpu_extended_state_buffer.len() as u32;
+        Ok(())
+    }
+
+    pub(crate) fn import_cpu_extended_state_image(
+        &mut self,
+        image: ThreadCpuExtendedStateImage,
+    ) -> Result<(), ProcessError> {
+        if !image.profile.xsave_managed || image.bytes.is_empty() {
+            return Err(ProcessError::CpuExtendedStateUnavailable);
+        }
+        if image.bytes.len() != image.profile.save_area_bytes as usize {
+            return Err(ProcessError::CpuExtendedStateUnavailable);
+        }
+        self.cpu_extended_state = image.profile;
+        self.cpu_extended_state_buffer = image.bytes;
+        self.cpu_extended_state.save_area_buffer_bytes =
+            self.cpu_extended_state_buffer.len() as u32;
+        self.cpu_extended_state.save_area_alignment_bytes =
+            if self.cpu_extended_state_buffer.is_empty() {
+                0
+            } else {
+                AlignedCpuExtendedStateBuffer::ALIGNMENT as u32
+            };
+        Ok(())
+    }
+
+    pub(crate) fn release_cpu_extended_state_image(&mut self) -> Result<(), ProcessError> {
+        if !self.cpu_extended_state.xsave_managed || self.cpu_extended_state_buffer.is_empty() {
+            return Err(ProcessError::CpuExtendedStateUnavailable);
+        }
+        self.cpu_extended_state_buffer.clear();
+        self.cpu_extended_state.xsave_managed = false;
+        self.cpu_extended_state.save_area_bytes = 0;
+        self.cpu_extended_state.xcr0_mask = 0;
+        self.cpu_extended_state.boot_seed_marker = 0;
+        self.cpu_extended_state.active_in_cpu = false;
+        self.cpu_extended_state.save_area_buffer_bytes = 0;
+        self.cpu_extended_state.save_area_alignment_bytes = 0;
+        self.cpu_extended_state.save_area_generation = 0;
+        self.cpu_extended_state.last_save_marker = 0;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1615,6 +1956,7 @@ pub enum ProcessError {
     },
     InvalidSignal,
     InvalidSessionReport,
+    CpuExtendedStateUnavailable,
     InvalidTransition {
         from: ProcessState,
         to: ProcessState,

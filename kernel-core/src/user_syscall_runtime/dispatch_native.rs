@@ -1,4 +1,5 @@
 use super::*;
+use ngos_user_abi::{NativeBusEndpointRecord, NativeBusPeerRecord};
 
 impl KernelRuntime {
     pub(super) fn dispatch_native_model_syscall(
@@ -51,6 +52,150 @@ impl KernelRuntime {
                 let contract = self.find_contract_id_by_raw(frame.arg0 as u64)?;
                 self.bind_process_contract(caller, contract)?;
                 Ok(Some(SyscallReturn::ok(0)))
+            }
+            SYS_CREATE_BUS_PEER => {
+                let domain = self.find_domain_id_by_raw(frame.arg0 as u64)?;
+                let name = match frame_string(self, caller, frame.arg1, frame.arg2) {
+                    Ok(name) => name,
+                    Err(result) => return Ok(Some(result)),
+                };
+                let peer = self.create_bus_peer(caller, domain, name)?;
+                Ok(Some(SyscallReturn::ok(peer.raw() as usize)))
+            }
+            SYS_CREATE_BUS_ENDPOINT => {
+                let domain = self.find_domain_id_by_raw(frame.arg0 as u64)?;
+                let resource = self.find_resource_id_by_raw(frame.arg1 as u64)?;
+                let path = match frame_string(self, caller, frame.arg2, frame.arg3) {
+                    Ok(path) => path,
+                    Err(result) => return Ok(Some(result)),
+                };
+                let endpoint = self.create_bus_channel_endpoint(domain, resource, path)?;
+                Ok(Some(SyscallReturn::ok(endpoint.raw() as usize)))
+            }
+            SYS_ATTACH_BUS_PEER => {
+                let peer =
+                    BusPeerId::from_handle(ObjectHandle::new(Handle::new(frame.arg0 as u64), 0));
+                let endpoint = BusEndpointId::from_handle(ObjectHandle::new(
+                    Handle::new(frame.arg1 as u64),
+                    0,
+                ));
+                self.attach_bus_peer(peer, endpoint)?;
+                Ok(Some(SyscallReturn::ok(0)))
+            }
+            SYS_DETACH_BUS_PEER => {
+                let peer =
+                    BusPeerId::from_handle(ObjectHandle::new(Handle::new(frame.arg0 as u64), 0));
+                let endpoint = BusEndpointId::from_handle(ObjectHandle::new(
+                    Handle::new(frame.arg1 as u64),
+                    0,
+                ));
+                self.detach_bus_peer(peer, endpoint)?;
+                Ok(Some(SyscallReturn::ok(0)))
+            }
+            SYS_LIST_BUS_PEERS => {
+                let ids = self
+                    .bus_peers()
+                    .into_iter()
+                    .map(|info| info.id.raw())
+                    .collect::<Vec<_>>();
+                if let Err(result) =
+                    copy_u64_slice_to_user(self, caller, frame.arg0, frame.arg1, &ids)
+                {
+                    return Ok(Some(result));
+                }
+                Ok(Some(SyscallReturn::ok(ids.len())))
+            }
+            SYS_INSPECT_BUS_PEER => {
+                let peer =
+                    BusPeerId::from_handle(ObjectHandle::new(Handle::new(frame.arg0 as u64), 0));
+                let info = self.bus_peer_info(peer)?;
+                let record = NativeBusPeerRecord {
+                    id: info.id.raw(),
+                    owner: info.owner.raw(),
+                    domain: info.domain.raw(),
+                    attached_endpoint_count: info.attached_endpoints.len() as u64,
+                    readable_endpoint_count: info.attached_endpoints.len() as u64,
+                    writable_endpoint_count: info.attached_endpoints.len() as u64,
+                    publish_count: info.publish_count,
+                    receive_count: info.receive_count,
+                    last_endpoint: info.last_endpoint.map(|id| id.raw()).unwrap_or(0),
+                };
+                if let Err(result) = copy_struct_to_user(self, caller, frame.arg1, &record) {
+                    return Ok(Some(result));
+                }
+                Ok(Some(SyscallReturn::ok(0)))
+            }
+            SYS_LIST_BUS_ENDPOINTS => {
+                let ids = self
+                    .bus_endpoints()
+                    .into_iter()
+                    .map(|info| info.id.raw())
+                    .collect::<Vec<_>>();
+                if let Err(result) =
+                    copy_u64_slice_to_user(self, caller, frame.arg0, frame.arg1, &ids)
+                {
+                    return Ok(Some(result));
+                }
+                Ok(Some(SyscallReturn::ok(ids.len())))
+            }
+            SYS_INSPECT_BUS_ENDPOINT => {
+                let endpoint = BusEndpointId::from_handle(ObjectHandle::new(
+                    Handle::new(frame.arg0 as u64),
+                    0,
+                ));
+                let info = self.bus_endpoint_info(endpoint)?;
+                let record = NativeBusEndpointRecord {
+                    id: info.id.raw(),
+                    domain: info.domain.raw(),
+                    resource: info.resource.raw(),
+                    kind: match info.kind {
+                        BusEndpointKind::Channel => 0,
+                    },
+                    reserved: 0,
+                    attached_peer_count: info.attached_peers.len() as u64,
+                    readable_peer_count: info.attached_peers.len() as u64,
+                    writable_peer_count: info.attached_peers.len() as u64,
+                    publish_count: info.publish_count,
+                    receive_count: info.receive_count,
+                    byte_count: info.byte_count,
+                    queue_depth: info.queue_depth as u64,
+                    queue_capacity: info.queue_capacity as u64,
+                    peak_queue_depth: info.peak_queue_depth as u64,
+                    overflow_count: info.overflow_count,
+                    last_peer: info.last_peer.map(|id| id.raw()).unwrap_or(0),
+                };
+                if let Err(result) = copy_struct_to_user(self, caller, frame.arg1, &record) {
+                    return Ok(Some(result));
+                }
+                Ok(Some(SyscallReturn::ok(0)))
+            }
+            SYS_PUBLISH_BUS_MESSAGE => {
+                let peer =
+                    BusPeerId::from_handle(ObjectHandle::new(Handle::new(frame.arg0 as u64), 0));
+                let endpoint = BusEndpointId::from_handle(ObjectHandle::new(
+                    Handle::new(frame.arg1 as u64),
+                    0,
+                ));
+                let bytes = match self.copy_from_user(caller, frame.arg2, frame.arg3) {
+                    Ok(bytes) => bytes,
+                    Err(error) => return Ok(Some(SyscallReturn::err(error.errno()))),
+                };
+                let written = self.bus_publish(peer, endpoint, &bytes)?;
+                Ok(Some(SyscallReturn::ok(written)))
+            }
+            SYS_RECEIVE_BUS_MESSAGE => {
+                let peer =
+                    BusPeerId::from_handle(ObjectHandle::new(Handle::new(frame.arg0 as u64), 0));
+                let endpoint = BusEndpointId::from_handle(ObjectHandle::new(
+                    Handle::new(frame.arg1 as u64),
+                    0,
+                ));
+                let bytes = self.bus_receive(peer, endpoint)?;
+                let copied = bytes.len().min(frame.arg3);
+                if let Err(error) = self.copy_to_user(caller, frame.arg2, &bytes[..copied]) {
+                    return Ok(Some(SyscallReturn::err(error.errno())));
+                }
+                Ok(Some(SyscallReturn::ok(copied)))
             }
             SYS_LIST_DOMAINS => {
                 let ids = self

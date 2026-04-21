@@ -1,3 +1,17 @@
+//! Canonical subsystem role:
+//! - subsystem: descriptor I/O syscall dispatch
+//! - owner layer: Layer 1
+//! - semantic owner: `kernel-core`
+//! - truth path role: canonical syscall routing for descriptor I/O families
+//!
+//! Canonical contract families handled here:
+//! - descriptor read/write syscall contracts
+//! - vectored I/O syscall contracts
+//! - descriptor permission gate contracts
+//!
+//! This module may route canonical descriptor I/O syscalls into runtime truth,
+//! but it must not invent a second descriptor or I/O model.
+
 use super::*;
 
 impl KernelSyscallSurface {

@@ -1,3 +1,18 @@
+//! Canonical subsystem role:
+//! - subsystem: x86_64 trap and exception mediation
+//! - owner layer: platform mediation
+//! - semantic owner: `platform-x86_64`
+//! - truth path role: platform-specific trap vector and exception mechanism
+//!   definitions for the real x86 path
+//!
+//! Canonical contract families defined here:
+//! - exception vector contracts
+//! - trap entry layout contracts
+//! - IDT-related mechanism contracts
+//!
+//! This module may define x86_64 trap mechanics, but it must not redefine the
+//! higher-level fault semantics owned by `kernel-core`.
+
 use core::mem::size_of;
 
 pub const IDT_ENTRY_COUNT: usize = 256;

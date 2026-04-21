@@ -381,6 +381,8 @@ pub(super) fn map_runtime_error_to_errno(error: RuntimeError) -> Errno {
         }
         RuntimeError::NativeModel(NativeModelError::ResourceNotActive { .. }) => Errno::Access,
         RuntimeError::NativeModel(NativeModelError::ProcessContractMissing { .. }) => Errno::Access,
+        RuntimeError::NativeModel(NativeModelError::BusAccessDenied { .. }) => Errno::Access,
+        RuntimeError::NativeModel(NativeModelError::BusQueueFull { .. }) => Errno::Again,
         RuntimeError::Process(
             ProcessError::InvalidPid
             | ProcessError::StalePid
@@ -392,6 +394,7 @@ pub(super) fn map_runtime_error_to_errno(error: RuntimeError) -> Errno {
         RuntimeError::Process(ProcessError::Exhausted) => Errno::Again,
         RuntimeError::Process(
             ProcessError::InvalidSignal
+            | ProcessError::CpuExtendedStateUnavailable
             | ProcessError::InvalidSessionReport
             | ProcessError::InvalidTransition { .. },
         ) => Errno::Inval,
@@ -405,6 +408,7 @@ pub(super) fn map_runtime_error_to_errno(error: RuntimeError) -> Errno {
         RuntimeError::DeviceModel(_) => Errno::Inval,
         RuntimeError::NativeModel(NativeModelError::ContractNotActive { .. }) => Errno::Access,
         RuntimeError::NativeModel(_) => Errno::Inval,
+        RuntimeError::Scheduler(SchedulerError::InvalidCpuAffinity) => Errno::Inval,
         RuntimeError::Scheduler(_) => Errno::Again,
         RuntimeError::Vfs(VfsError::AlreadyExists) => Errno::Exist,
         RuntimeError::Vfs(VfsError::NotDirectory) => Errno::NotDir,

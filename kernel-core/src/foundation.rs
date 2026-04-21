@@ -1,4 +1,22 @@
+//! Canonical subsystem role:
+//! - subsystem: kernel foundation and shared truth records
+//! - owner layer: Layer 1
+//! - semantic owner: `kernel-core`
+//! - truth path role: canonical shared kernel data model exported to higher
+//!   layers
+//!
+//! Canonical contract families defined here:
+//! - runtime snapshot contracts
+//! - kernel configuration contracts
+//! - CPU handoff contracts
+//! - shared kernel state record contracts
+//!
+//! This module may define the canonical record shapes used by the kernel. Other
+//! layers may serialize or consume those records, but they must not redefine
+//! them.
+
 use super::*;
+use crate::eventing_model::BusEventInterest;
 
 pub const PRODUCT_NAME: &str = "Next Gen OS";
 pub const PRODUCT_CODENAME: &str = "ngos";
@@ -127,6 +145,48 @@ impl ContractId {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BusPeerId(ObjectHandle);
+
+impl BusPeerId {
+    pub const fn from_handle(handle: ObjectHandle) -> Self {
+        Self(handle)
+    }
+
+    pub const fn handle(self) -> ObjectHandle {
+        self.0
+    }
+
+    pub const fn raw(self) -> u64 {
+        self.0.id().raw()
+    }
+
+    pub const fn generation(self) -> u32 {
+        self.0.generation()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BusEndpointId(ObjectHandle);
+
+impl BusEndpointId {
+    pub const fn from_handle(handle: ObjectHandle) -> Self {
+        Self(handle)
+    }
+
+    pub const fn handle(self) -> ObjectHandle {
+        self.0
+    }
+
+    pub const fn raw(self) -> u64 {
+        self.0.id().raw()
+    }
+
+    pub const fn generation(self) -> u32 {
+        self.0.generation()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceArbitrationPolicy {
     Fifo,
@@ -187,6 +247,10 @@ pub enum NativeModelError {
     StaleResource,
     InvalidContract,
     StaleContract,
+    InvalidBusPeer,
+    StaleBusPeer,
+    InvalidBusEndpoint,
+    StaleBusEndpoint,
     InvalidOwner,
     ParentMismatch,
     InvalidStateTransition {
@@ -220,6 +284,20 @@ pub enum NativeModelError {
         kind: ContractKind,
     },
     ResourceBindingMismatch,
+    BusPeerNotAttached {
+        peer: BusPeerId,
+        endpoint: BusEndpointId,
+    },
+    BusAccessDenied {
+        owner: ProcessId,
+        endpoint: BusEndpointId,
+        required: CapabilityRights,
+    },
+    BusQueueFull {
+        endpoint: BusEndpointId,
+        capacity: usize,
+    },
+    BusEndpointKindMismatch,
 }
 
 impl NativeModelError {
@@ -246,6 +324,22 @@ impl NativeModelError {
             ObjectError::StaleHandle => Self::StaleContract,
         }
     }
+
+    pub(crate) fn from_bus_peer_object_error(error: ObjectError) -> Self {
+        match error {
+            ObjectError::Exhausted => Self::Exhausted,
+            ObjectError::InvalidHandle => Self::InvalidBusPeer,
+            ObjectError::StaleHandle => Self::StaleBusPeer,
+        }
+    }
+
+    pub(crate) fn from_bus_endpoint_object_error(error: ObjectError) -> Self {
+        match error {
+            ObjectError::Exhausted => Self::Exhausted,
+            ObjectError::InvalidHandle => Self::InvalidBusEndpoint,
+            ObjectError::StaleHandle => Self::StaleBusEndpoint,
+        }
+    }
 }
 
 pub(crate) fn scheduler_class_from_hint(hint: u16) -> SchedulerClass {
@@ -258,26 +352,106 @@ pub(crate) fn scheduler_class_from_hint(hint: u16) -> SchedulerClass {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchedulerCpuTopologyEntry {
+    pub apic_id: u32,
+    pub package_id: usize,
+    pub core_group: usize,
+    pub sibling_group: usize,
+    pub inferred: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimePolicy {
     pub scheduler_budget: u32,
+    pub scheduler_logical_cpu_count: usize,
+    pub scheduler_cpu_topology: Vec<SchedulerCpuTopologyEntry>,
     pub process_range: Range,
     pub capability_range: Range,
     pub domain_range: Range,
     pub resource_range: Range,
     pub contract_range: Range,
+    pub cpu_extended_state_handoff: Option<CpuExtendedStateHandoff>,
+    pub default_thread_cpu_extended_state: ThreadCpuExtendedStateProfile,
 }
 
 impl RuntimePolicy {
     pub fn host_runtime_default() -> Self {
         Self {
             scheduler_budget: 2,
+            scheduler_logical_cpu_count: 1,
+            scheduler_cpu_topology: Vec::new(),
             process_range: Range::new(1, 1 << 16),
             capability_range: Range::new(1, 1 << 18),
             domain_range: Range::new(1, 1 << 14),
             resource_range: Range::new(1, 1 << 16),
             contract_range: Range::new(1, 1 << 16),
+            cpu_extended_state_handoff: None,
+            default_thread_cpu_extended_state: ThreadCpuExtendedStateProfile::bootstrap_default(),
         }
     }
+
+    pub fn apply_cpu_extended_state_handoff(&mut self, handoff: CpuExtendedStateHandoff) {
+        self.cpu_extended_state_handoff = Some(handoff);
+        self.default_thread_cpu_extended_state = handoff.default_thread_profile();
+    }
+
+    pub fn apply_scheduler_cpu_topology(&mut self, topology: Vec<SchedulerCpuTopologyEntry>) {
+        if topology.is_empty() {
+            self.scheduler_cpu_topology.clear();
+            self.scheduler_logical_cpu_count = 1;
+            return;
+        }
+        self.scheduler_logical_cpu_count = topology.len();
+        self.scheduler_cpu_topology = topology;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuExtendedStateHandoff {
+    pub xsave_managed: bool,
+    pub save_area_bytes: u32,
+    pub xcr0_mask: u64,
+    pub boot_probed: bool,
+    pub boot_seed_marker: u64,
+}
+
+impl CpuExtendedStateHandoff {
+    pub const fn default_thread_profile(self) -> ThreadCpuExtendedStateProfile {
+        ThreadCpuExtendedStateProfile {
+            owned: true,
+            xsave_managed: self.xsave_managed,
+            save_area_bytes: self.save_area_bytes,
+            xcr0_mask: self.xcr0_mask,
+            boot_probed: self.boot_probed,
+            boot_seed_marker: self.boot_seed_marker,
+            active_in_cpu: false,
+            save_count: 0,
+            restore_count: 0,
+            last_saved_tick: 0,
+            last_restored_tick: 0,
+            save_area_buffer_bytes: 0,
+            save_area_alignment_bytes: 0,
+            save_area_generation: 0,
+            last_save_marker: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveCpuExtendedStateSlot {
+    pub owner_pid: ProcessId,
+    pub owner_tid: ThreadId,
+    pub image: ThreadCpuExtendedStateImage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CpuExtendedStateHardwareTelemetry {
+    pub save_count: u64,
+    pub restore_count: u64,
+    pub fallback_count: u64,
+    pub last_saved_tid: Option<ThreadId>,
+    pub last_restored_tid: Option<ThreadId>,
+    pub last_error: Option<HalError>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -380,9 +554,35 @@ pub struct RuntimeSnapshot {
     pub contract_count: usize,
     pub queued_processes: usize,
     pub queued_latency_critical: usize,
+    pub queued_urgent_latency_critical: usize,
     pub queued_interactive: usize,
+    pub queued_urgent_interactive: usize,
     pub queued_normal: usize,
+    pub queued_urgent_normal: usize,
     pub queued_background: usize,
+    pub queued_urgent_background: usize,
+    pub lag_debt_latency_critical: i32,
+    pub lag_debt_interactive: i32,
+    pub lag_debt_normal: i32,
+    pub lag_debt_background: i32,
+    pub dispatch_count_latency_critical: u64,
+    pub dispatch_count_interactive: u64,
+    pub dispatch_count_normal: u64,
+    pub dispatch_count_background: u64,
+    pub runtime_ticks_latency_critical: u64,
+    pub runtime_ticks_interactive: u64,
+    pub runtime_ticks_normal: u64,
+    pub runtime_ticks_background: u64,
+    pub scheduler_dispatch_total: u64,
+    pub scheduler_runtime_ticks_total: u64,
+    pub scheduler_runtime_imbalance: u64,
+    pub scheduler_cpu_count: usize,
+    pub scheduler_running_cpu: Option<usize>,
+    pub scheduler_cpu_load_imbalance: usize,
+    pub starved_latency_critical: bool,
+    pub starved_interactive: bool,
+    pub starved_normal: bool,
+    pub starved_background: bool,
     pub deferred_task_count: usize,
     pub sleeping_processes: usize,
     pub current_tick: u64,
@@ -401,6 +601,12 @@ pub struct RuntimeSnapshot {
     pub max_socket_rx_depth: usize,
     pub total_network_tx_dropped: u64,
     pub total_network_rx_dropped: u64,
+    pub verified_core_ok: bool,
+    pub verified_core_violation_count: usize,
+    pub capability_model_verified: bool,
+    pub vfs_invariants_verified: bool,
+    pub scheduler_state_machine_verified: bool,
+    pub cpu_extended_state_lifecycle_verified: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -448,6 +654,7 @@ pub enum SchedulerAgentKind {
     WakeAgent,
     BlockAgent,
     TickAgent,
+    AffinityAgent,
     RebindAgent,
     RemoveAgent,
 }
@@ -461,6 +668,15 @@ pub struct SchedulerAgentDecisionRecord {
     pub class: u64,
     pub detail0: u64,
     pub detail1: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyscallDispatchRecord {
+    pub tick: u64,
+    pub caller: u64,
+    pub tid: u64,
+    pub syscall: String,
+    pub outcome: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -603,6 +819,9 @@ pub struct DeviceRequestInfo {
     pub submitted_tick: u64,
     pub started_tick: Option<u64>,
     pub completed_tick: Option<u64>,
+    pub frame_tag: String,
+    pub source_api_name: String,
+    pub translation_label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -619,6 +838,9 @@ pub struct GpuScanoutInfo {
     pub device_path: String,
     pub presented_frames: u64,
     pub last_frame_len: usize,
+    pub last_frame_tag: String,
+    pub last_source_api_name: String,
+    pub last_translation_label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -631,6 +853,15 @@ pub struct DriverInfo {
     pub queued_requests: usize,
     pub in_flight_requests: usize,
     pub completed_requests: u64,
+    pub last_completed_request_id: u64,
+    pub last_completed_frame_tag: String,
+    pub last_completed_source_api_name: String,
+    pub last_completed_translation_label: String,
+    pub last_terminal_request_id: u64,
+    pub last_terminal_state: DeviceRequestState,
+    pub last_terminal_frame_tag: String,
+    pub last_terminal_source_api_name: String,
+    pub last_terminal_translation_label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -652,6 +883,15 @@ pub struct DeviceInfo {
     pub link_up: bool,
     pub block_size: u32,
     pub capacity_bytes: u64,
+    pub last_completed_request_id: u64,
+    pub last_completed_frame_tag: String,
+    pub last_completed_source_api_name: String,
+    pub last_completed_translation_label: String,
+    pub last_terminal_request_id: u64,
+    pub last_terminal_state: DeviceRequestState,
+    pub last_terminal_frame_tag: String,
+    pub last_terminal_source_api_name: String,
+    pub last_terminal_translation_label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -669,6 +909,8 @@ pub struct NetworkSocketInfo {
     pub tx_packets: u64,
     pub rx_packets: u64,
     pub dropped_packets: u64,
+    pub socket_type: crate::device_model::SocketType,
+    pub tcp_state: Option<crate::device_model::TcpState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -777,6 +1019,14 @@ pub struct EventQueueNetworkWatchInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventQueueBusWatchInfo {
+    pub endpoint: BusEndpointId,
+    pub token: u64,
+    pub interest: BusEventInterest,
+    pub events: IoPollEvents,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventQueueWaiterInfo {
     pub owner: ProcessId,
     pub tid: ThreadId,
@@ -795,6 +1045,7 @@ pub struct EventQueueInfo {
     pub memory_watch_count: usize,
     pub resource_watch_count: usize,
     pub network_watch_count: usize,
+    pub bus_watch_count: usize,
     pub pending_count: usize,
     pub waiter_count: usize,
     pub descriptor_ref_count: usize,
@@ -806,6 +1057,7 @@ pub struct EventQueueInfo {
     pub memory_watches: Vec<EventQueueMemoryWatchInfo>,
     pub resource_watches: Vec<EventQueueResourceWatchInfo>,
     pub network_watches: Vec<EventQueueNetworkWatchInfo>,
+    pub bus_watches: Vec<EventQueueBusWatchInfo>,
     pub pending: Vec<EventQueuePendingInfo>,
     pub waiters: Vec<EventQueueWaiterInfo>,
 }
@@ -845,6 +1097,7 @@ pub struct SystemIntrospection {
     pub scheduler_agent_decisions: Vec<SchedulerAgentDecisionRecord>,
     pub io_agent_decisions: Vec<IoAgentDecisionRecord>,
     pub vm_agent_decisions: Vec<VmAgentDecisionRecord>,
+    pub syscall_dispatches: Vec<SyscallDispatchRecord>,
     pub event_queues: Vec<EventQueueInfo>,
     pub sleep_queues: Vec<SleepQueueInfo>,
     pub fdshare_groups: Vec<FiledescShareGroupInfo>,

@@ -163,6 +163,7 @@ fn map_process_error_to_user_memory_error(error: ProcessError) -> UserMemoryAcce
         | ProcessError::MemoryQuarantined { .. }
         | ProcessError::InvalidSignal
         | ProcessError::InvalidSessionReport
+        | ProcessError::CpuExtendedStateUnavailable
         | ProcessError::InvalidTransition { .. }
         | ProcessError::NotExited
         | ProcessError::Exhausted => UserMemoryAccessError::Fault,

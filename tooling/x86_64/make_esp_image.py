@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import shutil
 import sys
+import time
 from pathlib import Path
 
 try:
@@ -46,13 +47,26 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def remove_existing_output(output: Path) -> None:
+    last_error: OSError | None = None
+    for _attempt in range(20):
+        try:
+            if output.exists():
+                output.unlink()
+            return
+        except PermissionError as exc:
+            last_error = exc
+            time.sleep(0.25)
+    if last_error is not None:
+        raise last_error
+
+
 def populate_image(source: Path, output: Path, size_mib: int) -> None:
     source = source.resolve()
     output = output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    if output.exists():
-        output.unlink()
+    remove_existing_output(output)
 
     size_bytes = size_mib * 1024 * 1024
     with open(output, "wb") as handle:

@@ -1,0 +1,17 @@
+[package]
+name = "ngos-shell-proc-view"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "ngos_shell_proc_view"
+
+[dependencies]
+ngos-game-compat-runtime = { path = "../game-compat-runtime" }
+ngos-shell-game = { path = "../ngos-shell-game" }
+ngos-shell-proc = { path = "../ngos-shell-proc" }
+ngos-shell-types = { path = "../ngos-shell-types" }
+ngos-shell-vfs = { path = "../ngos-shell-vfs" }
+ngos-user-abi = { path = "../user-abi" }
+ngos-user-runtime = { path = "../user-runtime" }

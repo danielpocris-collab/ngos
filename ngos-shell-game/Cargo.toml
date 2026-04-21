@@ -1,0 +1,20 @@
+[package]
+name = "ngos-shell-game"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "ngos_shell_game"
+
+[dependencies]
+ngos-audio-translate = { path = "../audio-translate" }
+ngos-game-compat-runtime = { path = "../game-compat-runtime" }
+ngos-gfx-translate = { path = "../gfx-translate" }
+ngos-input-translate = { path = "../input-translate" }
+ngos-shell-compat-abi = { path = "../ngos-shell-compat-abi" }
+ngos-user-abi = { path = "../user-abi" }
+ngos-user-runtime = { path = "../user-runtime" }
+ngos-shell-types = { path = "../ngos-shell-types" }
+ngos-shell-vfs = { path = "../ngos-shell-vfs" }
+ngos-shell-proc = { path = "../ngos-shell-proc" }

@@ -1,0 +1,91 @@
+warning: methods `ambient`, `enabled_lights`, `directional_lights`, `point_lights`, and `enabled_count` are never used
+   --> render3d\src\lighting_agent.rs:232:12
+    |
+208 | impl LightManager {
+    | ----------------- methods in this implementation
+...
+232 |     pub fn ambient(&self) -> AmbientLight {
+    |            ^^^^^^^
+...
+241 |     pub fn enabled_lights(&self) -> impl Iterator<Item = &Light> {
+    |            ^^^^^^^^^^^^^^
+...
+245 |     pub fn directional_lights(&self) -> impl Iterator<Item = &DirectionalLight> {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+256 |     pub fn point_lights(&self) -> impl Iterator<Item = &PointLight> {
+    |            ^^^^^^^^^^^^
+...
+271 |     pub fn enabled_count(&self) -> usize {
+    |            ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: methods `width`, `height`, `config`, `rasterize_triangle_wireframe`, and `draw_line` are never used
+   --> render3d\src\rasterizer_agent.rs:74:12
+    |
+ 52 | impl Rasterizer {
+    | --------------- methods in this implementation
+...
+ 74 |     pub fn width(&self) -> u32 {
+    |            ^^^^^
+...
+ 78 |     pub fn height(&self) -> u32 {
+    |            ^^^^^^
+...
+107 |     pub fn config(&self) -> &RasterizerConfig {
+    |            ^^^^^^
+...
+232 |     pub fn rasterize_triangle_wireframe(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+263 |     fn draw_line(
+    |        ^^^^^^^^^
+
+warning: methods `enabled_pass_count`, `clear`, `passes`, and `reorder_passes` are never used
+   --> render3d\src\render_pass_agent.rs:164:12
+    |
+118 | impl RenderPipeline {
+    | ------------------- methods in this implementation
+...
+164 |     pub fn enabled_pass_count(&self) -> usize {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+168 |     pub fn clear(&mut self) {
+    |            ^^^^^
+...
+173 |     pub fn passes(&self) -> &[RenderPass] {
+    |            ^^^^^^
+...
+177 |     pub fn reorder_passes(&mut self, new_order: Vec<PassId>) -> Result<(), RenderError> {
+    |            ^^^^^^^^^^^^^^
+
+warning: struct `RenderTargetConfig` is never constructed
+   --> render3d\src\render_pass_agent.rs:202:12
+    |
+202 | pub struct RenderTargetConfig {
+    |            ^^^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `with_clear_color`, and `with_clear_depth` are never used
+   --> render3d\src\render_pass_agent.rs:210:12
+    |
+209 | impl RenderTargetConfig {
+    | ----------------------- associated items in this implementation
+210 |     pub fn new(width: u32, height: u32) -> Result<Self, RenderError> {
+    |            ^^^
+...
+222 |     pub fn with_clear_color(mut self, color: RgbaColor) -> Self {
+    |            ^^^^^^^^^^^^^^^^
+...
+227 |     pub fn with_clear_depth(mut self, depth: f32) -> Self {
+    |            ^^^^^^^^^^^^^^^^
+
+warning: method `scene_transform_to_ngos` is never used
+   --> render3d\src\renderer_agent.rs:248:8
+    |
+ 80 | impl Renderer {
+    | ------------- method in this implementation
+...
+248 |     fn scene_transform_to_ngos(&self, transform: &Transform) -> Transform {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+

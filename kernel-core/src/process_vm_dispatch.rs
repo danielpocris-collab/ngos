@@ -1,3 +1,17 @@
+//! Canonical subsystem role:
+//! - subsystem: process and VM syscall dispatch
+//! - owner layer: Layer 1
+//! - semantic owner: `kernel-core`
+//! - truth path role: canonical syscall routing for process and VM families
+//!
+//! Canonical contract families handled here:
+//! - process syscall contracts
+//! - VM syscall contracts
+//! - process/VM permission gate contracts
+//!
+//! This module may route canonical process and VM syscalls into runtime truth,
+//! but it must not invent a second process or VM model.
+
 use super::*;
 
 impl KernelSyscallSurface {

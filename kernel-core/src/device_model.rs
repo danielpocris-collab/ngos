@@ -1,3 +1,19 @@
+//! Canonical subsystem role:
+//! - subsystem: device and driver object model
+//! - owner layer: Layer 1
+//! - semantic owner: `kernel-core`
+//! - truth path role: canonical device, driver, and request object model for
+//!   the kernel
+//!
+//! Canonical contract families defined here:
+//! - device object contracts
+//! - driver object contracts
+//! - device request state contracts
+//! - network/socket object contracts
+//!
+//! This module may define canonical device/runtime object truth. Higher layers
+//! may observe it, but they must not redefine it.
+
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +32,9 @@ pub(crate) struct DeviceRequest {
     pub(crate) submitted_tick: u64,
     pub(crate) started_tick: Option<u64>,
     pub(crate) completed_tick: Option<u64>,
+    pub(crate) frame_tag: String,
+    pub(crate) source_api_name: String,
+    pub(crate) translation_label: String,
 }
 
 impl DeviceRequest {
@@ -35,6 +54,9 @@ impl DeviceRequest {
             submitted_tick: self.submitted_tick,
             started_tick: self.started_tick,
             completed_tick: self.completed_tick,
+            frame_tag: self.frame_tag.clone(),
+            source_api_name: self.source_api_name.clone(),
+            translation_label: self.translation_label.clone(),
         }
     }
 }
@@ -49,6 +71,15 @@ pub(crate) struct DriverEndpoint {
     pub(crate) queued_requests: Vec<u64>,
     pub(crate) in_flight_requests: Vec<u64>,
     pub(crate) completed_requests: u64,
+    pub(crate) last_completed_request_id: u64,
+    pub(crate) last_completed_frame_tag: String,
+    pub(crate) last_completed_source_api_name: String,
+    pub(crate) last_completed_translation_label: String,
+    pub(crate) last_terminal_request_id: u64,
+    pub(crate) last_terminal_state: DeviceRequestState,
+    pub(crate) last_terminal_frame_tag: String,
+    pub(crate) last_terminal_source_api_name: String,
+    pub(crate) last_terminal_translation_label: String,
 }
 
 impl DriverEndpoint {
@@ -62,6 +93,15 @@ impl DriverEndpoint {
             queued_requests: self.queued_requests.len(),
             in_flight_requests: self.in_flight_requests.len(),
             completed_requests: self.completed_requests,
+            last_completed_request_id: self.last_completed_request_id,
+            last_completed_frame_tag: self.last_completed_frame_tag.clone(),
+            last_completed_source_api_name: self.last_completed_source_api_name.clone(),
+            last_completed_translation_label: self.last_completed_translation_label.clone(),
+            last_terminal_request_id: self.last_terminal_request_id,
+            last_terminal_state: self.last_terminal_state,
+            last_terminal_frame_tag: self.last_terminal_frame_tag.clone(),
+            last_terminal_source_api_name: self.last_terminal_source_api_name.clone(),
+            last_terminal_translation_label: self.last_terminal_translation_label.clone(),
         }
     }
 }
@@ -82,6 +122,15 @@ pub(crate) struct DeviceEndpoint {
     pub(crate) graphics_last_presented_frame: Vec<u8>,
     pub(crate) submitted_requests: u64,
     pub(crate) completed_requests: u64,
+    pub(crate) last_completed_request_id: u64,
+    pub(crate) last_completed_frame_tag: String,
+    pub(crate) last_completed_source_api_name: String,
+    pub(crate) last_completed_translation_label: String,
+    pub(crate) last_terminal_request_id: u64,
+    pub(crate) last_terminal_state: DeviceRequestState,
+    pub(crate) last_terminal_frame_tag: String,
+    pub(crate) last_terminal_source_api_name: String,
+    pub(crate) last_terminal_translation_label: String,
     pub(crate) total_latency_ticks: u64,
     pub(crate) max_latency_ticks: u64,
     pub(crate) total_queue_wait_ticks: u64,
@@ -104,6 +153,15 @@ impl DeviceEndpoint {
             queue_capacity: self.queue_capacity,
             submitted_requests: self.submitted_requests,
             completed_requests: self.completed_requests,
+            last_completed_request_id: self.last_completed_request_id,
+            last_completed_frame_tag: self.last_completed_frame_tag.clone(),
+            last_completed_source_api_name: self.last_completed_source_api_name.clone(),
+            last_completed_translation_label: self.last_completed_translation_label.clone(),
+            last_terminal_request_id: self.last_terminal_request_id,
+            last_terminal_state: self.last_terminal_state,
+            last_terminal_frame_tag: self.last_terminal_frame_tag.clone(),
+            last_terminal_source_api_name: self.last_terminal_source_api_name.clone(),
+            last_terminal_translation_label: self.last_terminal_translation_label.clone(),
             total_latency_ticks: self.total_latency_ticks,
             max_latency_ticks: self.max_latency_ticks,
             total_queue_wait_ticks: self.total_queue_wait_ticks,
@@ -198,13 +256,164 @@ impl GpuBufferObject {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TcpState {
+    Closed,
+    Listen,
+    SynSent,
+    SynReceived,
+    Established,
+    FinWait1,
+    FinWait2,
+    CloseWait,
+    Closing,
+    LastAck,
+    TimeWait,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TcpControlBlock {
+    pub(crate) state: TcpState,
+    pub(crate) local_seq: u32,
+    pub(crate) remote_seq: u32,
+    pub(crate) local_ack: u32,
+    pub(crate) remote_ack: u32,
+    pub(crate) local_window: u32,
+    pub(crate) remote_window: u32,
+    pub(crate) local_port: u16,
+    pub(crate) remote_port: u16,
+    pub(crate) listen_backlog: usize,
+    pub(crate) accept_queue: Vec<u64>,
+    pub(crate) retransmit_timeout_ticks: u64,
+    pub(crate) last_transmit_tick: Option<u64>,
+    pub(crate) unacked_segments: Vec<TcpSegment>,
+    pub(crate) ooo_queue: Vec<TcpSegment>,
+    pub(crate) rtt_estimate_ticks: u64,
+    pub(crate) rtt_variance_ticks: u64,
+    pub(crate) congestion_window: u32,
+    pub(crate) slow_start_threshold: u32,
+    pub(crate) duplicate_acks: u32,
+}
+
+impl TcpControlBlock {
+    pub(crate) fn new_listen(local_port: u16, backlog: usize) -> Self {
+        Self {
+            state: TcpState::Listen,
+            local_seq: 0,
+            remote_seq: 0,
+            local_ack: 0,
+            remote_ack: 0,
+            local_window: 65535,
+            remote_window: 65535,
+            local_port,
+            remote_port: 0,
+            listen_backlog: backlog,
+            accept_queue: Vec::new(),
+            retransmit_timeout_ticks: 100,
+            last_transmit_tick: None,
+            unacked_segments: Vec::new(),
+            ooo_queue: Vec::new(),
+            rtt_estimate_ticks: 0,
+            rtt_variance_ticks: 0,
+            congestion_window: 1,
+            slow_start_threshold: 65535,
+            duplicate_acks: 0,
+        }
+    }
+
+    pub(crate) fn new_init(local_port: u16, remote_port: u16) -> Self {
+        Self {
+            state: TcpState::Closed,
+            local_seq: 0,
+            remote_seq: 0,
+            local_ack: 0,
+            remote_ack: 0,
+            local_window: 65535,
+            remote_window: 65535,
+            local_port,
+            remote_port,
+            listen_backlog: 0,
+            accept_queue: Vec::new(),
+            retransmit_timeout_ticks: 100,
+            last_transmit_tick: None,
+            unacked_segments: Vec::new(),
+            ooo_queue: Vec::new(),
+            rtt_estimate_ticks: 0,
+            rtt_variance_ticks: 0,
+            congestion_window: 1,
+            slow_start_threshold: 65535,
+            duplicate_acks: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TcpSegment {
+    pub(crate) seq: u32,
+    pub(crate) ack: u32,
+    pub(crate) window: u32,
+    pub(crate) flags: TcpFlags,
+    pub(crate) payload: Vec<u8>,
+    pub(crate) local_port: u16,
+    pub(crate) remote_port: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TcpFlags {
+    pub(crate) fin: bool,
+    pub(crate) syn: bool,
+    pub(crate) rst: bool,
+    pub(crate) psh: bool,
+    pub(crate) ack: bool,
+    pub(crate) urg: bool,
+}
+
+impl TcpFlags {
+    pub(crate) fn to_u8(&self) -> u8 {
+        let mut flags = 0u8;
+        if self.urg {
+            flags |= 0x20;
+        }
+        if self.ack {
+            flags |= 0x10;
+        }
+        if self.psh {
+            flags |= 0x08;
+        }
+        if self.rst {
+            flags |= 0x04;
+        }
+        if self.syn {
+            flags |= 0x02;
+        }
+        if self.fin {
+            flags |= 0x01;
+        }
+        flags
+    }
+
+    pub(crate) fn from_u8(flags: u8) -> Self {
+        Self {
+            fin: flags & 0x01 != 0,
+            syn: flags & 0x02 != 0,
+            rst: flags & 0x04 != 0,
+            psh: flags & 0x08 != 0,
+            ack: flags & 0x10 != 0,
+            urg: flags & 0x20 != 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NetworkSocket {
     pub(crate) path: String,
     pub(crate) owner: ProcessId,
     pub(crate) interface: String,
+    pub(crate) ip_version: IpVersion,
     pub(crate) local_ipv4: [u8; 4],
+    pub(crate) local_ipv6: Ipv6Address,
     pub(crate) remote_ipv4: [u8; 4],
+    pub(crate) remote_ipv6: Ipv6Address,
     pub(crate) local_port: u16,
     pub(crate) remote_port: u16,
     pub(crate) rx_queue: Vec<SocketRxPacket>,
@@ -213,6 +422,8 @@ pub(crate) struct NetworkSocket {
     pub(crate) tx_packets: u64,
     pub(crate) rx_packets: u64,
     pub(crate) dropped_packets: u64,
+    pub(crate) socket_type: SocketType,
+    pub(crate) tcp_state: Option<TcpControlBlock>,
 }
 
 impl NetworkSocket {
@@ -231,6 +442,8 @@ impl NetworkSocket {
             tx_packets: self.tx_packets,
             rx_packets: self.rx_packets,
             dropped_packets: self.dropped_packets,
+            socket_type: self.socket_type,
+            tcp_state: self.tcp_state.as_ref().map(|tcb| tcb.state),
         }
     }
 }
@@ -242,6 +455,208 @@ pub(crate) struct SocketRxPacket {
     pub(crate) dst_ipv4: [u8; 4],
     pub(crate) src_port: u16,
     pub(crate) dst_port: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct Ipv6Address {
+    pub(crate) octets: [u8; 16],
+}
+
+impl Ipv6Address {
+    pub(crate) const UNSPECIFIED: Self = Self { octets: [0; 16] };
+    pub(crate) const LOOPBACK: Self = Self {
+        octets: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+    };
+
+    pub(crate) fn from_segments(a: u16, b: u16, c: u16, d: u16, e: u16, f: u16, g: u16, h: u16) -> Self {
+        let mut octets = [0u8; 16];
+        octets[0..2].copy_from_slice(&a.to_be_bytes());
+        octets[2..4].copy_from_slice(&b.to_be_bytes());
+        octets[4..6].copy_from_slice(&c.to_be_bytes());
+        octets[6..8].copy_from_slice(&d.to_be_bytes());
+        octets[8..10].copy_from_slice(&e.to_be_bytes());
+        octets[10..12].copy_from_slice(&f.to_be_bytes());
+        octets[12..14].copy_from_slice(&g.to_be_bytes());
+        octets[14..16].copy_from_slice(&h.to_be_bytes());
+        Self { octets }
+    }
+
+    pub(crate) fn from_ipv4_mapped(ipv4: [u8; 4]) -> Self {
+        let mut octets = [0u8; 16];
+        octets[10] = 0xff;
+        octets[11] = 0xff;
+        octets[12] = ipv4[0];
+        octets[13] = ipv4[1];
+        octets[14] = ipv4[2];
+        octets[15] = ipv4[3];
+        Self { octets }
+    }
+
+    pub(crate) fn is_ipv4_mapped(&self) -> bool {
+        self.octets[10] == 0xff && self.octets[11] == 0xff
+    }
+
+    pub(crate) fn to_ipv4_mapped(&self) -> Option<[u8; 4]> {
+        if self.is_ipv4_mapped() {
+            Some([self.octets[12], self.octets[13], self.octets[14], self.octets[15]])
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn is_link_local(&self) -> bool {
+        self.octets[0] == 0xfe && (self.octets[1] & 0xc0) == 0x80
+    }
+
+    pub(crate) fn is_multicast(&self) -> bool {
+        self.octets[0] == 0xff
+    }
+
+    pub(crate) fn is_loopback(&self) -> bool {
+        *self == Self::LOOPBACK
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IpVersion {
+    Ipv4,
+    Ipv6,
+}
+
+impl IpVersion {
+    pub(crate) fn to_u8(self) -> u8 {
+        match self {
+            Self::Ipv4 => 4,
+            Self::Ipv6 => 6,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum IpAddress {
+    V4([u8; 4]),
+    V6(Ipv6Address),
+}
+
+impl IpAddress {
+    pub(crate) fn version(&self) -> IpVersion {
+        match self {
+            Self::V4(_) => IpVersion::Ipv4,
+            Self::V6(_) => IpVersion::Ipv6,
+        }
+    }
+
+    pub(crate) fn is_unspecified(&self) -> bool {
+        match self {
+            Self::V4(addr) => *addr == [0, 0, 0, 0],
+            Self::V6(addr) => *addr == Ipv6Address::UNSPECIFIED,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IcmpType {
+    EchoReply = 0,
+    DestinationUnreachable = 3,
+    SourceQuench = 4,
+    Redirect = 5,
+    EchoRequest = 8,
+    TimeExceeded = 11,
+    ParameterProblem = 12,
+    TimestampRequest = 13,
+    TimestampReply = 14,
+}
+
+impl IcmpType {
+    pub(crate) fn from_u8(val: u8) -> Option<Self> {
+        match val {
+            0 => Some(Self::EchoReply),
+            3 => Some(Self::DestinationUnreachable),
+            4 => Some(Self::SourceQuench),
+            5 => Some(Self::Redirect),
+            8 => Some(Self::EchoRequest),
+            11 => Some(Self::TimeExceeded),
+            12 => Some(Self::ParameterProblem),
+            13 => Some(Self::TimestampRequest),
+            14 => Some(Self::TimestampReply),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn to_u8(self) -> u8 {
+        self as u8
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IcmpUnreachableCode {
+    NetworkUnreachable = 0,
+    HostUnreachable = 1,
+    ProtocolUnreachable = 2,
+    PortUnreachable = 3,
+    FragmentationNeeded = 4,
+    SourceRouteFailed = 5,
+}
+
+impl IcmpUnreachableCode {
+    pub(crate) fn to_u8(self) -> u8 {
+        self as u8
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IcmpMessage {
+    pub(crate) icmp_type: IcmpType,
+    pub(crate) code: u8,
+    pub(crate) checksum: u16,
+    pub(crate) identifier: u16,
+    pub(crate) sequence: u16,
+    pub(crate) payload: Vec<u8>,
+}
+
+impl IcmpMessage {
+    pub(crate) fn echo_request(identifier: u16, sequence: u16, payload: Vec<u8>) -> Self {
+        Self {
+            icmp_type: IcmpType::EchoRequest,
+            code: 0,
+            checksum: 0,
+            identifier,
+            sequence,
+            payload,
+        }
+    }
+
+    pub(crate) fn echo_reply(identifier: u16, sequence: u16, payload: Vec<u8>) -> Self {
+        Self {
+            icmp_type: IcmpType::EchoReply,
+            code: 0,
+            checksum: 0,
+            identifier,
+            sequence,
+            payload,
+        }
+    }
+
+    pub(crate) fn dest_unreachable(
+        code: IcmpUnreachableCode,
+        original_header: Vec<u8>,
+    ) -> Self {
+        Self {
+            icmp_type: IcmpType::DestinationUnreachable,
+            code: code.to_u8(),
+            checksum: 0,
+            identifier: 0,
+            sequence: 0,
+            payload: original_header,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SocketType {
+    Udp,
+    Tcp,
+    Icmp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -272,6 +687,10 @@ pub(crate) struct NetworkInterface {
     pub(crate) ipv4_addr: [u8; 4],
     pub(crate) ipv4_netmask: [u8; 4],
     pub(crate) ipv4_gateway: [u8; 4],
+    pub(crate) ipv6_addr: Ipv6Address,
+    pub(crate) ipv6_gateway: Ipv6Address,
+    pub(crate) ipv6_prefix_len: u8,
+    pub(crate) link_local: Ipv6Address,
     pub(crate) tx_capacity: usize,
     pub(crate) rx_capacity: usize,
     pub(crate) tx_inflight_limit: usize,

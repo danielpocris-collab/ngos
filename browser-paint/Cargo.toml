@@ -5,8 +5,14 @@ edition.workspace = true
 license = "Proprietary"
 description = "NGOS Browser - Rendering (proprietary)"
 
+[features]
+default = []
+skia = ["dep:skia-safe"]
+
 [dependencies]
 browser-core = { path = "../browser-core" }
 browser-dom = { path = "../browser-dom" }
 browser-layout = { path = "../browser-layout" }
+ngos-gfx-translate = { path = "../gfx-translate" }
 # Fără webrender (MPL-2.0) - folosim FrameScript NGOS
+skia-safe = { version = "0.93.1", optional = true, default-features = true }

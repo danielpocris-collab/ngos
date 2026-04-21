@@ -1,6 +1,21 @@
 //! NGOS Browser HTML Parser
 //!
 //! HTML5 parser - 100% Proprietary, no external deps
+//!
+//! Canonical subsystem role:
+//! - subsystem: browser HTML support
+//! - owner layer: application support layer
+//! - semantic owner: `browser-html`
+//! - truth path role: browser-facing HTML parsing support for browser
+//!   application flows
+//!
+//! Canonical contract families defined here:
+//! - HTML parsing contracts
+//! - browser document construction support contracts
+//! - parser state support contracts
+//!
+//! This crate may define browser HTML support behavior, but it must not
+//! redefine kernel, runtime, or product-level OS truth.
 
 pub use browser_core::{BrowserError, BrowserResult};
 use browser_dom::{Document, Node, NodeData, NodeType};
@@ -148,7 +163,11 @@ impl<'a> HtmlParser<'a> {
         // Read tag name
         let tag_name = self.read_while(|c| c.is_alphanumeric() || c == '-' || c == '_');
         if tag_name.is_empty() {
-            return Err(BrowserError::Parse("Empty tag name".into()));
+            self.skip_until('>');
+            if self.pos < self.input.len() {
+                self.pos += 1;
+            }
+            return Ok(None);
         }
 
         // Read attributes

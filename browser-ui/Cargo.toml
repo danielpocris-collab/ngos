@@ -9,5 +9,5 @@ description = "NGOS Browser - UI shell using FrameScript"
 browser-core = { path = "../browser-core" }
 browser-dom = { path = "../browser-dom" }
 browser-layout = { path = "../browser-layout" }
-browser-paint = { path = "../browser-paint" }
+browser-paint = { path = "../browser-paint", features = ["skia"] }
 ngos-gfx-translate = { path = "../gfx-translate" }

@@ -1,7 +1,25 @@
 use super::*;
 #[test]
 fn runtime_orchestrates_processes_capabilities_and_scheduler() {
-    let mut runtime = KernelRuntime::host_runtime_default();
+    let mut policy = RuntimePolicy::host_runtime_default();
+    policy.default_thread_cpu_extended_state = ThreadCpuExtendedStateProfile {
+        owned: true,
+        xsave_managed: true,
+        save_area_bytes: 4096,
+        xcr0_mask: 0xe7,
+        boot_probed: true,
+        boot_seed_marker: 0x55aa_33cc,
+        active_in_cpu: false,
+        save_count: 0,
+        restore_count: 0,
+        last_saved_tick: 0,
+        last_restored_tick: 0,
+        save_area_buffer_bytes: 0,
+        save_area_alignment_bytes: 0,
+        save_area_generation: 0,
+        last_save_marker: 0,
+    };
+    let mut runtime = KernelRuntime::new(policy);
     let init = runtime
         .spawn_process("init", None, SchedulerClass::BestEffort)
         .unwrap();
@@ -37,11 +55,68 @@ fn runtime_orchestrates_processes_capabilities_and_scheduler() {
         runtime.capabilities().get(child_cap).unwrap().rights(),
         CapabilityRights::READ
     );
+    let shell_thread = runtime.thread_infos(shell).unwrap();
+    assert_eq!(shell_thread.len(), 1);
+    assert!(shell_thread[0].cpu_extended_state.active_in_cpu);
+    assert_eq!(shell_thread[0].cpu_extended_state.restore_count, 1);
+    assert_eq!(shell_thread[0].cpu_extended_state.last_restored_tick, 1);
+    assert_eq!(
+        shell_thread[0].cpu_extended_state.save_area_buffer_bytes,
+        4096
+    );
+    assert_eq!(
+        shell_thread[0].cpu_extended_state.save_area_alignment_bytes,
+        64
+    );
+    assert_eq!(shell_thread[0].cpu_extended_state.save_area_generation, 1);
+    assert_eq!(
+        shell_thread[0].cpu_extended_state.last_save_marker,
+        0x55aa_33cc
+    );
+    let active = runtime.active_cpu_extended_state().unwrap();
+    assert_eq!(active.owner_pid, shell);
+    assert_eq!(active.owner_tid, first.tid);
+    assert_eq!(active.image.bytes.len(), 4096);
+
+    let init_thread = runtime.thread_infos(init).unwrap();
+    assert_eq!(init_thread.len(), 1);
+    assert!(!init_thread[0].cpu_extended_state.active_in_cpu);
+    assert_eq!(init_thread[0].cpu_extended_state.save_count, 0);
+    assert_eq!(
+        init_thread[0].cpu_extended_state.save_area_buffer_bytes,
+        4096
+    );
+    assert_eq!(
+        init_thread[0].cpu_extended_state.save_area_alignment_bytes,
+        64
+    );
+    assert_eq!(
+        init_thread[0].cpu_extended_state.last_save_marker,
+        0x55aa_33cc
+    );
 }
 
 #[test]
 fn runtime_exposes_process_info_and_process_list() {
-    let mut runtime = KernelRuntime::host_runtime_default();
+    let mut policy = RuntimePolicy::host_runtime_default();
+    policy.default_thread_cpu_extended_state = ThreadCpuExtendedStateProfile {
+        owned: true,
+        xsave_managed: true,
+        save_area_bytes: 4096,
+        xcr0_mask: 0xe7,
+        boot_probed: true,
+        boot_seed_marker: 0xfeed_cafe,
+        active_in_cpu: false,
+        save_count: 0,
+        restore_count: 0,
+        last_saved_tick: 0,
+        last_restored_tick: 0,
+        save_area_buffer_bytes: 0,
+        save_area_alignment_bytes: 0,
+        save_area_generation: 0,
+        last_save_marker: 0,
+    };
+    let mut runtime = KernelRuntime::new(policy);
     let init = runtime
         .spawn_process("init", None, SchedulerClass::LatencyCritical)
         .unwrap();
@@ -79,6 +154,637 @@ fn runtime_exposes_process_info_and_process_list() {
     let processes = runtime.process_list();
     assert!(processes.iter().any(|process| process.pid == init));
     assert!(processes.iter().any(|process| process.pid == app));
+
+    let threads = runtime.thread_infos(app).unwrap();
+    assert_eq!(threads.len(), 1);
+    assert!(threads[0].cpu_extended_state.owned);
+    assert!(threads[0].cpu_extended_state.xsave_managed);
+    assert_eq!(threads[0].cpu_extended_state.save_area_bytes, 4096);
+    assert_eq!(threads[0].cpu_extended_state.xcr0_mask, 0xe7);
+    assert!(threads[0].cpu_extended_state.boot_probed);
+    assert_eq!(threads[0].cpu_extended_state.save_area_buffer_bytes, 4096);
+    assert_eq!(threads[0].cpu_extended_state.save_area_alignment_bytes, 64);
+    assert_eq!(threads[0].cpu_extended_state.save_area_generation, 1);
+    assert_eq!(threads[0].cpu_extended_state.last_save_marker, 0xfeed_cafe);
+}
+
+#[test]
+fn runtime_exports_aligned_cpu_extended_state_image() {
+    let mut policy = RuntimePolicy::host_runtime_default();
+    policy.default_thread_cpu_extended_state = ThreadCpuExtendedStateProfile {
+        owned: true,
+        xsave_managed: true,
+        save_area_bytes: 2048,
+        xcr0_mask: 0xe7,
+        boot_probed: true,
+        boot_seed_marker: 0xdead_beef,
+        active_in_cpu: false,
+        save_count: 0,
+        restore_count: 0,
+        last_saved_tick: 0,
+        last_restored_tick: 0,
+        save_area_buffer_bytes: 0,
+        save_area_alignment_bytes: 0,
+        save_area_generation: 0,
+        last_save_marker: 0,
+    };
+    let mut runtime = KernelRuntime::new(policy);
+    let init = runtime
+        .spawn_process("init", None, SchedulerClass::BestEffort)
+        .unwrap();
+    let scheduled = runtime.tick().unwrap();
+    assert_eq!(scheduled.pid, init);
+
+    let active = runtime.active_cpu_extended_state().unwrap();
+    assert!(active.image.bytes.is_aligned());
+    assert_eq!(active.image.profile.save_area_alignment_bytes, 64);
+
+    let exported = runtime
+        .export_thread_cpu_extended_state_image(init, scheduled.tid)
+        .unwrap();
+    assert!(exported.bytes.is_aligned());
+    assert_eq!(exported.profile.save_area_alignment_bytes, 64);
+}
+
+#[test]
+fn runtime_restores_thread_cpu_extended_state_from_boot_seed() {
+    let mut policy = RuntimePolicy::host_runtime_default();
+    policy.default_thread_cpu_extended_state = ThreadCpuExtendedStateProfile {
+        owned: true,
+        xsave_managed: true,
+        save_area_bytes: 4096,
+        xcr0_mask: 0xe7,
+        boot_probed: true,
+        boot_seed_marker: 0xabcd_1234,
+        active_in_cpu: false,
+        save_count: 0,
+        restore_count: 0,
+        last_saved_tick: 0,
+        last_restored_tick: 0,
+        save_area_buffer_bytes: 0,
+        save_area_alignment_bytes: 0,
+        save_area_generation: 0,
+        last_save_marker: 0,
+    };
+    let mut runtime = KernelRuntime::new(policy);
+    let init = runtime
+        .spawn_process("init", None, SchedulerClass::BestEffort)
+        .unwrap();
+    let shell = runtime
+        .spawn_process("shell", Some(init), SchedulerClass::Interactive)
+        .unwrap();
+
+    let shell_tid = runtime
+        .processes()
+        .get(shell)
+        .unwrap()
+        .main_thread()
+        .unwrap();
+    assert_eq!(
+        runtime.thread_infos(shell).unwrap()[0]
+            .cpu_extended_state
+            .last_save_marker,
+        0xabcd_1234
+    );
+
+    assert_eq!(runtime.tick().unwrap().tid, shell_tid);
+    runtime
+        .processes
+        .mark_thread_cpu_extended_state_saved(shell_tid, 9)
+        .unwrap();
+
+    let changed = runtime.thread_infos(shell).unwrap()[0].cpu_extended_state;
+    assert_ne!(changed.last_save_marker, 0xabcd_1234);
+    assert!(changed.save_count >= 1);
+
+    runtime
+        .restore_thread_cpu_extended_state_boot_seed(shell, shell_tid)
+        .unwrap();
+    let restored = runtime.thread_infos(shell).unwrap()[0].cpu_extended_state;
+    assert_eq!(restored.last_save_marker, 0xabcd_1234);
+    assert_eq!(restored.save_area_generation, 1);
+    assert!(!restored.active_in_cpu);
+
+    let missing = runtime.restore_thread_cpu_extended_state_boot_seed(init, shell_tid);
+    assert_eq!(
+        missing,
+        Err(RuntimeError::Process(ProcessError::InvalidTid))
+    );
+}
+
+#[test]
+fn runtime_policy_handoff_builds_default_thread_profile() {
+    let mut policy = RuntimePolicy::host_runtime_default();
+    policy.apply_cpu_extended_state_handoff(CpuExtendedStateHandoff {
+        xsave_managed: true,
+        save_area_bytes: 8192,
+        xcr0_mask: 0x1ff,
+        boot_probed: true,
+        boot_seed_marker: 0xdead_beef,
+    });
+    let mut runtime = KernelRuntime::new(policy);
+    let pid = runtime
+        .spawn_process("handoff", None, SchedulerClass::Interactive)
+        .unwrap();
+    let thread = runtime.thread_infos(pid).unwrap();
+    assert_eq!(thread.len(), 1);
+    assert!(thread[0].cpu_extended_state.xsave_managed);
+    assert_eq!(thread[0].cpu_extended_state.save_area_bytes, 8192);
+    assert_eq!(thread[0].cpu_extended_state.xcr0_mask, 0x1ff);
+    assert!(thread[0].cpu_extended_state.boot_probed);
+    assert_eq!(thread[0].cpu_extended_state.boot_seed_marker, 0xdead_beef);
+}
+
+#[test]
+fn runtime_can_apply_cpu_handoff_for_future_threads() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let before = runtime
+        .spawn_process("before", None, SchedulerClass::Interactive)
+        .unwrap();
+    let before_thread = runtime.thread_infos(before).unwrap();
+    assert!(!before_thread[0].cpu_extended_state.xsave_managed);
+
+    let applied = runtime.apply_cpu_extended_state_handoff(CpuExtendedStateHandoff {
+        xsave_managed: true,
+        save_area_bytes: 2048,
+        xcr0_mask: 0x27,
+        boot_probed: true,
+        boot_seed_marker: 0xcafe_babe,
+    });
+    assert!(applied.xsave_managed);
+    assert_eq!(applied.save_area_bytes, 2048);
+    assert_eq!(
+        runtime.default_thread_cpu_extended_state().boot_seed_marker,
+        0xcafe_babe
+    );
+
+    let after = runtime
+        .spawn_process("after", None, SchedulerClass::Interactive)
+        .unwrap();
+    let after_thread = runtime.thread_infos(after).unwrap();
+    assert!(after_thread[0].cpu_extended_state.xsave_managed);
+    assert_eq!(after_thread[0].cpu_extended_state.save_area_bytes, 2048);
+    assert_eq!(after_thread[0].cpu_extended_state.xcr0_mask, 0x27);
+    assert!(after_thread[0].cpu_extended_state.boot_probed);
+    assert_eq!(
+        after_thread[0].cpu_extended_state.boot_seed_marker,
+        0xcafe_babe
+    );
+    assert_eq!(after_thread[0].cpu_extended_state.save_area_generation, 1);
+    assert_eq!(
+        after_thread[0].cpu_extended_state.last_save_marker,
+        0xcafe_babe
+    );
+
+    let before_again = runtime.thread_infos(before).unwrap();
+    assert!(!before_again[0].cpu_extended_state.xsave_managed);
+}
+
+#[test]
+fn runtime_can_apply_cpu_handoff_to_existing_process_threads() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let pid = runtime
+        .spawn_process("existing", None, SchedulerClass::Interactive)
+        .unwrap();
+    let tid = runtime.processes().get(pid).unwrap().main_thread().unwrap();
+
+    let initial = runtime.thread_infos(pid).unwrap();
+    assert!(!initial[0].cpu_extended_state.xsave_managed);
+
+    let applied = runtime
+        .apply_cpu_handoff_to_process_threads(
+            pid,
+            CpuExtendedStateHandoff {
+                xsave_managed: true,
+                save_area_bytes: 3072,
+                xcr0_mask: 0x67,
+                boot_probed: true,
+                boot_seed_marker: 0x1357_2468,
+            },
+        )
+        .unwrap();
+    assert_eq!(applied, 1);
+
+    let updated = runtime.thread_infos(pid).unwrap();
+    assert_eq!(updated[0].tid, tid);
+    assert!(updated[0].cpu_extended_state.xsave_managed);
+    assert_eq!(updated[0].cpu_extended_state.save_area_bytes, 3072);
+    assert_eq!(updated[0].cpu_extended_state.xcr0_mask, 0x67);
+    assert!(updated[0].cpu_extended_state.boot_probed);
+    assert_eq!(updated[0].cpu_extended_state.boot_seed_marker, 0x1357_2468);
+    assert_eq!(updated[0].cpu_extended_state.save_area_buffer_bytes, 3072);
+    assert_eq!(updated[0].cpu_extended_state.save_area_generation, 1);
+    assert_eq!(updated[0].cpu_extended_state.last_save_marker, 0x1357_2468);
+
+    let missing = runtime.apply_cpu_handoff_to_process_threads(
+        ProcessId::from_handle(ObjectHandle::new(Handle::new(99_999), 0)),
+        CpuExtendedStateHandoff {
+            xsave_managed: true,
+            save_area_bytes: 1024,
+            xcr0_mask: 0x7,
+            boot_probed: false,
+            boot_seed_marker: 1,
+        },
+    );
+    assert_eq!(
+        missing,
+        Err(RuntimeError::Process(ProcessError::InvalidPid))
+    );
+}
+
+#[test]
+fn runtime_can_restore_existing_process_threads_to_default_cpu_handoff() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    runtime.apply_cpu_extended_state_handoff(CpuExtendedStateHandoff {
+        xsave_managed: true,
+        save_area_bytes: 1536,
+        xcr0_mask: 0x17,
+        boot_probed: true,
+        boot_seed_marker: 0x1111_2222,
+    });
+
+    let pid = runtime
+        .spawn_process("restore-target", None, SchedulerClass::Interactive)
+        .unwrap();
+
+    runtime
+        .apply_cpu_handoff_to_process_threads(
+            pid,
+            CpuExtendedStateHandoff {
+                xsave_managed: true,
+                save_area_bytes: 3072,
+                xcr0_mask: 0x67,
+                boot_probed: true,
+                boot_seed_marker: 0x3333_4444,
+            },
+        )
+        .unwrap();
+    let changed = runtime.thread_infos(pid).unwrap();
+    assert_eq!(changed[0].cpu_extended_state.save_area_bytes, 3072);
+    assert_eq!(changed[0].cpu_extended_state.boot_seed_marker, 0x3333_4444);
+    assert_eq!(changed[0].cpu_extended_state.last_save_marker, 0x3333_4444);
+
+    let restored = runtime
+        .restore_process_threads_to_default_cpu_handoff(pid)
+        .unwrap();
+    assert_eq!(restored, 1);
+
+    let thread = runtime.thread_infos(pid).unwrap();
+    assert!(thread[0].cpu_extended_state.xsave_managed);
+    assert_eq!(thread[0].cpu_extended_state.save_area_bytes, 1536);
+    assert_eq!(thread[0].cpu_extended_state.xcr0_mask, 0x17);
+    assert!(thread[0].cpu_extended_state.boot_probed);
+    assert_eq!(thread[0].cpu_extended_state.boot_seed_marker, 0x1111_2222);
+    assert_eq!(thread[0].cpu_extended_state.save_area_buffer_bytes, 1536);
+    assert_eq!(thread[0].cpu_extended_state.save_area_generation, 1);
+    assert_eq!(thread[0].cpu_extended_state.last_save_marker, 0x1111_2222);
+
+    let missing = runtime.restore_process_threads_to_default_cpu_handoff(ProcessId::from_handle(
+        ObjectHandle::new(Handle::new(88_888), 0),
+    ));
+    assert_eq!(
+        missing,
+        Err(RuntimeError::Process(ProcessError::InvalidPid))
+    );
+}
+
+#[test]
+fn runtime_can_export_and_import_thread_cpu_extended_state_image() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    runtime.apply_cpu_extended_state_handoff(CpuExtendedStateHandoff {
+        xsave_managed: true,
+        save_area_bytes: 1024,
+        xcr0_mask: 0x27,
+        boot_probed: true,
+        boot_seed_marker: 0xaaaa_5555,
+    });
+
+    let source = runtime
+        .spawn_process("source", None, SchedulerClass::Interactive)
+        .unwrap();
+    let target = runtime
+        .spawn_process("target", None, SchedulerClass::Interactive)
+        .unwrap();
+
+    let source_tid = runtime
+        .processes()
+        .get(source)
+        .unwrap()
+        .main_thread()
+        .unwrap();
+    let target_tid = runtime
+        .processes()
+        .get(target)
+        .unwrap()
+        .main_thread()
+        .unwrap();
+
+    runtime
+        .processes
+        .mark_thread_cpu_extended_state_saved(source_tid, 42)
+        .unwrap();
+    let exported = runtime
+        .export_thread_cpu_extended_state_image(source, source_tid)
+        .unwrap();
+    assert_eq!(exported.profile.save_area_bytes, 1024);
+    assert_eq!(
+        exported.profile.last_save_marker,
+        42 ^ 0x27 ^ source_tid.raw()
+    );
+    assert_eq!(exported.bytes.len(), 1024);
+
+    runtime
+        .import_thread_cpu_extended_state_image(target, target_tid, exported.clone())
+        .unwrap();
+    let imported = runtime.thread_infos(target).unwrap();
+    assert_eq!(imported[0].cpu_extended_state.save_area_bytes, 1024);
+    assert_eq!(
+        imported[0].cpu_extended_state.last_save_marker,
+        exported.profile.last_save_marker
+    );
+    assert_eq!(
+        imported[0].cpu_extended_state.save_area_generation,
+        exported.profile.save_area_generation
+    );
+
+    let invalid_owner = runtime.export_thread_cpu_extended_state_image(target, source_tid);
+    assert_eq!(
+        invalid_owner,
+        Err(RuntimeError::Process(ProcessError::InvalidTid))
+    );
+
+    let invalid_import = runtime.import_thread_cpu_extended_state_image(
+        source,
+        source_tid,
+        ThreadCpuExtendedStateImage {
+            profile: ThreadCpuExtendedStateProfile::bootstrap_default(),
+            bytes: AlignedCpuExtendedStateBuffer::new(),
+        },
+    );
+    assert_eq!(
+        invalid_import,
+        Err(RuntimeError::Process(
+            ProcessError::CpuExtendedStateUnavailable
+        ))
+    );
+}
+
+#[test]
+fn runtime_can_clone_thread_cpu_extended_state_between_threads() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    runtime.apply_cpu_extended_state_handoff(CpuExtendedStateHandoff {
+        xsave_managed: true,
+        save_area_bytes: 2048,
+        xcr0_mask: 0x67,
+        boot_probed: true,
+        boot_seed_marker: 0x2468_1357,
+    });
+
+    let source = runtime
+        .spawn_process("source-clone", None, SchedulerClass::Interactive)
+        .unwrap();
+    let target = runtime
+        .spawn_process("target-clone", None, SchedulerClass::Interactive)
+        .unwrap();
+
+    let source_tid = runtime
+        .processes()
+        .get(source)
+        .unwrap()
+        .main_thread()
+        .unwrap();
+    let target_tid = runtime
+        .processes()
+        .get(target)
+        .unwrap()
+        .main_thread()
+        .unwrap();
+
+    runtime
+        .processes
+        .mark_thread_cpu_extended_state_saved(source_tid, 77)
+        .unwrap();
+
+    let cloned = runtime
+        .clone_thread_cpu_extended_state_image(source, source_tid, target, target_tid)
+        .unwrap();
+    assert_eq!(cloned.profile.save_area_bytes, 2048);
+    assert_eq!(
+        cloned.profile.last_save_marker,
+        77 ^ 0x67 ^ source_tid.raw()
+    );
+
+    let target_thread = runtime.thread_infos(target).unwrap();
+    assert_eq!(
+        target_thread[0].cpu_extended_state.last_save_marker,
+        cloned.profile.last_save_marker
+    );
+    assert_eq!(
+        target_thread[0].cpu_extended_state.save_area_generation,
+        cloned.profile.save_area_generation
+    );
+
+    let wrong_owner =
+        runtime.clone_thread_cpu_extended_state_image(target, source_tid, target, target_tid);
+    assert_eq!(
+        wrong_owner,
+        Err(RuntimeError::Process(ProcessError::InvalidTid))
+    );
+
+    let plain = runtime
+        .spawn_process("plain", None, SchedulerClass::Interactive)
+        .unwrap();
+    let plain_tid = runtime
+        .processes()
+        .get(plain)
+        .unwrap()
+        .main_thread()
+        .unwrap();
+    runtime
+        .apply_cpu_handoff_to_process_threads(
+            plain,
+            CpuExtendedStateHandoff {
+                xsave_managed: false,
+                save_area_bytes: 0,
+                xcr0_mask: 0,
+                boot_probed: false,
+                boot_seed_marker: 0,
+            },
+        )
+        .unwrap();
+    let unavailable =
+        runtime.clone_thread_cpu_extended_state_image(plain, plain_tid, target, target_tid);
+    assert_eq!(
+        unavailable,
+        Err(RuntimeError::Process(
+            ProcessError::CpuExtendedStateUnavailable
+        ))
+    );
+}
+
+#[test]
+fn runtime_can_release_thread_cpu_extended_state_image() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    runtime.apply_cpu_extended_state_handoff(CpuExtendedStateHandoff {
+        xsave_managed: true,
+        save_area_bytes: 1024,
+        xcr0_mask: 0x27,
+        boot_probed: true,
+        boot_seed_marker: 0xbeef_cafe,
+    });
+
+    let pid = runtime
+        .spawn_process("release", None, SchedulerClass::Interactive)
+        .unwrap();
+    let tid = runtime.processes().get(pid).unwrap().main_thread().unwrap();
+
+    let before = runtime.thread_infos(pid).unwrap();
+    assert!(before[0].cpu_extended_state.xsave_managed);
+    assert_eq!(before[0].cpu_extended_state.save_area_buffer_bytes, 1024);
+
+    runtime
+        .release_thread_cpu_extended_state_image(pid, tid)
+        .unwrap();
+
+    let after = runtime.thread_infos(pid).unwrap();
+    assert!(!after[0].cpu_extended_state.xsave_managed);
+    assert_eq!(after[0].cpu_extended_state.save_area_bytes, 0);
+    assert_eq!(after[0].cpu_extended_state.xcr0_mask, 0);
+    assert_eq!(after[0].cpu_extended_state.boot_seed_marker, 0);
+    assert_eq!(after[0].cpu_extended_state.save_area_buffer_bytes, 0);
+    assert_eq!(after[0].cpu_extended_state.save_area_generation, 0);
+    assert_eq!(after[0].cpu_extended_state.last_save_marker, 0);
+
+    let already_released = runtime.release_thread_cpu_extended_state_image(pid, tid);
+    assert_eq!(
+        already_released,
+        Err(RuntimeError::Process(
+            ProcessError::CpuExtendedStateUnavailable
+        ))
+    );
+
+    let wrong_owner = runtime.release_thread_cpu_extended_state_image(
+        ProcessId::from_handle(ObjectHandle::new(Handle::new(77_777), 0)),
+        tid,
+    );
+    assert_eq!(
+        wrong_owner,
+        Err(RuntimeError::Process(ProcessError::InvalidTid))
+    );
+}
+
+#[test]
+fn runtime_procfs_cpu_renders_extended_state_lifecycle() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    runtime.apply_cpu_extended_state_handoff(CpuExtendedStateHandoff {
+        xsave_managed: true,
+        save_area_bytes: 2048,
+        xcr0_mask: 0x67,
+        boot_probed: true,
+        boot_seed_marker: 0x1234_abcd,
+    });
+
+    let pid = runtime
+        .spawn_process("cpu-procfs", None, SchedulerClass::Interactive)
+        .unwrap();
+    let tid = runtime.processes().get(pid).unwrap().main_thread().unwrap();
+    runtime
+        .processes
+        .mark_thread_cpu_extended_state_saved(tid, 33)
+        .unwrap();
+
+    let cpu = String::from_utf8(
+        runtime
+            .read_procfs_path(&format!("/proc/{}/cpu", pid.raw()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(cpu.contains("xsave-managed=true"));
+    assert!(cpu.contains("save-area=2048"));
+    assert!(cpu.contains("xcr0=0x67"));
+    assert!(cpu.contains("boot-probed=true"));
+    assert!(cpu.contains("boot-seed=0x1234abcd"));
+    assert!(cpu.contains("generation=2"));
+
+    runtime
+        .release_thread_cpu_extended_state_image(pid, tid)
+        .unwrap();
+    let released = String::from_utf8(
+        runtime
+            .read_procfs_path(&format!("/proc/{}/cpu", pid.raw()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(released.contains("xsave-managed=false"));
+    assert!(released.contains("save-area=0"));
+    assert!(released.contains("marker=0x0"));
+}
+
+#[test]
+fn runtime_tracks_active_cpu_extended_state_slot_across_thread_switches() {
+    let mut policy = RuntimePolicy::host_runtime_default();
+    policy.default_thread_cpu_extended_state = ThreadCpuExtendedStateProfile {
+        owned: true,
+        xsave_managed: true,
+        save_area_bytes: 2048,
+        xcr0_mask: 0x67,
+        boot_probed: true,
+        boot_seed_marker: 0x9999_aaaa,
+        active_in_cpu: false,
+        save_count: 0,
+        restore_count: 0,
+        last_saved_tick: 0,
+        last_restored_tick: 0,
+        save_area_buffer_bytes: 0,
+        save_area_alignment_bytes: 0,
+        save_area_generation: 0,
+        last_save_marker: 0,
+    };
+    let mut runtime = KernelRuntime::new(policy);
+    let init = runtime
+        .spawn_process("init", None, SchedulerClass::BestEffort)
+        .unwrap();
+    let shell = runtime
+        .spawn_process("shell", Some(init), SchedulerClass::Interactive)
+        .unwrap();
+
+    let shell_tid = runtime
+        .processes()
+        .get(shell)
+        .unwrap()
+        .main_thread()
+        .unwrap();
+    let init_tid = runtime
+        .processes()
+        .get(init)
+        .unwrap()
+        .main_thread()
+        .unwrap();
+
+    let first = runtime.tick().unwrap();
+    assert_eq!(first.tid, shell_tid);
+    let active_first = runtime.active_cpu_extended_state().unwrap();
+    assert_eq!(active_first.owner_pid, shell);
+    assert_eq!(active_first.owner_tid, shell_tid);
+
+    assert_eq!(runtime.block_running().unwrap(), shell);
+    let second = runtime.tick().unwrap();
+    assert_eq!(second.tid, init_tid);
+    let active_second = runtime.active_cpu_extended_state().unwrap();
+    assert_eq!(active_second.owner_pid, init);
+    assert_eq!(active_second.owner_tid, init_tid);
+
+    let shell_thread = runtime.thread_infos(shell).unwrap();
+    assert!(shell_thread[0].cpu_extended_state.save_count >= 1);
+    assert!(!shell_thread[0].cpu_extended_state.active_in_cpu);
+
+    let system_cpu =
+        String::from_utf8(runtime.read_procfs_path("/proc/system/cpu").unwrap()).unwrap();
+    assert!(system_cpu.contains(&format!(
+        "active-slot:\tpid={} tid={}",
+        init.raw(),
+        init_tid.raw()
+    )));
 }
 
 #[test]
@@ -208,6 +914,15 @@ fn runtime_renders_procfs_views_for_processes() {
     )
     .unwrap();
     assert!(caps.contains("asset"));
+
+    let cpu = String::from_utf8(
+        runtime
+            .read_procfs_path(&format!("/proc/{}/cpu", app.raw()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(cpu.contains(&format!("pid:\t{}", app.raw())));
+    assert!(cpu.contains("xsave-managed=false"));
 }
 
 #[test]
@@ -539,6 +1254,177 @@ fn runtime_exec_process_updates_image_cmdline_and_cloexec_state() {
 }
 
 #[test]
+fn runtime_exec_process_rejects_directories_then_executes_image_and_refreshes_procfs_views() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let init = runtime
+        .spawn_process("init", None, SchedulerClass::LatencyCritical)
+        .unwrap();
+    let app = runtime
+        .spawn_process("app", Some(init), SchedulerClass::Interactive)
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            app,
+            ObjectHandle::new(Handle::new(7_300), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "root",
+        )
+        .unwrap();
+    let bin = runtime
+        .grant_capability(
+            app,
+            ObjectHandle::new(Handle::new(7_301), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "bin",
+        )
+        .unwrap();
+    runtime
+        .create_vfs_node("/", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/bin", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/bin/tool", ObjectKind::File, bin)
+        .unwrap();
+
+    let denied = runtime.exec_process(app, "/bin", vec![String::from("bin")], vec![]);
+    assert!(matches!(
+        denied,
+        Err(RuntimeError::Vfs(VfsError::NotExecutable))
+    ));
+
+    let closed = runtime
+        .exec_process(
+            app,
+            "/bin/tool",
+            vec![String::from("tool"), String::from("--inspect")],
+            vec![String::from("LANG=C")],
+        )
+        .unwrap();
+    assert_eq!(closed.len(), 0);
+
+    let info = runtime.process_info(app).unwrap();
+    assert_eq!(info.name, "tool");
+    assert_eq!(info.image_path, "/bin/tool");
+    assert_eq!(info.environment_count, 1);
+
+    let status = String::from_utf8(
+        runtime
+            .read_procfs_path(&format!("/proc/{}/status", app.raw()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(status.contains("Name:\ttool"));
+    assert!(status.contains("Image:\t/bin/tool"));
+    assert!(status.contains(&format!("Pid:\t{}", app.raw())));
+
+    let cmdline = runtime
+        .read_procfs_path(&format!("/proc/{}/cmdline", app.raw()))
+        .unwrap();
+    assert_eq!(cmdline, b"tool\0--inspect\0");
+
+    let cwd = runtime
+        .read_procfs_path(&format!("/proc/{}/cwd", app.raw()))
+        .unwrap();
+    assert_eq!(cwd, b"/");
+
+    let environ = runtime
+        .read_procfs_path(&format!("/proc/{}/environ", app.raw()))
+        .unwrap();
+    assert_eq!(environ, b"LANG=C\0");
+
+    let exe = runtime
+        .read_procfs_path(&format!("/proc/{}/exe", app.raw()))
+        .unwrap();
+    assert_eq!(exe, b"/bin/tool");
+}
+
+#[test]
+fn runtime_exec_process_rejects_missing_path_then_executes_after_creation_and_refreshes_procfs_views()
+ {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let init = runtime
+        .spawn_process("init", None, SchedulerClass::LatencyCritical)
+        .unwrap();
+    let app = runtime
+        .spawn_process("app", Some(init), SchedulerClass::Interactive)
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            app,
+            ObjectHandle::new(Handle::new(7_320), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "root",
+        )
+        .unwrap();
+    let bin = runtime
+        .grant_capability(
+            app,
+            ObjectHandle::new(Handle::new(7_321), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "bin",
+        )
+        .unwrap();
+    runtime
+        .create_vfs_node("/", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/bin", ObjectKind::Directory, root)
+        .unwrap();
+
+    let missing = runtime.exec_process(app, "/bin/late", vec![String::from("late")], vec![]);
+    assert!(matches!(
+        missing,
+        Err(RuntimeError::Vfs(VfsError::NotFound))
+    ));
+
+    runtime
+        .create_vfs_node("/bin/late", ObjectKind::File, bin)
+        .unwrap();
+
+    let closed = runtime
+        .exec_process(
+            app,
+            "/bin/late",
+            vec![String::from("late"), String::from("--boot")],
+            vec![String::from("LANG=C"), String::from("MODE=recovery")],
+        )
+        .unwrap();
+    assert_eq!(closed.len(), 0);
+
+    let info = runtime.process_info(app).unwrap();
+    assert_eq!(info.name, "late");
+    assert_eq!(info.image_path, "/bin/late");
+    assert_eq!(info.environment_count, 2);
+
+    let status = String::from_utf8(
+        runtime
+            .read_procfs_path(&format!("/proc/{}/status", app.raw()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(status.contains("Name:\tlate"));
+    assert!(status.contains("Image:\t/bin/late"));
+    assert!(status.contains(&format!("Pid:\t{}", app.raw())));
+
+    let cmdline = runtime
+        .read_procfs_path(&format!("/proc/{}/cmdline", app.raw()))
+        .unwrap();
+    assert_eq!(cmdline, b"late\0--boot\0");
+
+    let environ = runtime
+        .read_procfs_path(&format!("/proc/{}/environ", app.raw()))
+        .unwrap();
+    assert_eq!(environ, b"LANG=C\0MODE=recovery\0");
+
+    let exe = runtime
+        .read_procfs_path(&format!("/proc/{}/exe", app.raw()))
+        .unwrap();
+    assert_eq!(exe, b"/bin/late");
+}
+
+#[test]
 fn runtime_prepares_user_launch_from_exec_image() {
     let mut runtime = KernelRuntime::host_runtime_default();
     let init = runtime
@@ -679,4 +1565,323 @@ fn runtime_exec_process_installs_standard_streams_and_accepts_seeded_input() {
     );
     assert!(runtime.inspect_io(app, Descriptor::new(1)).is_ok());
     assert!(runtime.inspect_io(app, Descriptor::new(2)).is_ok());
+}
+
+#[test]
+fn runtime_verified_core_reports_hard_kernel_invariants() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    runtime.apply_cpu_extended_state_handoff(CpuExtendedStateHandoff {
+        xsave_managed: true,
+        save_area_bytes: 4096,
+        xcr0_mask: 0xe7,
+        boot_probed: true,
+        boot_seed_marker: 0xfeed_cafe,
+    });
+    let init = runtime
+        .spawn_process("init", None, SchedulerClass::Interactive)
+        .unwrap();
+    let app = runtime
+        .spawn_process("app", Some(init), SchedulerClass::BestEffort)
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            app,
+            ObjectHandle::new(Handle::new(8_000), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "root",
+        )
+        .unwrap();
+    runtime
+        .create_vfs_node("/", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/bin", ObjectKind::Directory, root)
+        .unwrap();
+    let _ = runtime.tick().unwrap();
+
+    let report = runtime.verify_core();
+    assert!(report.is_verified(), "{report:#?}");
+    assert!(report.capability_model_verified);
+    assert!(report.vfs_invariants_verified);
+    assert!(report.scheduler_state_machine_verified);
+    assert!(report.cpu_extended_state_lifecycle_verified);
+    assert!(report.bus_integrity_verified);
+    assert!(report.violations.is_empty());
+}
+
+#[test]
+fn runtime_verified_core_reports_corrupted_kernel_invariants() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let init = runtime
+        .spawn_process("broken-init", None, SchedulerClass::Interactive)
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            init,
+            ObjectHandle::new(Handle::new(8_100), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "root",
+        )
+        .unwrap();
+    runtime
+        .create_vfs_node("/", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/bin", ObjectKind::Directory, root)
+        .unwrap();
+
+    let _dangling_cap = runtime
+        .capabilities
+        .grant(
+            &runtime.processes,
+            init,
+            ObjectHandle::new(Handle::new(8_101), 0),
+            CapabilityRights::READ,
+            "tmp",
+        )
+        .unwrap();
+    runtime.capabilities.revoke(root).unwrap();
+
+    let init_tid = runtime.processes.get(init).unwrap().main_thread().unwrap();
+    runtime
+        .processes
+        .set_state(init, ProcessState::Blocked)
+        .unwrap();
+    runtime
+        .processes
+        .threads
+        .get_mut(init_tid.handle())
+        .unwrap()
+        .set_cpu_extended_state(ThreadCpuExtendedStateProfile {
+            owned: true,
+            xsave_managed: true,
+            save_area_bytes: 128,
+            xcr0_mask: 0,
+            boot_probed: true,
+            boot_seed_marker: 0,
+            active_in_cpu: true,
+            save_count: 0,
+            restore_count: 0,
+            last_saved_tick: 0,
+            last_restored_tick: 0,
+            save_area_buffer_bytes: 0,
+            save_area_alignment_bytes: 0,
+            save_area_generation: 0,
+            last_save_marker: 0,
+        });
+    runtime.processes.objects.remove(init.handle()).unwrap();
+
+    let report = runtime.verify_core();
+    assert!(!report.is_verified());
+    assert!(
+        report
+            .violations
+            .iter()
+            .any(|entry| entry.family == VerifiedCoreFamily::CapabilityModel)
+    );
+    assert!(
+        report
+            .violations
+            .iter()
+            .any(|entry| entry.family == VerifiedCoreFamily::VfsInvariants)
+    );
+    assert!(
+        report
+            .violations
+            .iter()
+            .any(|entry| entry.family == VerifiedCoreFamily::SchedulerStateMachine)
+    );
+    assert!(
+        report
+            .violations
+            .iter()
+            .any(|entry| entry.family == VerifiedCoreFamily::CpuExtendedStateLifecycle)
+    );
+}
+
+#[test]
+fn runtime_verified_core_reports_bus_integrity_corruption() {
+    let mut runtime = KernelRuntime::host_runtime_default();
+    let owner = runtime
+        .spawn_process("bus-init", None, SchedulerClass::Interactive)
+        .unwrap();
+    let root = runtime
+        .grant_capability(
+            owner,
+            ObjectHandle::new(Handle::new(8_300), 0),
+            CapabilityRights::READ | CapabilityRights::WRITE | CapabilityRights::DUPLICATE,
+            "root",
+        )
+        .unwrap();
+    runtime
+        .create_vfs_node("/", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/ipc", ObjectKind::Directory, root)
+        .unwrap();
+    runtime
+        .create_vfs_node("/ipc/render", ObjectKind::Channel, root)
+        .unwrap();
+    let domain = runtime.create_domain(owner, None, "bus").unwrap();
+    let resource = runtime
+        .create_resource(owner, domain, ResourceKind::Channel, "render-bus")
+        .unwrap();
+    let peer = runtime.create_bus_peer(owner, domain, "renderer").unwrap();
+    let endpoint = runtime
+        .create_bus_channel_endpoint(domain, resource, "/ipc/render")
+        .unwrap();
+    runtime.attach_bus_peer(peer, endpoint).unwrap();
+    runtime
+        .bus_endpoints
+        .get_mut(endpoint)
+        .unwrap()
+        .attached_peers
+        .clear();
+
+    let report = runtime.verify_core();
+    assert!(!report.bus_integrity_verified);
+    assert!(report.violations.iter().any(|entry| {
+        entry.family == VerifiedCoreFamily::BusIntegrity
+            && entry.code == "bus-peer-attachment-not-reciprocated"
+    }));
+}
+
+#[test]
+fn runtime_verified_core_reports_scheduler_policy_state_corruption() {
+    let runtime = &mut KernelRuntime::host_runtime_default();
+    runtime
+        .scheduler
+        .inject_wait_ticks_for_test(SchedulerClass::Background, 3);
+    runtime
+        .scheduler
+        .inject_lag_debt_for_test(SchedulerClass::Interactive, 2);
+
+    let report = runtime.verify_core();
+    assert!(!report.scheduler_state_machine_verified);
+    assert!(report.violations.iter().any(|entry| {
+        entry.family == VerifiedCoreFamily::SchedulerStateMachine
+            && entry.code == "scheduler-empty-class-has-wait-ticks"
+    }));
+    assert!(report.violations.iter().any(|entry| {
+        entry.family == VerifiedCoreFamily::SchedulerStateMachine
+            && entry.code == "scheduler-empty-class-has-lag-debt"
+    }));
+}
+
+#[test]
+fn runtime_verified_core_reports_scheduler_service_accounting_corruption() {
+    let runtime = &mut KernelRuntime::host_runtime_default();
+    runtime
+        .scheduler
+        .inject_wait_ticks_for_test(SchedulerClass::Background, 1);
+    runtime
+        .scheduler
+        .inject_lag_debt_for_test(SchedulerClass::Background, 0);
+    runtime.scheduler.class_runtime_ticks_mut_for_test()[SchedulerClass::Interactive.index()] = 9;
+
+    let report = runtime.verify_core();
+    assert!(!report.scheduler_state_machine_verified);
+    assert!(report.violations.iter().any(|entry| {
+        entry.family == VerifiedCoreFamily::SchedulerStateMachine
+            && entry.code == "scheduler-runtime-without-dispatch"
+    }));
+    assert!(report.violations.iter().any(|entry| {
+        entry.family == VerifiedCoreFamily::SchedulerStateMachine
+            && entry.code == "scheduler-runtime-exceeds-dispatch-budget"
+    }));
+}
+
+#[test]
+fn runtime_verified_core_reports_scheduler_cpu_affinity_corruption() {
+    let runtime = &mut KernelRuntime::host_runtime_default();
+    let pid = runtime
+        .spawn_process("cpu-corrupt", None, SchedulerClass::BestEffort)
+        .unwrap();
+    let tid = runtime.processes.get(pid).unwrap().main_thread().unwrap();
+    runtime
+        .scheduler
+        .inject_thread_assignment_for_test(tid, 3, 0b01);
+
+    let report = runtime.verify_core();
+    assert!(!report.scheduler_state_machine_verified);
+    assert!(report.violations.iter().any(|entry| {
+        entry.family == VerifiedCoreFamily::SchedulerStateMachine
+            && entry.code == "scheduler-thread-assigned-cpu-invalid"
+    }));
+}
+
+#[test]
+fn runtime_set_process_affinity_rejects_empty_mask_and_recovers_with_valid_mask() {
+    let mut policy = RuntimePolicy::host_runtime_default();
+    policy.scheduler_logical_cpu_count = 2;
+    let runtime = &mut KernelRuntime::new(policy);
+    let pid = runtime
+        .spawn_process("cpu-affinity", None, SchedulerClass::BestEffort)
+        .unwrap();
+    let tid = runtime.processes.get(pid).unwrap().main_thread().unwrap();
+
+    assert!(matches!(
+        runtime.set_process_affinity(pid, 0),
+        Err(RuntimeError::Scheduler(SchedulerError::InvalidCpuAffinity))
+    ));
+
+    runtime.set_process_affinity(pid, 0b10).unwrap();
+    let (assigned_cpu, affinity_mask) = runtime.scheduler.thread_assignment(tid).unwrap();
+    assert_eq!(assigned_cpu, 1);
+    assert_eq!(affinity_mask, 0b10);
+
+    runtime.set_process_affinity(pid, 0b11).unwrap();
+    let (assigned_cpu, affinity_mask) = runtime.scheduler.thread_assignment(tid).unwrap();
+    assert_eq!(assigned_cpu, 1);
+    assert_eq!(affinity_mask, 0b11);
+}
+
+#[test]
+fn runtime_set_process_affinity_prefers_nearest_topology_cpu_when_load_is_equal() {
+    let mut policy = RuntimePolicy::host_runtime_default();
+    policy.apply_scheduler_cpu_topology(vec![
+        SchedulerCpuTopologyEntry {
+            apic_id: 10,
+            package_id: 0,
+            core_group: 0,
+            sibling_group: 0,
+            inferred: false,
+        },
+        SchedulerCpuTopologyEntry {
+            apic_id: 11,
+            package_id: 0,
+            core_group: 0,
+            sibling_group: 1,
+            inferred: false,
+        },
+        SchedulerCpuTopologyEntry {
+            apic_id: 12,
+            package_id: 0,
+            core_group: 1,
+            sibling_group: 0,
+            inferred: false,
+        },
+        SchedulerCpuTopologyEntry {
+            apic_id: 13,
+            package_id: 1,
+            core_group: 0,
+            sibling_group: 0,
+            inferred: false,
+        },
+    ]);
+    let runtime = &mut KernelRuntime::new(policy);
+    let pid = runtime
+        .spawn_process("cpu-topology-affinity", None, SchedulerClass::BestEffort)
+        .unwrap();
+    let tid = runtime.processes.get(pid).unwrap().main_thread().unwrap();
+
+    runtime.set_process_affinity(pid, 0b0001).unwrap();
+    let (assigned_cpu, affinity_mask) = runtime.scheduler.thread_assignment(tid).unwrap();
+    assert_eq!(assigned_cpu, 0);
+    assert_eq!(affinity_mask, 0b0001);
+
+    runtime.set_process_affinity(pid, 0b1110).unwrap();
+    let (assigned_cpu, affinity_mask) = runtime.scheduler.thread_assignment(tid).unwrap();
+    assert_eq!(assigned_cpu, 1);
+    assert_eq!(affinity_mask, 0b1110);
 }
