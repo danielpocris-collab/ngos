@@ -1,27 +1,27 @@
 # Next Gen OS
 
-`Next Gen OS` (`ngos`) este un proiect original de sistem de operare, cu kernel propriu, ABI propriu si arhitectura interna proprie.
+`Next Gen OS` (`ngos`) is an original operating system project with its own kernel, ABI, and internal architecture.
 
-Proiectul nu urmareste sa fie un derivat conceptual din Linux, Windows, Android sau alt sistem existent. Compatibilitatea externa este tratata ca strat separat, nu ca fundatie interna.
+The project is not intended to be a conceptual derivative of Linux, Windows, Android, or any other existing system. External compatibility is treated as a separate layer, never as the internal foundation.
 
-## Directie
+## Direction
 
-- kernel propriu si model intern propriu pentru procese, memorie, I/O, securitate si observabilitate
-- ABI nativ propriu
-- arhitectura orientata spre subsisteme semantice mici si fronturi verticale reale
-- tranzitie activa spre o baza de implementare complet proprietara
+- its own kernel and internal model for processes, memory, I/O, security, and observability
+- its own native ABI
+- an architecture oriented around small semantic subsystems and real vertical slices
+- an active transition toward a fully proprietary implementation base
 
-## Principii
+## Principles
 
 - `64-bit only`
-- subsisteme reale, nu mock-uri sau suprafete simbolice
-- compatibilitatea externa nu dicteaza arhitectura interna
-- designul intern este definit in termenii `ngos`
-- noile implementari trebuie scrise direct pentru `ngos`, nu portate mecanic din alte sisteme
+- real subsystems, not mocks or symbolic surfaces
+- external compatibility does not dictate internal architecture
+- internal design is defined in `ngos` terms
+- new implementations must be written directly for `ngos`, not mechanically ported from other systems
 
 ## Workspace
 
-Workspace-ul actual include fundatia principala a proiectului:
+The current workspace includes the main foundation of the project:
 
 - `kernel-core`
 - `platform-hal`
@@ -31,30 +31,30 @@ Workspace-ul actual include fundatia principala a proiectului:
 - `user-runtime`
 - `userland-native`
 
-## Rulare
+## Running
 
-Pentru a porni runtime-ul curent:
+To run the current runtime:
 
 ```bash
 cargo run -p ngos-host-runtime
 ```
 
-Pentru build complet:
+To build the entire workspace:
 
 ```bash
 cargo build --workspace
 ```
 
-Pentru testare:
+To run tests:
 
 ```bash
 cargo test --workspace
 ```
 
-## Licenta si Contributii
+## License and Contributions
 
-Acest repository este public pentru vizibilitate, evaluare si referinta. Termenii de utilizare sunt definiti in [LICENSE](LICENSE), iar termenii pentru contributii sunt definiti in [CONTRIBUTING.md](CONTRIBUTING.md).
+This repository is public for visibility, evaluation, and reference. Usage terms are defined in [LICENSE](LICENSE), and contribution terms are defined in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Status
 
-Din punct de vedere arhitectural, `ngos` este original. Din punct de vedere al originii complete a implementarii, proiectul este in tranzitie spre o baza complet proprietara.
+Architecturally, `ngos` is original. In terms of full implementation origin, the project is still transitioning toward a fully proprietary codebase.
