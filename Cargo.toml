@@ -6,6 +6,7 @@ members = [
     "gfx-translate",
     "host-runtime",
     "input-translate",
+    "kernel-contracts",
     "kernel-core",
     "ngos-core-util",
     "user-abi",
